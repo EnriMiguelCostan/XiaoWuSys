@@ -1,0 +1,26 @@
+# Dependency directories
+node_modules/
+
+# Environment variables (CRITICAL: Keeps your database password safe)
+.env
+.env.*
+
+# Local SQLite Offline Cache
+*.db
+*.sqlite
+local_cache.db
+local_cache.db-journal
+
+# User Uploads
+uploads/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS metadata
+.DS_Store
+Thumbs.db
