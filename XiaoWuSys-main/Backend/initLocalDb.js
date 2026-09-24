@@ -32,8 +32,18 @@ db.serialize(() => {
         last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  
+  // 2. Users
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      user_id VARCHAR(50) PRIMARY KEY,
+      username VARCHAR(100) UNIQUE NOT NULL,
+      password_hash VARCHAR(255) NOT NULL,
+      role VARCHAR(50) NOT NULL
+    )
+  `);
 
-  // 2. Customers
+  // 3. Customers
   db.run(`
     CREATE TABLE IF NOT EXISTS customers (
         customer_id TEXT PRIMARY KEY,
@@ -45,7 +55,7 @@ db.serialize(() => {
     )
   `);
 
-  // 3. Order Profiles
+  // 4. Order Profiles
   db.run(`
     CREATE TABLE IF NOT EXISTS order_profiles (
         order_id TEXT PRIMARY KEY,
@@ -60,7 +70,7 @@ db.serialize(() => {
     )
   `);
 
-  // 4. Order Items
+  // 5. Order Items
   db.run(`
     CREATE TABLE IF NOT EXISTS order_items (
         line_item_id TEXT PRIMARY KEY,
@@ -75,7 +85,7 @@ db.serialize(() => {
     )
   `);
 
-  // 5. Payments
+  // 6. Payments
   db.run(`
     CREATE TABLE IF NOT EXISTS payments (
         payment_id TEXT PRIMARY KEY,
@@ -88,7 +98,7 @@ db.serialize(() => {
     )
   `);
 
-  // 6. Material Loss
+  // 7. Material Loss
   db.run(`
     CREATE TABLE IF NOT EXISTS material_loss (
         loss_id TEXT PRIMARY KEY,

@@ -86,7 +86,8 @@ app.use((req, res, next) => {
 // You and Enzo will build these out in separate files inside a /routes folder
 // app.use('/api/auth', require('./routes/auth'));
 app.use('/api/orders', require('./routes/orders'));
-// app.use('/api/inventory', require('./routes/inventory'));
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/inventory', require('./routes/inventory'));
 // app.use('/api/waste', require('./routes/waste'));
 // app.use('/api/financials', require('./routes/financials'));
 
