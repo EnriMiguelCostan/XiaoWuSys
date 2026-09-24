@@ -4,16 +4,15 @@ import { Package, PlusCircle, TrendingUp, LogOut,} from 'lucide-react';
 const API_BASE = 'http://localhost:5000/api';
 
 export default function App() {
-  const [token, setToken] = useState(localStorage.getItem('thrift_token') || '');
-  const [user, setUser] = useState(JSON.parse(localStorage.getItem('thrift_user')) || null);
+  const [token, setToken] = useState(localStorage.getItem('xiaomei_token') || '');
+  const [user, setUser] = useState(JSON.parse(localStorage.getItem('xiaomei_user')) || null);
   const [activeTab, setActiveTab] = useState('catalog');
   const [items, setItems] = useState([]);
 
-  // Auth Form State
+  // Auth Form State for XiaoMei Printing
   const [isSignup, setIsSignup] = useState(false);
-  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState(''); 
   const [password, setPassword] = useState('');
-  const [storeName, setStoreName] = useState('');
 
   // Add Item State
   const [title, setTitle] = useState('');
@@ -40,35 +39,55 @@ export default function App() {
     }
   }
 
-  
-
   const handleAuth = async (e) => {
     e.preventDefault();
-    const endpoint = isSignup ? '/auth/signup' : '/auth/login';
-    const payload = isSignup ? { email, password, storeName } : { email, password };
+    const endpoint = isSignup ? '/auth/register' : '/auth/login';
+    
+    // The payload perfectly matches the secure Express backend!
+    const payload = isSignup 
+      ? { username, password, role: 'Production' } 
+      : { username, password };
 
-    const res = await fetch(`${API_BASE}${endpoint}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    const data = await res.json();
+    try {
+      const res = await fetch(`${API_BASE}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
 
-    if (res.ok) {
-      setToken(data.token);
-      setUser(data.user);
-      localStorage.setItem('thrift_token', data.token);
-      localStorage.setItem('thrift_user', JSON.stringify(data.user));
-    } else {
-      alert(data.error || 'Authentication failed');
+      if (res.ok) {
+        // Handle both login (returns token) and register (returns user)
+        const activeToken = data.token || '';
+        const activeUser = data.user || { username, role: data.role };
+
+        if (!isSignup) {
+          setToken(activeToken);
+          localStorage.setItem('xiaomei_token', activeToken);
+        }
+        
+        setUser(activeUser);
+        localStorage.setItem('xiaomei_user', JSON.stringify(activeUser));
+        
+        if (isSignup) {
+          alert('Registration successful! You can now log in.');
+          setIsSignup(false);
+          setPassword('');
+        }
+      } else {
+        alert(data.error || 'Authentication failed');
+      }
+    } catch (err) {
+      console.error('Server connection error:', err);
+      alert('Failed to connect to the backend.');
     }
   };
 
   const handleLogout = () => {
     setToken('');
     setUser(null);
-    localStorage.removeItem('thrift_token');
-    localStorage.removeItem('thrift_user');
+    localStorage.removeItem('xiaomei_token');
+    localStorage.removeItem('xiaomei_user');
   };
 
   const handleAddItem = async (e) => {
@@ -113,23 +132,13 @@ export default function App() {
     return (
       <div style={styles.authContainer}>
         <div style={styles.authCard}>
-          <h2>{isSignup ? 'Create Seller Account' : 'Seller Login'}</h2>
+          <h2>{isSignup ? 'Create User Account' : 'User Login'}</h2>
           <form onSubmit={handleAuth} style={{ marginTop: '1rem' }}>
-            {isSignup && (
-              <input 
-                type="text" 
-                placeholder="Store Name" 
-                value={storeName} 
-                onChange={e => setStoreName(e.target.value)} 
-                style={styles.input} 
-                required 
-              />
-            )}
             <input 
-              type="email" 
-              placeholder="Email" 
-              value={email} 
-              onChange={e => setEmail(e.target.value)} 
+              type="text" 
+              placeholder="Username" 
+              value={username} 
+              onChange={e => setUsername(e.target.value)} 
               style={styles.input} 
               required 
             />
@@ -156,7 +165,7 @@ export default function App() {
   return (
     <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', fontFamily: 'sans-serif' }}>
       <header style={styles.header}>
-        <h1 style={{ fontSize: '1.25rem', fontWeight: 'bold' }}>{user?.storeName || 'Thrift Hub'}</h1>
+        <h1 style={{ fontSize: '1.25rem', fontWeight: 'bold', color:'#08060d' }}>{user?.userName || 'Dashboard'}</h1>
         <nav style={styles.nav}>
           <button style={activeTab === 'catalog' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('catalog')}>
             <Package size={18} /> Catalog
