@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Package, PlusCircle, TrendingUp, LogOut,} from 'lucide-react';
+import { Package, PlusCircle, TrendingUp, LogOut } from 'lucide-react';
 
 const API_BASE = 'http://localhost:5000/api';
 
@@ -8,45 +8,45 @@ export default function App() {
   const [user, setUser] = useState(JSON.parse(localStorage.getItem('xiaomei_user')) || null);
   const [activeTab, setActiveTab] = useState('catalog');
   const [items, setItems] = useState([]);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   // Auth Form State for XiaoMei Printing
   const [isSignup, setIsSignup] = useState(false);
-  const [username, setUsername] = useState(''); 
+  const [email, setEmail] = useState('');      // Used for Login / Register authentication
+  const [username, setUsername] = useState('');   // Display name for the Dashboard & Orders
   const [password, setPassword] = useState('');
 
-  // Add Item State
-  const [title, setTitle] = useState('');
-  const [desc, setDesc] = useState('');
-  const [cost, setCost] = useState('');
-  const [price, setPrice] = useState('');
-  const [imageFile, setImageFile] = useState(null);
+  // Create Order Profile State
+  const [customerId, setCustomerId] = useState('');
+  const [productionDeadline, setProductionDeadline] = useState('');
+  const [orderStatusMsg, setOrderStatusMsg] = useState('');
 
   useEffect(() => {
+    async function fetchItems() {
+      try {
+        const res = await fetch(`${API_BASE}/items`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await res.json();
+        if (res.ok) setItems(Array.isArray(data) ? data : []);
+      } catch (err) {
+        console.error('Failed to fetch items', err);
+      }
+    }
+
     if (token) {
       fetchItems();
     }
-  }, [token]);
-
-  async function fetchItems() {
-    try {
-      const res = await fetch(`${API_BASE}/items`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const data = await res.json();
-      if (res.ok) setItems(data);
-    } catch (err) {
-      console.error('Failed to fetch items', err);
-    }
-  }
+  }, [token, refreshKey]);
 
   const handleAuth = async (e) => {
     e.preventDefault();
     const endpoint = isSignup ? '/auth/register' : '/auth/login';
     
-    // The payload perfectly matches the secure Express backend!
+    // Pass 'email' into 'username' if backend expects username for auth lookup
     const payload = isSignup 
-      ? { username, password, role: 'Production' } 
-      : { username, password };
+      ? { email, username: email, displayName: username, password, role: 'Production' } 
+      : { username: email, password }; 
 
     try {
       const res = await fetch(`${API_BASE}${endpoint}`, {
@@ -57,9 +57,8 @@ export default function App() {
       const data = await res.json();
 
       if (res.ok) {
-        // Handle both login (returns token) and register (returns user)
         const activeToken = data.token || '';
-        const activeUser = data.user || { username, role: data.role };
+        const activeUser = data.user || { username: username || data.username || email, email, role: data.role };
 
         if (!isSignup) {
           setToken(activeToken);
@@ -90,25 +89,35 @@ export default function App() {
     localStorage.removeItem('xiaomei_user');
   };
 
-  const handleAddItem = async (e) => {
+  const handleCreateOrder = async (e) => {
     e.preventDefault();
-    const formData = new FormData();
-    formData.append('title', title);
-    formData.append('description', desc);
-    formData.append('costPrice', cost);
-    formData.append('sellingPrice', price);
-    if (imageFile) formData.append('image', imageFile);
+    setOrderStatusMsg('');
 
-    const res = await fetch(`${API_BASE}/items`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: formData
-    });
+    try {
+      const res = await fetch(`${API_BASE}/orders`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}` 
+        },
+        body: JSON.stringify({
+          customer_id: customerId,
+          production_deadline: productionDeadline
+        })
+      });
 
-    if (res.ok) {
-      setTitle(''); setDesc(''); setCost(''); setPrice(''); setImageFile(null);
-      fetchItems();
-      setActiveTab('catalog');
+      const data = await res.json();
+
+      if (res.ok) {
+        setOrderStatusMsg(`Order Created Successfully! ID: ${data.order_id || data.id || ''}`);
+        setCustomerId('');
+        setProductionDeadline('');
+      } else {
+        setOrderStatusMsg(`Error: ${data.error || 'Failed to create order.'}`);
+      }
+    } catch (err) {
+      console.error('Error creating order:', err);
+      setOrderStatusMsg('Error: Network connection failure.');
     }
   };
 
@@ -117,15 +126,15 @@ export default function App() {
       method: 'PATCH',
       headers: { Authorization: `Bearer ${token}` }
     });
-    if (res.ok) fetchItems();
+    if (res.ok) setRefreshKey(prev => prev + 1);
   };
 
-  // Calculations
-  const totalCost = items.reduce((acc, item) => acc + item.costPrice, 0);
-  const totalRevenue = items.reduce((acc, item) => acc + item.sellingPrice, 0);
+  // Safe Calculations with fallbacks for undefined properties
+  const totalCost = items.reduce((acc, item) => acc + (item.costPrice || 0), 0);
+  const totalRevenue = items.reduce((acc, item) => acc + (item.sellingPrice || 0), 0);
   const realizedProfit = items
     .filter(item => item.status === 'sold')
-    .reduce((acc, item) => acc + (item.sellingPrice - item.costPrice), 0);
+    .reduce((acc, item) => acc + ((item.sellingPrice || 0) - (item.costPrice || 0)), 0);
   const margin = totalRevenue > 0 ? (((totalRevenue - totalCost) / totalRevenue) * 100).toFixed(1) : 0;
 
   if (!token) {
@@ -134,14 +143,27 @@ export default function App() {
         <div style={styles.authCard}>
           <h2>{isSignup ? 'Create User Account' : 'User Login'}</h2>
           <form onSubmit={handleAuth} style={{ marginTop: '1rem' }}>
+            
             <input 
-              type="text" 
-              placeholder="Username" 
-              value={username} 
-              onChange={e => setUsername(e.target.value)} 
+              type="email" 
+              placeholder="Gmail / Email Address" 
+              value={email} 
+              onChange={e => setEmail(e.target.value)} 
               style={styles.input} 
               required 
             />
+
+            {isSignup && (
+              <input 
+                type="text" 
+                placeholder="Display Username" 
+                value={username} 
+                onChange={e => setUsername(e.target.value)} 
+                style={styles.input} 
+                required 
+              />
+            )}
+
             <input 
               type="password" 
               placeholder="Password" 
@@ -150,11 +172,21 @@ export default function App() {
               style={styles.input} 
               required 
             />
+
             <button type="submit" style={styles.btnPrimary}>
               {isSignup ? 'Sign Up' : 'Log In'}
             </button>
           </form>
-          <p onClick={() => setIsSignup(!isSignup)} style={styles.switchAuth}>
+
+          <p 
+            onClick={() => {
+              setIsSignup(!isSignup);
+              setEmail('');
+              setPassword('');
+              setUsername('');
+            }} 
+            style={styles.switchAuth}
+          >
             {isSignup ? 'Already have an account? Log in' : "Don't have an account? Sign up"}
           </p>
         </div>
@@ -165,13 +197,15 @@ export default function App() {
   return (
     <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', fontFamily: 'sans-serif' }}>
       <header style={styles.header}>
-        <h1 style={{ fontSize: '1.25rem', fontWeight: 'bold', color:'#08060d' }}>{user?.userName || 'Dashboard'}</h1>
+        <h1 style={{ fontSize: '1.45rem', fontWeight: 'bold', color: '#08060d', userSelect: 'none' }}>
+          Hello, {user?.username || 'Dashboard'}
+        </h1>
         <nav style={styles.nav}>
           <button style={activeTab === 'catalog' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('catalog')}>
             <Package size={18} /> Catalog
           </button>
           <button style={activeTab === 'add' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('add')}>
-            <PlusCircle size={18} /> Add Item
+            <PlusCircle size={18} /> Create Order
           </button>
           <button style={activeTab === 'metrics' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('metrics')}>
             <TrendingUp size={18} /> Analytics
@@ -183,7 +217,6 @@ export default function App() {
       </header>
 
       <main style={{ maxWidth: '1000px', margin: '2rem auto', padding: '0 1rem' }}>
-        {/* CATALOG VIEW */}
         {activeTab === 'catalog' && (
           <div style={styles.grid}>
             {items.map(item => (
@@ -196,8 +229,8 @@ export default function App() {
                   <h3 style={{ fontSize: '1.1rem' }}>{item.title}</h3>
                   <p style={{ color: '#64748b', fontSize: '0.875rem', margin: '0.5rem 0' }}>{item.description}</p>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.875rem' }}>
-                    <span>Cost: <strong>${item.costPrice.toFixed(2)}</strong></span>
-                    <span>Price: <strong>${item.sellingPrice.toFixed(2)}</strong></span>
+                    <span>Cost: <strong>${(item.costPrice || 0).toFixed(2)}</strong></span>
+                    <span>Price: <strong>${(item.sellingPrice || 0).toFixed(2)}</strong></span>
                   </div>
                   <button 
                     onClick={() => toggleSoldStatus(item.id)} 
@@ -211,22 +244,48 @@ export default function App() {
           </div>
         )}
 
-        {/* ADD ITEM VIEW */}
         {activeTab === 'add' && (
           <div style={styles.formCard}>
-            <h2>Add New Clothing Piece</h2>
-            <form onSubmit={handleAddItem} style={{ marginTop: '1rem' }}>
-              <input type="text" placeholder="Title" value={title} onChange={e => setTitle(e.target.value)} style={styles.input} required />
-              <textarea placeholder="Description & Sizing" value={desc} onChange={e => setDesc(e.target.value)} style={styles.input} required />
-              <input type="number" step="0.01" placeholder="Cost Price ($)" value={cost} onChange={e => setCost(e.target.value)} style={styles.input} required />
-              <input type="number" step="0.01" placeholder="Selling Price ($)" value={price} onChange={e => setPrice(e.target.value)} style={styles.input} required />
-              <input type="file" onChange={e => setImageFile(e.target.files[0])} accept="image/*" style={styles.input} required />
-              <button type="submit" style={styles.btnPrimary}>Upload Item</button>
+            <h2 style={{ textAlign: 'center', marginBottom: '1rem' }}>Create Order Profile</h2>
+            
+            {orderStatusMsg && (
+              <p style={{
+                padding: '0.75rem',
+                borderRadius: '0.375rem',
+                marginBottom: '1rem',
+                fontSize: '0.875rem',
+                backgroundColor: orderStatusMsg.startsWith('Error') ? '#fee2e2' : '#dcfce7',
+                color: orderStatusMsg.startsWith('Error') ? '#991b1b' : '#166534'
+              }}>
+                {orderStatusMsg}
+              </p>
+            )}
+
+            <form onSubmit={handleCreateOrder}>
+              <label style={styles.label}>Customer ID</label>
+              <input 
+                type="text" 
+                placeholder="Enter Customer ID" 
+                value={customerId} 
+                onChange={e => setCustomerId(e.target.value)} 
+                style={styles.input} 
+                required 
+              />
+
+              <label style={styles.label}>Production Deadline</label>
+              <input 
+                type="date" 
+                value={productionDeadline} 
+                onChange={e => setProductionDeadline(e.target.value)} 
+                style={styles.input} 
+                required 
+              />
+
+              <button type="submit" style={styles.btnPrimary}>Create Order Profile</button>
             </form>
           </div>
         )}
 
-        {/* METRICS VIEW */}
         {activeTab === 'metrics' && (
           <div style={styles.metricsGrid}>
             <div style={styles.metricCard}>
@@ -252,10 +311,10 @@ export default function App() {
   );
 }
 
-// INLINE STYLES FOR QUICK SETUP
 const styles = {
   authContainer: { minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#f8fafc' },
   authCard: { background: '#fff', padding: '2rem', borderRadius: '0.5rem', width: '100%', maxWidth: '400px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' },
+  label: { display: 'block', fontSize: '0.875rem', fontWeight: 'bold', marginBottom: '0.25rem', color: '#334155' },
   input: { width: '100%', padding: '0.75rem', marginBottom: '1rem', border: '1px solid #cbd5e1', borderRadius: '0.375rem', boxSizing: 'border-box' },
   btnPrimary: { width: '100%', padding: '0.75rem', background: '#4f46e5', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold' },
   switchAuth: { marginTop: '1rem', color: '#4f46e5', textAlign: 'center', cursor: 'pointer', fontSize: '0.875rem' },
