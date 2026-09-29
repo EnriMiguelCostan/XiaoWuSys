@@ -2,32 +2,82 @@ const express = require('express');
 const crypto = require('crypto'); // Built-in Node module for generating UUIDs
 const router = express.Router();
 const { verifyToken, requireRole } = require('../middleware/authMiddleware');
+const {
+  normalizeRequiredItems,
+  evaluateCapacity,
+  capacityFailureResponse
+} = require('../services/capacity');
 
 // Protect EVERY route in this file by telling the router to use the middleware first
 router.use(verifyToken);
 
+// Statuses staff can log when an order is halted for insufficient inventory (PB 10)
+const HALT_RESOLUTIONS = ['Delayed', 'Cancelled'];
+
 // ==========================================
-// CREATE ORDER PROFILE (Sprint 6 / PB 6)
+// CREATE ORDER PROFILE (Sprint 6 / PB 6, capacity-gated in Sprint 9 / PB 9 & PB 10)
+// Body: { customer_id, production_deadline, required_items: [{ inventory_id, quantity_needed }], resolution? }
+//  - No resolution: stock is strictly evaluated; shortages -> 409 and NO order is created.
+//  - resolution 'Delayed':   order is recorded as Delayed with the NEW production_deadline.
+//  - resolution 'Cancelled': order is recorded as Cancelled (permanent record of the lost sale).
 // ==========================================
 router.post('/', requireRole(['Admin', 'Production']), async (req, res) => {
-  const { customer_id, production_deadline } = req.body;
+  const { customer_id, production_deadline, required_items, resolution } = req.body || {};
 
   // 1.) Validate required fields
   if (!customer_id || !production_deadline) {
     return res.status(400).json({ error: 'Customer ID and Production Deadline are required.' });
   }
+  if (Number.isNaN(Date.parse(production_deadline))) {
+    return res.status(400).json({ error: 'Production Deadline must be a valid date.' });
+  }
+  if (resolution !== undefined && !HALT_RESOLUTIONS.includes(resolution)) {
+    return res.status(400).json({ error: `resolution must be one of: ${HALT_RESOLUTIONS.join(', ')}.` });
+  }
 
-  // 2.) Generate a universally unique ID to prevent sync collisions
+  let production_status = 'Pending';
+
+  if (resolution) {
+    // Staff has acknowledged the capacity alert; log the outcome instead of halting.
+    production_status = resolution;
+    if (required_items !== undefined) {
+      const normalized = normalizeRequiredItems(required_items);
+      if (normalized.error) return res.status(400).json({ error: normalized.error });
+    }
+  } else {
+    // 2.) Strict server-side capacity gate: impossible orders are halted here,
+    //     regardless of whether the client ran the pre-check.
+    const normalized = normalizeRequiredItems(required_items);
+    if (normalized.error) {
+      return res.status(400).json({ error: normalized.error });
+    }
+
+    let evaluation;
+    try {
+      evaluation = await evaluateCapacity(req, normalized.items);
+    } catch (checkError) {
+      console.error('❌ Capacity check failed on both databases:', checkError.message);
+      return res.status(500).json({ error: 'CRITICAL: Unable to verify inventory capacity. Order not created.' });
+    }
+
+    const failure = capacityFailureResponse(evaluation);
+    if (failure) {
+      console.warn(`⛔ Order halted (${failure.status}) for customer ${customer_id}: ${failure.body.error}`);
+      return res.status(failure.status).json(failure.body);
+    }
+  }
+
+  // 3.) Generate a universally unique ID to prevent sync collisions
   const order_id = crypto.randomUUID(); 
 
   try {
-    console.log(`📡 Attempting to save Order ${order_id} to Cloud...`);
+    console.log(`📡 Attempting to save Order ${order_id} (${production_status}) to Cloud...`);
 
-    // 3.) Attempt 1: Push to PostgreSQL Cloud
+    // 4.) Attempt 1: Push to PostgreSQL Cloud
     const newOrder = await req.pgPool.query(
-      `INSERT INTO order_profiles (order_id, customer_id, production_deadline) 
-       VALUES ($1, $2, $3) RETURNING *`,
-      [order_id, customer_id, production_deadline]
+      `INSERT INTO order_profiles (order_id, customer_id, production_deadline, production_status) 
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [order_id, customer_id, production_deadline, production_status]
     );
     
     console.log('✅ Order successfully saved to Cloud!');
@@ -38,12 +88,12 @@ router.post('/', requireRole(['Admin', 'Production']), async (req, res) => {
     console.log('🔄 Cloud unavailable. Falling back to Local SQLite Cache...');
     
     const sqliteQuery = `
-      INSERT INTO order_profiles (order_id, customer_id, production_deadline, sync_status) 
-      VALUES (?, ?, ?, 'pending_insert')
+      INSERT INTO order_profiles (order_id, customer_id, production_deadline, production_status, sync_status) 
+      VALUES (?, ?, ?, ?, 'pending_insert')
     `;
 
-    // 4.) Attempt 2: OFFLINE FALLBACK (Save locally as pending_insert)
-    req.localDb.run(sqliteQuery, [order_id, customer_id, production_deadline], function(err) {
+    // 5.) Attempt 2: OFFLINE FALLBACK (Save locally as pending_insert)
+    req.localDb.run(sqliteQuery, [order_id, customer_id, production_deadline, production_status], function(err) {
       if (err) {
         // If this hits, the hard drive is full or the database file is locked
         console.error('❌ Local Cache Error:', err.message);
@@ -55,7 +105,8 @@ router.post('/', requireRole(['Admin', 'Production']), async (req, res) => {
       return res.status(201).json({ 
         message: 'Saved offline. Will sync to cloud when connection is restored.', 
         order_id, 
-        status: 'Pending (Offline Mode)',
+        production_status,
+        status: `${production_status} (Offline Mode)`,
         sync_status: 'pending_insert'
       });
     });

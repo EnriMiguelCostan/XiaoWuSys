@@ -1,7 +1,17 @@
 import { useState, useEffect } from 'react';
-import { Package, PlusCircle, TrendingUp, LogOut } from 'lucide-react';
+import { Package, PlusCircle, TrendingUp, LogOut, TriangleAlert, Clock, XCircle, Trash2, Plus, X } from 'lucide-react';
 
 const API_BASE = 'http://localhost:5000/api';
+
+const emptyOrderLine = () => ({ inventory_id: '', quantity_needed: '' });
+
+// 'YYYY-MM-DD' for the day after the given date string (used as the min for a delayed deadline)
+const dayAfter = (dateStr) => {
+  const base = dateStr ? new Date(`${dateStr}T00:00:00`) : new Date();
+  base.setDate(base.getDate() + 1);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${base.getFullYear()}-${pad(base.getMonth() + 1)}-${pad(base.getDate())}`;
+};
 
 export default function App() {
   const [token, setToken] = useState(localStorage.getItem('xiaomei_token') || '');
@@ -21,6 +31,15 @@ export default function App() {
   const [productionDeadline, setProductionDeadline] = useState('');
   const [orderStatusMsg, setOrderStatusMsg] = useState('');
 
+  // Sprint 9: Order materials + Capacity Alert (PB 9 & PB 10)
+  const [inventory, setInventory] = useState([]);
+  const [orderLines, setOrderLines] = useState([emptyOrderLine()]);
+  const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
+  const [capacityAlert, setCapacityAlert] = useState(null); // { message, shortages, total_shortfall, pendingOrder }
+  const [alertMode, setAlertMode] = useState('choose');      // 'choose' | 'delay'
+  const [delayedDeadline, setDelayedDeadline] = useState('');
+  const [alertError, setAlertError] = useState('');
+
   useEffect(() => {
     async function fetchItems() {
       try {
@@ -38,6 +57,25 @@ export default function App() {
       fetchItems();
     }
   }, [token, refreshKey]);
+
+  // Load inventory for the Create Order item picker
+  useEffect(() => {
+    async function fetchInventory() {
+      try {
+        const res = await fetch(`${API_BASE}/inventory`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await res.json();
+        if (res.ok) setInventory(Array.isArray(data.items) ? data.items : []);
+      } catch (err) {
+        console.error('Failed to fetch inventory', err);
+      }
+    }
+
+    if (token && activeTab === 'add') {
+      fetchInventory();
+    }
+  }, [token, activeTab]);
 
   const handleAuth = async (e) => {
     e.preventDefault();
@@ -89,35 +127,111 @@ export default function App() {
     localStorage.removeItem('xiaomei_user');
   };
 
+  const postOrder = async (payload) => {
+    const res = await fetch(`${API_BASE}/orders`, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}` 
+      },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json().catch(() => ({}));
+    return { res, data };
+  };
+
+  const resetOrderForm = () => {
+    setCustomerId('');
+    setProductionDeadline('');
+    setOrderLines([emptyOrderLine()]);
+  };
+
+  const closeCapacityAlert = () => {
+    setCapacityAlert(null);
+    setAlertMode('choose');
+    setDelayedDeadline('');
+    setAlertError('');
+  };
+
+  const updateOrderLine = (index, field, value) => {
+    setOrderLines(lines => lines.map((line, i) => (i === index ? { ...line, [field]: value } : line)));
+  };
+
   const handleCreateOrder = async (e) => {
     e.preventDefault();
     setOrderStatusMsg('');
 
-    try {
-      const res = await fetch(`${API_BASE}/orders`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}` 
-        },
-        body: JSON.stringify({
-          customer_id: customerId,
-          production_deadline: productionDeadline
-        })
-      });
+    const required_items = orderLines.map(line => ({
+      inventory_id: line.inventory_id,
+      quantity_needed: Number(line.quantity_needed)
+    }));
+    const pendingOrder = {
+      customer_id: customerId,
+      production_deadline: productionDeadline,
+      required_items
+    };
 
-      const data = await res.json();
+    setIsSubmittingOrder(true);
+    try {
+      const { res, data } = await postOrder(pendingOrder);
 
       if (res.ok) {
         setOrderStatusMsg(`Order Created Successfully! ID: ${data.order_id || data.id || ''}`);
-        setCustomerId('');
-        setProductionDeadline('');
+        resetOrderForm();
+      } else if (res.status === 409) {
+        // PB 9 halt caught -> PB 10 warning modal
+        setCapacityAlert({
+          message: data.message,
+          shortages: data.shortages || [],
+          total_shortfall: data.total_shortfall || 0,
+          pendingOrder
+        });
       } else {
-        setOrderStatusMsg(`Error: ${data.error || 'Failed to create order.'}`);
+        const missing = data.missing_inventory_ids ? ` (${data.missing_inventory_ids.join(', ')})` : '';
+        setOrderStatusMsg(`Error: ${data.message || data.error || 'Failed to create order.'}${missing}`);
       }
     } catch (err) {
       console.error('Error creating order:', err);
       setOrderStatusMsg('Error: Network connection failure.');
+    } finally {
+      setIsSubmittingOrder(false);
+    }
+  };
+
+  // PB 10: log the staff member's resolution for a halted order
+  const handleResolveHaltedOrder = async (resolution) => {
+    if (!capacityAlert) return;
+    setAlertError('');
+
+    if (resolution === 'Delayed' && !delayedDeadline) {
+      setAlertError('Please choose a new production deadline.');
+      return;
+    }
+
+    const { pendingOrder } = capacityAlert;
+    const production_deadline = resolution === 'Delayed' ? delayedDeadline : pendingOrder.production_deadline;
+
+    setIsSubmittingOrder(true);
+    try {
+      const { res, data } = await postOrder({ ...pendingOrder, production_deadline, resolution });
+
+      if (res.ok) {
+        const id = data.order_id || data.id || '';
+        setOrderStatusMsg(
+          resolution === 'Delayed'
+            ? `Notice: Order ${id} logged as DELAYED. New deadline: ${production_deadline}.`
+            : `Notice: Order ${id} logged as CANCELLED (lost sale recorded).`
+        );
+        resetOrderForm();
+        closeCapacityAlert();
+      } else {
+        setAlertError(data.error || 'Failed to log resolution.');
+      }
+    } catch (err) {
+      console.error('Error logging resolution:', err);
+      setAlertError('Network connection failure.');
+    } finally {
+      setIsSubmittingOrder(false);
     }
   };
 
@@ -254,8 +368,8 @@ export default function App() {
                 borderRadius: '0.375rem',
                 marginBottom: '1rem',
                 fontSize: '0.875rem',
-                backgroundColor: orderStatusMsg.startsWith('Error') ? '#fee2e2' : '#dcfce7',
-                color: orderStatusMsg.startsWith('Error') ? '#991b1b' : '#166534'
+                backgroundColor: orderStatusMsg.startsWith('Error') ? '#fee2e2' : orderStatusMsg.startsWith('Notice') ? '#fef3c7' : '#dcfce7',
+                color: orderStatusMsg.startsWith('Error') ? '#991b1b' : orderStatusMsg.startsWith('Notice') ? '#92400e' : '#166534'
               }}>
                 {orderStatusMsg}
               </p>
@@ -281,8 +395,158 @@ export default function App() {
                 required 
               />
 
-              <button type="submit" style={styles.btnPrimary}>Create Order Profile</button>
+              <label style={styles.label}>Required Materials</label>
+              {inventory.length === 0 && (
+                <p style={styles.hint}>No inventory items found. Add inventory before creating orders.</p>
+              )}
+              {orderLines.map((line, index) => (
+                <div key={index} style={styles.lineRow}>
+                  <select
+                    value={line.inventory_id}
+                    onChange={e => updateOrderLine(index, 'inventory_id', e.target.value)}
+                    style={{ ...styles.input, flex: 2, marginBottom: 0 }}
+                    aria-label={`Material ${index + 1}`}
+                    required
+                  >
+                    <option value="">Select material…</option>
+                    {inventory.map(inv => (
+                      <option key={inv.inventory_id} value={inv.inventory_id}>
+                        {inv.item_name} ({inv.quantity_available_net} available)
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    placeholder="Qty"
+                    value={line.quantity_needed}
+                    onChange={e => updateOrderLine(index, 'quantity_needed', e.target.value)}
+                    style={{ ...styles.input, flex: 1, marginBottom: 0 }}
+                    aria-label={`Quantity ${index + 1}`}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setOrderLines(lines => lines.filter((_, i) => i !== index))}
+                    style={styles.iconBtn}
+                    disabled={orderLines.length === 1}
+                    aria-label={`Remove material ${index + 1}`}
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={() => setOrderLines(lines => [...lines, emptyOrderLine()])}
+                style={styles.btnLink}
+              >
+                <Plus size={16} /> Add Material
+              </button>
+
+              <button type="submit" style={styles.btnPrimary} disabled={isSubmittingOrder}>
+                {isSubmittingOrder ? 'Checking Inventory…' : 'Create Order Profile'}
+              </button>
             </form>
+          </div>
+        )}
+
+        {capacityAlert && (
+          <div style={styles.modalOverlay}>
+            <div role="dialog" aria-modal="true" aria-labelledby="capacity-alert-title" style={styles.modalCard}>
+              <button type="button" onClick={closeCapacityAlert} style={styles.modalClose} aria-label="Back to order form">
+                <X size={18} />
+              </button>
+
+              <div style={styles.modalHeader}>
+                <TriangleAlert size={28} color="#b45309" />
+                <h2 id="capacity-alert-title" style={{ fontSize: '1.2rem', margin: 0, color: '#92400e' }}>
+                  Order Exceeds Maximum Inventory
+                </h2>
+              </div>
+              <p style={{ fontSize: '0.875rem', color: '#334155', margin: '0.75rem 0' }}>
+                {capacityAlert.message || 'This order cannot be approved with current stock.'} Please log how this order will be handled.
+              </p>
+
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>Material</th>
+                    <th style={styles.thNum}>Requested</th>
+                    <th style={styles.thNum}>Available</th>
+                    <th style={styles.thNum}>Shortfall</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {capacityAlert.shortages.map(s => (
+                    <tr key={s.inventory_id}>
+                      <td style={styles.td}>{s.item_name}</td>
+                      <td style={styles.tdNum}>{s.requested}</td>
+                      <td style={styles.tdNum}>{s.available}</td>
+                      <td style={{ ...styles.tdNum, color: '#991b1b', fontWeight: 'bold' }}>-{s.shortfall}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {alertError && (
+                <p style={{ padding: '0.5rem', borderRadius: '0.375rem', backgroundColor: '#fee2e2', color: '#991b1b', fontSize: '0.875rem' }}>
+                  {alertError}
+                </p>
+              )}
+
+              {alertMode === 'choose' ? (
+                <div style={styles.modalActions}>
+                  <button
+                    type="button"
+                    onClick={() => { setAlertError(''); setAlertMode('delay'); }}
+                    style={styles.btnWarning}
+                    disabled={isSubmittingOrder}
+                  >
+                    <Clock size={16} /> Delay Order
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleResolveHaltedOrder('Cancelled')}
+                    style={styles.btnDanger}
+                    disabled={isSubmittingOrder}
+                  >
+                    <XCircle size={16} /> Cancel Order
+                  </button>
+                </div>
+              ) : (
+                <div>
+                  <label style={styles.label} htmlFor="delayed-deadline">New Production Deadline</label>
+                  <input
+                    id="delayed-deadline"
+                    type="date"
+                    min={dayAfter(capacityAlert.pendingOrder.production_deadline)}
+                    value={delayedDeadline}
+                    onChange={e => setDelayedDeadline(e.target.value)}
+                    style={styles.input}
+                  />
+                  <div style={styles.modalActions}>
+                    <button
+                      type="button"
+                      onClick={() => { setAlertError(''); setAlertMode('choose'); }}
+                      style={{ ...styles.btnSecondary, marginTop: 0, width: 'auto', flex: 1 }}
+                      disabled={isSubmittingOrder}
+                    >
+                      Back
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleResolveHaltedOrder('Delayed')}
+                      style={styles.btnWarning}
+                      disabled={isSubmittingOrder}
+                    >
+                      <Clock size={16} /> {isSubmittingOrder ? 'Saving…' : 'Confirm Delay'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -331,5 +595,23 @@ const styles = {
   btnSecondary: { width: '100%', padding: '0.5rem', marginTop: '1rem', background: '#94a3b8', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer' },
   formCard: { background: '#fff', padding: '2rem', borderRadius: '0.5rem', maxWidth: '500px', margin: '0 auto', border: '1px solid #e2e8f0' },
   metricsGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' },
-  metricCard: { background: '#fff', padding: '1.5rem', borderRadius: '0.5rem', border: '1px solid #e2e8f0', textAlign: 'center' }
+  metricCard: { background: '#fff', padding: '1.5rem', borderRadius: '0.5rem', border: '1px solid #e2e8f0', textAlign: 'center' },
+
+  // Sprint 9: Order materials + Capacity Alert modal
+  hint: { fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' },
+  lineRow: { display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem' },
+  iconBtn: { padding: '0.6rem', background: 'none', border: '1px solid #cbd5e1', borderRadius: '0.375rem', cursor: 'pointer', color: '#64748b' },
+  btnLink: { display: 'flex', alignItems: 'center', gap: '0.25rem', background: 'none', border: 'none', color: '#4f46e5', cursor: 'pointer', fontSize: '0.875rem', padding: '0.25rem 0', marginBottom: '1rem' },
+  modalOverlay: { position: 'fixed', inset: 0, background: 'rgba(15, 23, 42, 0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem', zIndex: 50 },
+  modalCard: { position: 'relative', background: '#fff', padding: '1.5rem', borderRadius: '0.5rem', width: '100%', maxWidth: '520px', borderTop: '4px solid #f59e0b', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.25)' },
+  modalClose: { position: 'absolute', top: '0.75rem', right: '0.75rem', background: 'none', border: 'none', cursor: 'pointer', color: '#64748b' },
+  modalHeader: { display: 'flex', alignItems: 'center', gap: '0.5rem' },
+  modalActions: { display: 'flex', gap: '0.5rem', marginTop: '1rem' },
+  table: { width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem', marginBottom: '0.75rem' },
+  th: { textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e2e8f0', color: '#334155' },
+  thNum: { textAlign: 'right', padding: '0.5rem', borderBottom: '1px solid #e2e8f0', color: '#334155' },
+  td: { padding: '0.5rem', borderBottom: '1px solid #f1f5f9' },
+  tdNum: { textAlign: 'right', padding: '0.5rem', borderBottom: '1px solid #f1f5f9' },
+  btnWarning: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.75rem', background: '#f59e0b', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold' },
+  btnDanger: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.75rem', background: '#ef4444', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold' }
 };
