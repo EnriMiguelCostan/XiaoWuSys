@@ -2,8 +2,43 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { verifyToken, requireRole } = require('../middleware/authMiddleware');
+const {
+  computeAvailable,
+  normalizeRequiredItems,
+  evaluateCapacity,
+  capacityFailureResponse
+} = require('../services/capacity');
 
 router.use(verifyToken);
+
+// ==========================================
+// 0. LIST INVENTORY ITEMS (used by the Create Order item picker)
+// ==========================================
+router.get('/', requireRole(['Admin', 'Production', 'Staff']), async (req, res) => {
+  const withAvailability = (rows) =>
+    rows.map((row) => ({ ...row, quantity_available_net: computeAvailable(row) }));
+
+  try {
+    const result = await req.pgPool.query(
+      `SELECT inventory_id, item_name, item_category, quantity_available, quantity_reserved, minimum_threshold, unit_cost
+       FROM inventory_items ORDER BY item_name`
+    );
+    return res.status(200).json({ source: 'cloud', items: withAvailability(result.rows) });
+  } catch (onlineError) {
+    console.error('Cloud DB unreachable. Listing inventory from SQLite:', onlineError.message);
+    req.localDb.all(
+      `SELECT inventory_id, item_name, item_category, quantity_available, quantity_reserved, minimum_threshold, unit_cost
+       FROM inventory_items ORDER BY item_name`,
+      [],
+      (offlineError, rows) => {
+        if (offlineError) {
+          return res.status(500).json({ error: 'Critical Failure: Both databases unreachable.' });
+        }
+        return res.status(200).json({ source: 'local', items: withAvailability(rows) });
+      }
+    );
+  }
+});
 
 // ==========================================
 // 1. ADD NEW INVENTORY ITEM
@@ -101,90 +136,36 @@ router.post('/:inventory_id/loss', requireRole(['Admin', 'Production']), async (
 });
 
 // ==========================================
-// 3. INVENTORY CAPACITY PRE-CHECK (PB 9 & PB 10)
+// 3. INVENTORY CAPACITY PRE-CHECK (PB 9)
+// Body: { required_items: [{ inventory_id, quantity_needed }] }
+// 200 -> can fulfill | 409 -> halted (shortages) | 404 -> unknown item | 400 -> bad payload
 // ==========================================
-router.post('/check-capacity', requireRole(['Admin', 'Staff']), async (req, res) => {
-  // Expects an array of objects: [{ inventory_id: "...", quantity_needed: 50 }]
-  const { required_items } = req.body; 
+router.post('/check-capacity', requireRole(['Admin', 'Production', 'Staff']), async (req, res) => {
+  const { required_items } = req.body || {};
 
-  if (!required_items || !Array.isArray(required_items) || required_items.length === 0) {
-    return res.status(400).json({ error: 'Please provide an array of required_items.' });
+  const normalized = normalizeRequiredItems(required_items);
+  if (normalized.error) {
+    return res.status(400).json({ error: normalized.error });
   }
 
+  let evaluation;
   try {
-    const shortages = [];
-    
-    // 1. ATTEMPT ONLINE: Check Neon PostgreSQL DB
-    for (const item of required_items) {
-      const result = await req.pgPool.query(
-        'SELECT item_name, quantity_available FROM inventory_items WHERE inventory_id = $1',
-        [item.inventory_id]
-      );
-
-      if (result.rows.length > 0) {
-        const stock = result.rows[0].quantity_available;
-        // Evaluate incoming order quantities against current stock (PB 9)
-        if (stock < item.quantity_needed) {
-          shortages.push({
-            inventory_id: item.inventory_id,
-            item_name: result.rows[0].item_name,
-            requested: item.quantity_needed,
-            available: stock,
-            shortfall: item.quantity_needed - stock
-          });
-        }
-      }
-    }
-
-    // 2. EVALUATE & RESPOND (PB 10 Trigger)
-    if (shortages.length > 0) {
-      return res.status(200).json({
-        can_fulfill: false,
-        message: "CAPACITY ALERT: Impossible order halted. Please offer customer delay or cancel options.",
-        shortages: shortages
-      });
-    }
-
-    return res.status(200).json({
-      can_fulfill: true,
-      message: "Capacity pre-check passed. Sufficient stock available."
-    });
-
-  } catch (onlineError) {
-    console.error("Cloud DB unreachable. Checking SQLite offline cache:", onlineError.message);
-    
-    // 3. OFFLINE FALLBACK: Wrap SQLite in a Promise for a clean loop
-    const shortages = [];
-    try {
-      for (const item of required_items) {
-        const row = await new Promise((resolve, reject) => {
-          req.localDb.get(
-            'SELECT item_name, quantity_available FROM inventory_items WHERE inventory_id = ?',
-            [item.inventory_id],
-            (err, data) => err ? reject(err) : resolve(data)
-          );
-        });
-
-        if (row && row.quantity_available < item.quantity_needed) {
-          shortages.push({
-            inventory_id: item.inventory_id,
-            item_name: row.item_name,
-            requested: item.quantity_needed,
-            available: row.quantity_available,
-            shortfall: item.quantity_needed - row.quantity_available
-          });
-        }
-      }
-
-      if (shortages.length > 0) {
-        return res.status(200).json({ can_fulfill: false, message: "CAPACITY ALERT (Offline)", shortages });
-      }
-      return res.status(200).json({ can_fulfill: true, message: "Capacity pre-check passed (Offline)." });
-
-    } catch (offlineError) {
-      return res.status(500).json({ error: "Critical Failure: Both databases unreachable for capacity check." });
-    }
+    evaluation = await evaluateCapacity(req, normalized.items);
+  } catch (offlineError) {
+    console.error('Capacity check failed on both databases:', offlineError.message);
+    return res.status(500).json({ error: 'Critical Failure: Both databases unreachable for capacity check.' });
   }
+
+  const failure = capacityFailureResponse(evaluation);
+  if (failure) {
+    return res.status(failure.status).json(failure.body);
+  }
+
+  return res.status(200).json({
+    can_fulfill: true,
+    message: 'Capacity pre-check passed. Sufficient stock available.',
+    source: evaluation.source
+  });
 });
 
 module.exports = router;
