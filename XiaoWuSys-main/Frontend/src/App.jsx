@@ -1,17 +1,8 @@
-import { useState, useEffect } from 'react';
-import { Package, PlusCircle, TrendingUp, LogOut, TriangleAlert, Clock, XCircle, Trash2, Plus, X } from 'lucide-react';
+import { useState, useEffect} from 'react';
+import { Package, PlusCircle, TrendingUp, LogOut } from 'lucide-react';
+
 
 const API_BASE = 'http://localhost:5000/api';
-
-const emptyOrderLine = () => ({ inventory_id: '', quantity_needed: '' });
-
-// 'YYYY-MM-DD' for the day after the given date string (used as the min for a delayed deadline)
-const dayAfter = (dateStr) => {
-  const base = dateStr ? new Date(`${dateStr}T00:00:00`) : new Date();
-  base.setDate(base.getDate() + 1);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${base.getFullYear()}-${pad(base.getMonth() + 1)}-${pad(base.getDate())}`;
-};
 
 export default function App() {
   const [token, setToken] = useState(localStorage.getItem('xiaomei_token') || '');
@@ -22,24 +13,17 @@ export default function App() {
 
   // Auth Form State for XiaoMei Printing
   const [isSignup, setIsSignup] = useState(false);
-  const [email, setEmail] = useState('');      // Used for Login / Register authentication
-  const [username, setUsername] = useState('');   // Display name for the Dashboard & Orders
+  const [username, setUsername] = useState(''); 
   const [password, setPassword] = useState('');
 
-  // Create Order Profile State
-  const [customerId, setCustomerId] = useState('');
-  const [productionDeadline, setProductionDeadline] = useState('');
-  const [orderStatusMsg, setOrderStatusMsg] = useState('');
+  // Add Item State
+  const [title, setTitle] = useState('');
+  const [desc, setDesc] = useState('');
+  const [cost, setCost] = useState('');
+  const [price, setPrice] = useState('');
+  const [imageFile, setImageFile] = useState(null);
 
-  // Sprint 9: Order materials + Capacity Alert (PB 9 & PB 10)
-  const [inventory, setInventory] = useState([]);
-  const [orderLines, setOrderLines] = useState([emptyOrderLine()]);
-  const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
-  const [capacityAlert, setCapacityAlert] = useState(null); // { message, shortages, total_shortfall, pendingOrder }
-  const [alertMode, setAlertMode] = useState('choose');      // 'choose' | 'delay'
-  const [delayedDeadline, setDelayedDeadline] = useState('');
-  const [alertError, setAlertError] = useState('');
-
+  // The function is now safely trapped INSIDE the useEffect!
   useEffect(() => {
     async function fetchItems() {
       try {
@@ -47,7 +31,7 @@ export default function App() {
           headers: { Authorization: `Bearer ${token}` }
         });
         const data = await res.json();
-        if (res.ok) setItems(Array.isArray(data) ? data : []);
+        if (res.ok) setItems(data);
       } catch (err) {
         console.error('Failed to fetch items', err);
       }
@@ -56,35 +40,16 @@ export default function App() {
     if (token) {
       fetchItems();
     }
-  }, [token, refreshKey]);
-
-  // Load inventory for the Create Order item picker
-  useEffect(() => {
-    async function fetchInventory() {
-      try {
-        const res = await fetch(`${API_BASE}/inventory`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        const data = await res.json();
-        if (res.ok) setInventory(Array.isArray(data.items) ? data.items : []);
-      } catch (err) {
-        console.error('Failed to fetch inventory', err);
-      }
-    }
-
-    if (token && activeTab === 'add') {
-      fetchInventory();
-    }
-  }, [token, activeTab]);
+  }, [token, refreshKey]); // It listens for the token and our new refreshKey
 
   const handleAuth = async (e) => {
     e.preventDefault();
     const endpoint = isSignup ? '/auth/register' : '/auth/login';
     
-    // Pass 'email' into 'username' if backend expects username for auth lookup
+    // The payload perfectly matches the secure Express backend!
     const payload = isSignup 
-      ? { email, username: email, displayName: username, password, role: 'Production' } 
-      : { username: email, password }; 
+      ? { username, password, role: 'Production' } 
+      : { username, password };
 
     try {
       const res = await fetch(`${API_BASE}${endpoint}`, {
@@ -95,8 +60,9 @@ export default function App() {
       const data = await res.json();
 
       if (res.ok) {
+        // Handle both login (returns token) and register (returns user)
         const activeToken = data.token || '';
-        const activeUser = data.user || { username: username || data.username || email, email, role: data.role };
+        const activeUser = data.user || { username, role: data.role };
 
         if (!isSignup) {
           setToken(activeToken);
@@ -127,111 +93,25 @@ export default function App() {
     localStorage.removeItem('xiaomei_user');
   };
 
-  const postOrder = async (payload) => {
-    const res = await fetch(`${API_BASE}/orders`, {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}` 
-      },
-      body: JSON.stringify(payload)
-    });
-    const data = await res.json().catch(() => ({}));
-    return { res, data };
-  };
-
-  const resetOrderForm = () => {
-    setCustomerId('');
-    setProductionDeadline('');
-    setOrderLines([emptyOrderLine()]);
-  };
-
-  const closeCapacityAlert = () => {
-    setCapacityAlert(null);
-    setAlertMode('choose');
-    setDelayedDeadline('');
-    setAlertError('');
-  };
-
-  const updateOrderLine = (index, field, value) => {
-    setOrderLines(lines => lines.map((line, i) => (i === index ? { ...line, [field]: value } : line)));
-  };
-
-  const handleCreateOrder = async (e) => {
+  const handleAddItem = async (e) => {
     e.preventDefault();
-    setOrderStatusMsg('');
+    const formData = new FormData();
+    formData.append('title', title);
+    formData.append('description', desc);
+    formData.append('costPrice', cost);
+    formData.append('sellingPrice', price);
+    if (imageFile) formData.append('image', imageFile);
 
-    const required_items = orderLines.map(line => ({
-      inventory_id: line.inventory_id,
-      quantity_needed: Number(line.quantity_needed)
-    }));
-    const pendingOrder = {
-      customer_id: customerId,
-      production_deadline: productionDeadline,
-      required_items
-    };
+    const res = await fetch(`${API_BASE}/items`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData
+    });
 
-    setIsSubmittingOrder(true);
-    try {
-      const { res, data } = await postOrder(pendingOrder);
-
-      if (res.ok) {
-        setOrderStatusMsg(`Order Created Successfully! ID: ${data.order_id || data.id || ''}`);
-        resetOrderForm();
-      } else if (res.status === 409) {
-        // PB 9 halt caught -> PB 10 warning modal
-        setCapacityAlert({
-          message: data.message,
-          shortages: data.shortages || [],
-          total_shortfall: data.total_shortfall || 0,
-          pendingOrder
-        });
-      } else {
-        const missing = data.missing_inventory_ids ? ` (${data.missing_inventory_ids.join(', ')})` : '';
-        setOrderStatusMsg(`Error: ${data.message || data.error || 'Failed to create order.'}${missing}`);
-      }
-    } catch (err) {
-      console.error('Error creating order:', err);
-      setOrderStatusMsg('Error: Network connection failure.');
-    } finally {
-      setIsSubmittingOrder(false);
-    }
-  };
-
-  // PB 10: log the staff member's resolution for a halted order
-  const handleResolveHaltedOrder = async (resolution) => {
-    if (!capacityAlert) return;
-    setAlertError('');
-
-    if (resolution === 'Delayed' && !delayedDeadline) {
-      setAlertError('Please choose a new production deadline.');
-      return;
-    }
-
-    const { pendingOrder } = capacityAlert;
-    const production_deadline = resolution === 'Delayed' ? delayedDeadline : pendingOrder.production_deadline;
-
-    setIsSubmittingOrder(true);
-    try {
-      const { res, data } = await postOrder({ ...pendingOrder, production_deadline, resolution });
-
-      if (res.ok) {
-        const id = data.order_id || data.id || '';
-        setOrderStatusMsg(
-          resolution === 'Delayed'
-            ? `Notice: Order ${id} logged as DELAYED. New deadline: ${production_deadline}.`
-            : `Notice: Order ${id} logged as CANCELLED (lost sale recorded).`
-        );
-        resetOrderForm();
-        closeCapacityAlert();
-      } else {
-        setAlertError(data.error || 'Failed to log resolution.');
-      }
-    } catch (err) {
-      console.error('Error logging resolution:', err);
-      setAlertError('Network connection failure.');
-    } finally {
-      setIsSubmittingOrder(false);
+    if (res.ok) {
+      setTitle(''); setDesc(''); setCost(''); setPrice(''); setImageFile(null);
+      setRefreshKey(prev => prev + 1); // This triggers the refresh!
+      setActiveTab('catalog');
     }
   };
 
@@ -240,15 +120,15 @@ export default function App() {
       method: 'PATCH',
       headers: { Authorization: `Bearer ${token}` }
     });
-    if (res.ok) setRefreshKey(prev => prev + 1);
+    if (res.ok) setRefreshKey(prev => prev + 1); // This triggers the refresh!if (res.ok) fetchItems();
   };
 
-  // Safe Calculations with fallbacks for undefined properties
-  const totalCost = items.reduce((acc, item) => acc + (item.costPrice || 0), 0);
-  const totalRevenue = items.reduce((acc, item) => acc + (item.sellingPrice || 0), 0);
+  // Calculations
+  const totalCost = items.reduce((acc, item) => acc + item.costPrice, 0);
+  const totalRevenue = items.reduce((acc, item) => acc + item.sellingPrice, 0);
   const realizedProfit = items
     .filter(item => item.status === 'sold')
-    .reduce((acc, item) => acc + ((item.sellingPrice || 0) - (item.costPrice || 0)), 0);
+    .reduce((acc, item) => acc + (item.sellingPrice - item.costPrice), 0);
   const margin = totalRevenue > 0 ? (((totalRevenue - totalCost) / totalRevenue) * 100).toFixed(1) : 0;
 
   if (!token) {
@@ -257,27 +137,14 @@ export default function App() {
         <div style={styles.authCard}>
           <h2>{isSignup ? 'Create User Account' : 'User Login'}</h2>
           <form onSubmit={handleAuth} style={{ marginTop: '1rem' }}>
-            
             <input 
-              type="email" 
-              placeholder="Gmail / Email Address" 
-              value={email} 
-              onChange={e => setEmail(e.target.value)} 
+              type="text" 
+              placeholder="Username" 
+              value={username} 
+              onChange={e => setUsername(e.target.value)} 
               style={styles.input} 
               required 
             />
-
-            {isSignup && (
-              <input 
-                type="text" 
-                placeholder="Display Username" 
-                value={username} 
-                onChange={e => setUsername(e.target.value)} 
-                style={styles.input} 
-                required 
-              />
-            )}
-
             <input 
               type="password" 
               placeholder="Password" 
@@ -286,21 +153,11 @@ export default function App() {
               style={styles.input} 
               required 
             />
-
             <button type="submit" style={styles.btnPrimary}>
               {isSignup ? 'Sign Up' : 'Log In'}
             </button>
           </form>
-
-          <p 
-            onClick={() => {
-              setIsSignup(!isSignup);
-              setEmail('');
-              setPassword('');
-              setUsername('');
-            }} 
-            style={styles.switchAuth}
-          >
+          <p onClick={() => setIsSignup(!isSignup)} style={styles.switchAuth}>
             {isSignup ? 'Already have an account? Log in' : "Don't have an account? Sign up"}
           </p>
         </div>
@@ -311,15 +168,13 @@ export default function App() {
   return (
     <div style={{ backgroundColor: '#f8fafc', minHeight: '100vh', fontFamily: 'sans-serif' }}>
       <header style={styles.header}>
-        <h1 style={{ fontSize: '1.45rem', fontWeight: 'bold', color: '#08060d', userSelect: 'none' }}>
-          Hello, {user?.username || 'Dashboard'}
-        </h1>
+        <h1 style={{ fontSize: '1.25rem', fontWeight: 'bold', color:'#08060d' }}>{user?.userName || 'Dashboard'}</h1>
         <nav style={styles.nav}>
           <button style={activeTab === 'catalog' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('catalog')}>
             <Package size={18} /> Catalog
           </button>
           <button style={activeTab === 'add' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('add')}>
-            <PlusCircle size={18} /> Create Order
+            <PlusCircle size={18} /> Add Item
           </button>
           <button style={activeTab === 'metrics' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('metrics')}>
             <TrendingUp size={18} /> Analytics
@@ -331,6 +186,7 @@ export default function App() {
       </header>
 
       <main style={{ maxWidth: '1000px', margin: '2rem auto', padding: '0 1rem' }}>
+        {/* CATALOG VIEW */}
         {activeTab === 'catalog' && (
           <div style={styles.grid}>
             {items.map(item => (
@@ -343,8 +199,8 @@ export default function App() {
                   <h3 style={{ fontSize: '1.1rem' }}>{item.title}</h3>
                   <p style={{ color: '#64748b', fontSize: '0.875rem', margin: '0.5rem 0' }}>{item.description}</p>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.875rem' }}>
-                    <span>Cost: <strong>${(item.costPrice || 0).toFixed(2)}</strong></span>
-                    <span>Price: <strong>${(item.sellingPrice || 0).toFixed(2)}</strong></span>
+                    <span>Cost: <strong>${item.costPrice.toFixed(2)}</strong></span>
+                    <span>Price: <strong>${item.sellingPrice.toFixed(2)}</strong></span>
                   </div>
                   <button 
                     onClick={() => toggleSoldStatus(item.id)} 
@@ -358,198 +214,22 @@ export default function App() {
           </div>
         )}
 
+        {/* ADD ITEM VIEW */}
         {activeTab === 'add' && (
           <div style={styles.formCard}>
-            <h2 style={{ textAlign: 'center', marginBottom: '1rem' }}>Create Order Profile</h2>
-            
-            {orderStatusMsg && (
-              <p style={{
-                padding: '0.75rem',
-                borderRadius: '0.375rem',
-                marginBottom: '1rem',
-                fontSize: '0.875rem',
-                backgroundColor: orderStatusMsg.startsWith('Error') ? '#fee2e2' : orderStatusMsg.startsWith('Notice') ? '#fef3c7' : '#dcfce7',
-                color: orderStatusMsg.startsWith('Error') ? '#991b1b' : orderStatusMsg.startsWith('Notice') ? '#92400e' : '#166534'
-              }}>
-                {orderStatusMsg}
-              </p>
-            )}
-
-            <form onSubmit={handleCreateOrder}>
-              <label style={styles.label}>Customer ID</label>
-              <input 
-                type="text" 
-                placeholder="Enter Customer ID" 
-                value={customerId} 
-                onChange={e => setCustomerId(e.target.value)} 
-                style={styles.input} 
-                required 
-              />
-
-              <label style={styles.label}>Production Deadline</label>
-              <input 
-                type="date" 
-                value={productionDeadline} 
-                onChange={e => setProductionDeadline(e.target.value)} 
-                style={styles.input} 
-                required 
-              />
-
-              <label style={styles.label}>Required Materials</label>
-              {inventory.length === 0 && (
-                <p style={styles.hint}>No inventory items found. Add inventory before creating orders.</p>
-              )}
-              {orderLines.map((line, index) => (
-                <div key={index} style={styles.lineRow}>
-                  <select
-                    value={line.inventory_id}
-                    onChange={e => updateOrderLine(index, 'inventory_id', e.target.value)}
-                    style={{ ...styles.input, flex: 2, marginBottom: 0 }}
-                    aria-label={`Material ${index + 1}`}
-                    required
-                  >
-                    <option value="">Select material…</option>
-                    {inventory.map(inv => (
-                      <option key={inv.inventory_id} value={inv.inventory_id}>
-                        {inv.item_name} ({inv.quantity_available_net} available)
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="number"
-                    min="1"
-                    step="1"
-                    placeholder="Qty"
-                    value={line.quantity_needed}
-                    onChange={e => updateOrderLine(index, 'quantity_needed', e.target.value)}
-                    style={{ ...styles.input, flex: 1, marginBottom: 0 }}
-                    aria-label={`Quantity ${index + 1}`}
-                    required
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setOrderLines(lines => lines.filter((_, i) => i !== index))}
-                    style={styles.iconBtn}
-                    disabled={orderLines.length === 1}
-                    aria-label={`Remove material ${index + 1}`}
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-              ))}
-              <button
-                type="button"
-                onClick={() => setOrderLines(lines => [...lines, emptyOrderLine()])}
-                style={styles.btnLink}
-              >
-                <Plus size={16} /> Add Material
-              </button>
-
-              <button type="submit" style={styles.btnPrimary} disabled={isSubmittingOrder}>
-                {isSubmittingOrder ? 'Checking Inventory…' : 'Create Order Profile'}
-              </button>
+            <h2>Add New Clothing Piece</h2>
+            <form onSubmit={handleAddItem} style={{ marginTop: '1rem' }}>
+              <input type="text" placeholder="Title" value={title} onChange={e => setTitle(e.target.value)} style={styles.input} required />
+              <textarea placeholder="Description & Sizing" value={desc} onChange={e => setDesc(e.target.value)} style={styles.input} required />
+              <input type="number" step="0.01" placeholder="Cost Price ($)" value={cost} onChange={e => setCost(e.target.value)} style={styles.input} required />
+              <input type="number" step="0.01" placeholder="Selling Price ($)" value={price} onChange={e => setPrice(e.target.value)} style={styles.input} required />
+              <input type="file" onChange={e => setImageFile(e.target.files[0])} accept="image/*" style={styles.input} required />
+              <button type="submit" style={styles.btnPrimary}>Upload Item</button>
             </form>
           </div>
         )}
 
-        {capacityAlert && (
-          <div style={styles.modalOverlay}>
-            <div role="dialog" aria-modal="true" aria-labelledby="capacity-alert-title" style={styles.modalCard}>
-              <button type="button" onClick={closeCapacityAlert} style={styles.modalClose} aria-label="Back to order form">
-                <X size={18} />
-              </button>
-
-              <div style={styles.modalHeader}>
-                <TriangleAlert size={28} color="#b45309" />
-                <h2 id="capacity-alert-title" style={{ fontSize: '1.2rem', margin: 0, color: '#92400e' }}>
-                  Order Exceeds Maximum Inventory
-                </h2>
-              </div>
-              <p style={{ fontSize: '0.875rem', color: '#334155', margin: '0.75rem 0' }}>
-                {capacityAlert.message || 'This order cannot be approved with current stock.'} Please log how this order will be handled.
-              </p>
-
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Material</th>
-                    <th style={styles.thNum}>Requested</th>
-                    <th style={styles.thNum}>Available</th>
-                    <th style={styles.thNum}>Shortfall</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {capacityAlert.shortages.map(s => (
-                    <tr key={s.inventory_id}>
-                      <td style={styles.td}>{s.item_name}</td>
-                      <td style={styles.tdNum}>{s.requested}</td>
-                      <td style={styles.tdNum}>{s.available}</td>
-                      <td style={{ ...styles.tdNum, color: '#991b1b', fontWeight: 'bold' }}>-{s.shortfall}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-
-              {alertError && (
-                <p style={{ padding: '0.5rem', borderRadius: '0.375rem', backgroundColor: '#fee2e2', color: '#991b1b', fontSize: '0.875rem' }}>
-                  {alertError}
-                </p>
-              )}
-
-              {alertMode === 'choose' ? (
-                <div style={styles.modalActions}>
-                  <button
-                    type="button"
-                    onClick={() => { setAlertError(''); setAlertMode('delay'); }}
-                    style={styles.btnWarning}
-                    disabled={isSubmittingOrder}
-                  >
-                    <Clock size={16} /> Delay Order
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleResolveHaltedOrder('Cancelled')}
-                    style={styles.btnDanger}
-                    disabled={isSubmittingOrder}
-                  >
-                    <XCircle size={16} /> Cancel Order
-                  </button>
-                </div>
-              ) : (
-                <div>
-                  <label style={styles.label} htmlFor="delayed-deadline">New Production Deadline</label>
-                  <input
-                    id="delayed-deadline"
-                    type="date"
-                    min={dayAfter(capacityAlert.pendingOrder.production_deadline)}
-                    value={delayedDeadline}
-                    onChange={e => setDelayedDeadline(e.target.value)}
-                    style={styles.input}
-                  />
-                  <div style={styles.modalActions}>
-                    <button
-                      type="button"
-                      onClick={() => { setAlertError(''); setAlertMode('choose'); }}
-                      style={{ ...styles.btnSecondary, marginTop: 0, width: 'auto', flex: 1 }}
-                      disabled={isSubmittingOrder}
-                    >
-                      Back
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleResolveHaltedOrder('Delayed')}
-                      style={styles.btnWarning}
-                      disabled={isSubmittingOrder}
-                    >
-                      <Clock size={16} /> {isSubmittingOrder ? 'Saving…' : 'Confirm Delay'}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
+        {/* METRICS VIEW */}
         {activeTab === 'metrics' && (
           <div style={styles.metricsGrid}>
             <div style={styles.metricCard}>
@@ -575,10 +255,10 @@ export default function App() {
   );
 }
 
+// INLINE STYLES FOR QUICK SETUP
 const styles = {
   authContainer: { minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#f8fafc' },
   authCard: { background: '#fff', padding: '2rem', borderRadius: '0.5rem', width: '100%', maxWidth: '400px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' },
-  label: { display: 'block', fontSize: '0.875rem', fontWeight: 'bold', marginBottom: '0.25rem', color: '#334155' },
   input: { width: '100%', padding: '0.75rem', marginBottom: '1rem', border: '1px solid #cbd5e1', borderRadius: '0.375rem', boxSizing: 'border-box' },
   btnPrimary: { width: '100%', padding: '0.75rem', background: '#4f46e5', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold' },
   switchAuth: { marginTop: '1rem', color: '#4f46e5', textAlign: 'center', cursor: 'pointer', fontSize: '0.875rem' },
@@ -595,23 +275,5 @@ const styles = {
   btnSecondary: { width: '100%', padding: '0.5rem', marginTop: '1rem', background: '#94a3b8', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer' },
   formCard: { background: '#fff', padding: '2rem', borderRadius: '0.5rem', maxWidth: '500px', margin: '0 auto', border: '1px solid #e2e8f0' },
   metricsGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' },
-  metricCard: { background: '#fff', padding: '1.5rem', borderRadius: '0.5rem', border: '1px solid #e2e8f0', textAlign: 'center' },
-
-  // Sprint 9: Order materials + Capacity Alert modal
-  hint: { fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' },
-  lineRow: { display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem' },
-  iconBtn: { padding: '0.6rem', background: 'none', border: '1px solid #cbd5e1', borderRadius: '0.375rem', cursor: 'pointer', color: '#64748b' },
-  btnLink: { display: 'flex', alignItems: 'center', gap: '0.25rem', background: 'none', border: 'none', color: '#4f46e5', cursor: 'pointer', fontSize: '0.875rem', padding: '0.25rem 0', marginBottom: '1rem' },
-  modalOverlay: { position: 'fixed', inset: 0, background: 'rgba(15, 23, 42, 0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem', zIndex: 50 },
-  modalCard: { position: 'relative', background: '#fff', padding: '1.5rem', borderRadius: '0.5rem', width: '100%', maxWidth: '520px', borderTop: '4px solid #f59e0b', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.25)' },
-  modalClose: { position: 'absolute', top: '0.75rem', right: '0.75rem', background: 'none', border: 'none', cursor: 'pointer', color: '#64748b' },
-  modalHeader: { display: 'flex', alignItems: 'center', gap: '0.5rem' },
-  modalActions: { display: 'flex', gap: '0.5rem', marginTop: '1rem' },
-  table: { width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem', marginBottom: '0.75rem' },
-  th: { textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e2e8f0', color: '#334155' },
-  thNum: { textAlign: 'right', padding: '0.5rem', borderBottom: '1px solid #e2e8f0', color: '#334155' },
-  td: { padding: '0.5rem', borderBottom: '1px solid #f1f5f9' },
-  tdNum: { textAlign: 'right', padding: '0.5rem', borderBottom: '1px solid #f1f5f9' },
-  btnWarning: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.75rem', background: '#f59e0b', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold' },
-  btnDanger: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.75rem', background: '#ef4444', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold' }
+  metricCard: { background: '#fff', padding: '1.5rem', borderRadius: '0.5rem', border: '1px solid #e2e8f0', textAlign: 'center' }
 };
