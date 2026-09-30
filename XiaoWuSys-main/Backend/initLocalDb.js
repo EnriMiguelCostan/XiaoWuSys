@@ -28,7 +28,7 @@ db.serialize(() => {
         quantity_reserved INTEGER NOT NULL DEFAULT 0,
         minimum_threshold INTEGER NOT NULL DEFAULT 0,
         unit_cost REAL NOT NULL,
-        sync_status TEXT DEFAULT 'synced',
+        sync_status TEXT DEFAULT 'synced' CHECK (sync_status IN ('synced', 'pending_insert', 'pending_update')),
         last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -36,10 +36,13 @@ db.serialize(() => {
   // 2. Users
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
-      user_id VARCHAR(50) PRIMARY KEY,
-      username VARCHAR(100) UNIQUE NOT NULL,
-      password_hash VARCHAR(255) NOT NULL,
-      role VARCHAR(50) NOT NULL
+      user_id TEXT PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('Owner', 'Admin', 'Production', 'Staff')),
+      sync_status TEXT DEFAULT 'synced' CHECK (sync_status IN ('synced', 'pending_insert', 'pending_update')),
+      last_modified DATETIME DEFAULT CURRENT_TIMESTAMP,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
@@ -50,7 +53,7 @@ db.serialize(() => {
         full_name TEXT NOT NULL,
         contact_number TEXT,
         platform_source TEXT,
-        sync_status TEXT DEFAULT 'synced',
+        sync_status TEXT DEFAULT 'synced' CHECK (sync_status IN ('synced', 'pending_insert', 'pending_update')),
         last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -59,13 +62,13 @@ db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS order_profiles (
         order_id TEXT PRIMARY KEY,
-        customer_id TEXT REFERENCES customers(customer_id),
+        customer_id TEXT REFERENCES customers(customer_id) ON DELETE RESTRICT,
         date_created DATETIME DEFAULT CURRENT_TIMESTAMP,
         production_deadline DATETIME NOT NULL,
-        production_status TEXT DEFAULT 'Pending',
+        production_status TEXT DEFAULT 'Pending' CHECK (production_status IN ('Pending', 'Printing', 'Completed', 'Delayed', 'Cancelled')),
         design_drive_link TEXT,
         total_quote_amount REAL DEFAULT 0.00,
-        sync_status TEXT DEFAULT 'synced',
+        sync_status TEXT DEFAULT 'synced' CHECK (sync_status IN ('synced', 'pending_insert', 'pending_update')),
         last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -75,12 +78,14 @@ db.serialize(() => {
     CREATE TABLE IF NOT EXISTS order_items (
         line_item_id TEXT PRIMARY KEY,
         order_id TEXT REFERENCES order_profiles(order_id) ON DELETE CASCADE,
+        inventory_id TEXT REFERENCES inventory_items(inventory_id) ON DELETE RESTRICT,
         product_type TEXT NOT NULL,
         quantity INTEGER NOT NULL,
         size TEXT,
         custom_name TEXT,
         custom_number TEXT,
-        sync_status TEXT DEFAULT 'synced',
+        price REAL DEFAULT 0.00,
+        sync_status TEXT DEFAULT 'synced' CHECK (sync_status IN ('synced', 'pending_insert', 'pending_update')),
         last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -92,8 +97,8 @@ db.serialize(() => {
         order_id TEXT REFERENCES order_profiles(order_id) ON DELETE CASCADE,
         amount REAL NOT NULL,
         payment_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-        payment_type TEXT NOT NULL,
-        sync_status TEXT DEFAULT 'synced',
+        payment_type TEXT NOT NULL CHECK (payment_type IN ('Cash', 'GCash', 'Bank Transfer')),
+        sync_status TEXT DEFAULT 'synced' CHECK (sync_status IN ('synced', 'pending_insert', 'pending_update')),
         last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -103,12 +108,12 @@ db.serialize(() => {
     CREATE TABLE IF NOT EXISTS material_loss (
         loss_id TEXT PRIMARY KEY,
         order_id TEXT REFERENCES order_profiles(order_id) ON DELETE SET NULL,
-        inventory_id TEXT REFERENCES inventory_items(inventory_id),
+        inventory_id TEXT REFERENCES inventory_items(inventory_id) ON DELETE RESTRICT,
         quantity_lost INTEGER NOT NULL,
         loss_reason TEXT NOT NULL,
         date_recorded DATETIME DEFAULT CURRENT_TIMESTAMP,
         financial_cost REAL NOT NULL DEFAULT 0.00,
-        sync_status TEXT DEFAULT 'synced',
+        sync_status TEXT DEFAULT 'synced' CHECK (sync_status IN ('synced', 'pending_insert', 'pending_update')),
         last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
