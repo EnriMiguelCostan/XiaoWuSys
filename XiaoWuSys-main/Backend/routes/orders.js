@@ -7,6 +7,7 @@ const {
   evaluateCapacity,
   capacityFailureResponse
 } = require('../services/capacity');
+const { isConnectionError, sendDbError } = require('../utils/dbErrors');
 
 // Protect EVERY route in this file by telling the router to use the middleware first
 router.use(verifyToken);
@@ -56,8 +57,8 @@ router.post('/', requireRole(['Admin', 'Production']), async (req, res) => {
     try {
       evaluation = await evaluateCapacity(req, normalized.items);
     } catch (checkError) {
-      console.error('❌ Capacity check failed on both databases:', checkError.message);
-      return res.status(500).json({ error: 'CRITICAL: Unable to verify inventory capacity. Order not created.' });
+      // Either a non-connection cloud error, or the cloud was down AND SQLite failed
+      return sendDbError(res, checkError, 'inventory capacity check');
     }
 
     const failure = capacityFailureResponse(evaluation);
@@ -83,7 +84,12 @@ router.post('/', requireRole(['Admin', 'Production']), async (req, res) => {
     console.log('✅ Order successfully saved to Cloud!');
     return res.status(201).json(newOrder.rows[0]);
 
-  } catch (error) {
+  } catch (error) { // POST /  (create order)
+    // C5: only a real connection failure may fall back to the offline cache
+    if (!isConnectionError(error)) {
+      return sendDbError(res, error, 'order creation');
+    }
+
     console.error('❌ Cloud DB Error:', error.message);
     console.log('🔄 Cloud unavailable. Falling back to Local SQLite Cache...');
     
@@ -141,7 +147,12 @@ router.post('/:order_id/items', requireRole(['Admin', 'Production']), async (req
       item: result.rows[0] 
     });
 
-  } catch (onlineError) {
+  } catch (onlineError) { // POST /:order_id/items
+    // C5: only a real connection failure may fall back to the offline cache
+    if (!isConnectionError(onlineError)) {
+      return sendDbError(res, onlineError, 'adding order item');
+    }
+
     console.error("Cloud DB unreachable. Falling back to SQLite:", onlineError.message);
 
     // 2. ATTEMPT OFFLINE: Save to the local SQLite database
@@ -201,7 +212,12 @@ router.post('/:order_id/payments', requireRole(['Admin', 'Production']), async (
       payment: result.rows[0] 
     });
 
-  } catch (onlineError) {
+  } catch (onlineError) { // POST /:order_id/payments
+    // C5: only a real connection failure may fall back to the offline cache
+    if (!isConnectionError(onlineError)) {
+      return sendDbError(res, onlineError, 'recording payment');
+    }
+
     console.error("Cloud DB unreachable. Saving payment to SQLite:", onlineError.message);
 
     // 2. ATTEMPT OFFLINE: Save to the local SQLite database
@@ -262,7 +278,12 @@ router.patch('/:order_id/design', requireRole(['Admin', 'Production']), async (r
         order: result.rows[0] 
     });
 
-  } catch (onlineError) {
+  } catch (onlineError) { // PATCH /:order_id/design
+    // C5: only a real connection failure may fall back to the offline cache
+    if (!isConnectionError(onlineError)) {
+      return sendDbError(res, onlineError, 'linking design file');
+    }
+    
     console.error('Cloud DB Error. Updating locally...', onlineError.message);
     
     // 2. ATTEMPT OFFLINE: Update SQLite and flag as pending_update

@@ -27,6 +27,7 @@ app.use(express.json());
 
 // 1. Cloud Database: PostgreSQL (Primary Source of Truth)
 const pgPool = new Pool({
+  connectionTimeoutMillis: 5000,
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false } // Required for Vercel/Neon cloud databases
 });
@@ -34,6 +35,14 @@ const pgPool = new Pool({
 // The Passive Monitor: Logs when the pool spins up a new client for heavy traffic
 pgPool.on('connect', () => {
   console.log('🔗 New client connected to PostgreSQL pool');
+});
+
+// Audit fix C4: an error on an IDLE pooled client (e.g. Neon dropping the connection)
+// is emitted on the pool. Without this listener Node treats it as an unhandled 'error'
+// event and crashes the whole server, taking the SQLite offline fallback down with it.
+// pg-pool already discards the broken client; the next query opens a fresh one.
+pgPool.on('error', (err) => {
+  console.error('⚠️ PostgreSQL idle client error (client discarded, server still running):', err.message);
 });
 
 // Force a quick test query to ensure it connects on startup

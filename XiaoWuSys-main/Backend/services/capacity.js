@@ -4,6 +4,9 @@
 // so the halt logic cannot be bypassed by skipping the pre-check.
 // ==========================================
 
+
+const { isConnectionError } = require('../utils/dbErrors');
+
 // Available stock = what is on hand minus what is already promised to other orders
 const computeAvailable = (row) =>
   Math.max(0, Number(row.quantity_available || 0) - Number(row.quantity_reserved || 0));
@@ -49,6 +52,9 @@ const fetchStockRows = async (req, inventoryIds) => {
     );
     return { rows: result.rows, source: 'cloud' };
   } catch (onlineError) {
+    // C5: a query/schema error is NOT an outage; surface it instead of silently reading stale cache
+    if (!isConnectionError(onlineError)) throw onlineError;
+
     console.error('Cloud DB unreachable. Checking capacity against SQLite cache:', onlineError.message);
 
     const placeholders = inventoryIds.map(() => '?').join(', ');
@@ -66,7 +72,7 @@ const fetchStockRows = async (req, inventoryIds) => {
 };
 
 // Strictly evaluates normalized items against stock.
-// Throws only if BOTH databases fail.
+// Throws on a non-connection cloud error, or if the cloud is down AND SQLite fails.
 const evaluateCapacity = async (req, items) => {
   const { rows, source } = await fetchStockRows(req, items.map((i) => i.inventory_id));
   const stockById = new Map(rows.map((row) => [String(row.inventory_id), row]));

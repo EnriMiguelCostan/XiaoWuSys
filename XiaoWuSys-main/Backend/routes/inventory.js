@@ -8,6 +8,7 @@ const {
   evaluateCapacity,
   capacityFailureResponse
 } = require('../services/capacity');
+const { isConnectionError, sendDbError } = require('../utils/dbErrors');
 
 router.use(verifyToken);
 
@@ -24,7 +25,12 @@ router.get('/', requireRole(['Admin', 'Production', 'Staff']), async (req, res) 
        FROM inventory_items ORDER BY item_name`
     );
     return res.status(200).json({ source: 'cloud', items: withAvailability(result.rows) });
-  } catch (onlineError) {
+  } catch (onlineError) { // GET /  (list inventory)
+    // C5: only a real connection failure may fall back to the offline cache
+    if (!isConnectionError(onlineError)) {
+      return sendDbError(res, onlineError, 'listing inventory');
+    }
+
     console.error('Cloud DB unreachable. Listing inventory from SQLite:', onlineError.message);
     req.localDb.all(
       `SELECT inventory_id, item_name, item_category, quantity_available, quantity_reserved, minimum_threshold, unit_cost
@@ -63,7 +69,12 @@ router.post('/', requireRole(['Admin', 'Production']), async (req, res) => {
     const result = await req.pgPool.query(query, values);
     res.status(201).json({ message: "Inventory item added (Online)", item: result.rows[0] });
 
-  } catch (onlineError) {
+  } catch (onlineError) { // POST /  (add item)
+    // C5: only a real connection failure may fall back to the offline cache
+    if (!isConnectionError(onlineError)) {
+      return sendDbError(res, onlineError, 'adding inventory item');
+    }
+    
     console.error("Cloud DB unreachable. Saving inventory to SQLite:", onlineError.message);
     try {
       const sqliteQuery = `
@@ -112,7 +123,12 @@ router.post('/:inventory_id/loss', requireRole(['Admin', 'Production']), async (
     const result = await req.pgPool.query(query, values);
     res.status(201).json({ message: "Material loss recorded (Online)", loss: result.rows[0] });
 
-  } catch (onlineError) {
+  } catch (onlineError) { // POST /:inventory_id/loss
+    // C5: only a real connection failure may fall back to the offline cache
+    if (!isConnectionError(onlineError)) {
+      return sendDbError(res, onlineError, 'recording material loss');
+    }
+
     console.error("Cloud DB unreachable. Saving loss to SQLite:", onlineError.message);
     try {
       const sqliteQuery = `
@@ -151,9 +167,9 @@ router.post('/check-capacity', requireRole(['Admin', 'Production', 'Staff']), as
   let evaluation;
   try {
     evaluation = await evaluateCapacity(req, normalized.items);
-  } catch (offlineError) {
-    console.error('Capacity check failed on both databases:', offlineError.message);
-    return res.status(500).json({ error: 'Critical Failure: Both databases unreachable for capacity check.' });
+  } catch (checkError) {
+    // Either a non-connection cloud error, or the cloud was down AND SQLite failed
+    return sendDbError(res, checkError, 'inventory capacity check');
   }
 
   const failure = capacityFailureResponse(evaluation);
