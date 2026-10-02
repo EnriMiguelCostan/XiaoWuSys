@@ -8,6 +8,17 @@ const {
   capacityFailureResponse
 } = require('../services/capacity');
 const { isConnectionError, sendDbError } = require('../utils/dbErrors');
+const { validateDriveLink } = require('../utils/validateDriveLink');
+const { LOCAL_NOW, PG_VERSION_FORMAT, offlineUpdateBookkeeping } = require('../utils/localSync');
+
+const VERSION_SQL = `to_char(last_modified, '${PG_VERSION_FORMAT}')`;
+
+// H2: blocks writes to an order someone else holds the edit lock for (Owner prevails)
+const requireOrderEditAccess = (req, res, next) => {
+  const blocked = req.orderLocks && req.orderLocks.assertCanEdit(req.params.order_id, req.user);
+  if (blocked) return res.status(409).json(blocked);
+  next();
+};
 
 // Protect EVERY route in this file by telling the router to use the middleware first
 router.use(verifyToken);
@@ -94,16 +105,15 @@ router.post('/', requireRole(['Admin', 'Production']), async (req, res) => {
     console.log('🔄 Cloud unavailable. Falling back to Local SQLite Cache...');
     
     const sqliteQuery = `
-      INSERT INTO order_profiles (order_id, customer_id, production_deadline, production_status, sync_status) 
-      VALUES (?, ?, ?, ?, 'pending_insert')
+      INSERT INTO order_profiles (order_id, customer_id, production_deadline, production_status, sync_status, last_modified) 
+      VALUES (?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})
     `;
 
     // 5.) Attempt 2: OFFLINE FALLBACK (Save locally as pending_insert)
     req.localDb.run(sqliteQuery, [order_id, customer_id, production_deadline, production_status], function(err) {
       if (err) {
-        // If this hits, the hard drive is full or the database file is locked
-        console.error('❌ Local Cache Error:', err.message);
-        return res.status(500).json({ error: 'CRITICAL: Both Cloud and Local databases failed.' });
+        // H5: FK failures (customer not cached) now surface as 400, disk/lock errors as 500
+        return sendDbError(res, err, 'saving order offline');
       }
       
       console.log(`✅ Order ${order_id} securely saved to local cache (pending sync)`);
@@ -122,10 +132,10 @@ router.post('/', requireRole(['Admin', 'Production']), async (req, res) => {
 // ==========================================
 // ENCODE ORDER DETAILS / ITEMS (Sprint 7 / PB 7)
 // ==========================================
-router.post('/:order_id/items', requireRole(['Admin', 'Production']), async (req, res) => {
+router.post('/:order_id/items', requireRole(['Admin', 'Production']), requireOrderEditAccess, async (req, res) => {
   const { order_id } = req.params;
   // Using your custom XiaoMei printing variables
-  const { product_type, quantity, size, custom_name, custom_number } = req.body;
+  const { product_type, quantity, size, custom_name, custom_number } = req.body || {};
 
   // Generate the ID using your custom schema name
   const line_item_id = crypto.randomUUID();
@@ -156,28 +166,22 @@ router.post('/:order_id/items', requireRole(['Admin', 'Production']), async (req
     console.error("Cloud DB unreachable. Falling back to SQLite:", onlineError.message);
 
     // 2. ATTEMPT OFFLINE: Save to the local SQLite database
-    try {
-      const sqliteQuery = `
-        INSERT INTO order_items (line_item_id, order_id, product_type, quantity, size, custom_name, custom_number, sync_status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_insert');
-      `;
-      const sqliteValues = [line_item_id, order_id, product_type, quantity, size, custom_name, custom_number];
+    const sqliteQuery = `
+      INSERT INTO order_items (line_item_id, order_id, product_type, quantity, size, custom_name, custom_number, sync_status, last_modified)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW});
+    `;
+    const sqliteValues = [line_item_id, order_id, product_type, quantity, size, custom_name, custom_number];
+    
+    req.localDb.run(sqliteQuery, sqliteValues, function(offlineError) {
+      if (offlineError) {
+        return sendDbError(res, offlineError, 'saving order item offline');
+      }
       
-      // Using your existing global req.localDb!
-      req.localDb.run(sqliteQuery, sqliteValues, function(offlineError) {
-        if (offlineError) {
-          console.error("SQLite Error:", offlineError);
-          return res.status(500).json({ error: "Critical Failure: Both Cloud and Local databases are unreachable." });
-        }
-        
-        res.status(201).json({ 
-          message: "Order item saved locally (Offline Mode).",
-          item: { line_item_id, order_id, product_type, quantity, size, custom_name, custom_number }
-        });
+      res.status(201).json({ 
+        message: "Order item saved locally (Offline Mode).",
+        item: { line_item_id, order_id, product_type, quantity, size, custom_name, custom_number }
       });
-    } catch (fallbackError) {
-      res.status(500).json({ error: "Failed to execute offline fallback." });
-    }
+    });
   }
 });
 
@@ -186,7 +190,7 @@ router.post('/:order_id/items', requireRole(['Admin', 'Production']), async (req
 // ==========================================
 router.post('/:order_id/payments', requireRole(['Admin', 'Production']), async (req, res) => {
   const { order_id } = req.params;
-  const { amount, payment_type } = req.body;
+  const { amount, payment_type } = req.body || {};
 
   // Basic validation to ensure cashiers don't submit blank payments
   if (amount === undefined || !payment_type) {
@@ -221,61 +225,75 @@ router.post('/:order_id/payments', requireRole(['Admin', 'Production']), async (
     console.error("Cloud DB unreachable. Saving payment to SQLite:", onlineError.message);
 
     // 2. ATTEMPT OFFLINE: Save to the local SQLite database
-    try {
-      const sqliteQuery = `
-        INSERT INTO payments (payment_id, order_id, amount, payment_type, sync_status)
-        VALUES (?, ?, ?, ?, 'pending_insert');
-      `;
-      const sqliteValues = [payment_id, order_id, amount, payment_type];
+    const sqliteQuery = `
+      INSERT INTO payments (payment_id, order_id, amount, payment_type, sync_status, last_modified)
+      VALUES (?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW});
+    `;
+    const sqliteValues = [payment_id, order_id, amount, payment_type];
+    
+    req.localDb.run(sqliteQuery, sqliteValues, function(offlineError) {
+      if (offlineError) {
+        return sendDbError(res, offlineError, 'saving payment offline');
+      }
       
-      req.localDb.run(sqliteQuery, sqliteValues, function(offlineError) {
-        if (offlineError) {
-          console.error("SQLite Error:", offlineError);
-          return res.status(500).json({ error: "Critical Failure: Both Cloud and Local databases are unreachable." });
-        }
-        
-        res.status(201).json({ 
-          message: "Payment saved locally (Offline Mode). It will sync to the cloud when internet is restored.",
-          payment: { payment_id, order_id, amount, payment_type }
-        });
+      res.status(201).json({ 
+        message: "Payment saved locally (Offline Mode). It will sync to the cloud when internet is restored.",
+        payment: { payment_id, order_id, amount, payment_type }
       });
-    } catch (fallbackError) {
-      res.status(500).json({ error: "Failed to execute offline fallback." });
-    }
+    });
   }
 });
 
 // ==========================================
 // LINK DESIGN FILE (Sprint 8 / PB 8)
+// Body: { design_drive_link, expected_version? }
+//  H6: link must be an https:// drive.google.com or docs.google.com URL
+//  H2: 409 ORDER_LOCKED if another user holds the edit lock (Owner prevails)
+//  C3: if expected_version is sent and the cloud row changed since, 409 EDIT_CONFLICT
 // ==========================================
-router.patch('/:order_id/design', requireRole(['Admin', 'Production']), async (req, res) => {
+router.patch('/:order_id/design', requireRole(['Admin', 'Production']), requireOrderEditAccess, async (req, res) => {
   const { order_id } = req.params;
-  const { design_drive_link } = req.body;
+  const { design_drive_link, expected_version } = req.body || {};
 
-  if (!design_drive_link) {
-    return res.status(400).json({ error: 'Google Drive link is required.' });
+  const validation = validateDriveLink(design_drive_link);
+  if (validation.error) {
+    return res.status(400).json({ error: 'INVALID_DRIVE_LINK', message: validation.error });
   }
+  if (expected_version !== undefined && typeof expected_version !== 'string') {
+    return res.status(400).json({ error: 'expected_version must be the string returned as "version".' });
+  }
+  const link = validation.url;
 
   try {
-    // 1. ATTEMPT ONLINE: Update PostgreSQL in the Cloud
-    const query = `
-      UPDATE order_profiles 
-      SET design_drive_link = $1 
-      WHERE order_id = $2 
-      RETURNING *;
-    `;
-    const values = [design_drive_link, order_id];
-    
-    const result = await req.pgPool.query(query, values);
-    
-    // Safety check: Did the query actually find an order to update?
+    // 1. ATTEMPT ONLINE: optimistic update, only if the row is still at expected_version
+    const result = await req.pgPool.query(
+      `UPDATE order_profiles 
+          SET design_drive_link = $1, last_modified = NOW()
+        WHERE order_id = $2
+          AND ($3::text IS NULL OR ${VERSION_SQL} = $3::text)
+        RETURNING *, ${VERSION_SQL} AS version`,
+      [link, order_id, expected_version || null]
+    );
+
     if (result.rowCount === 0) {
+      const current = await req.pgPool.query(
+        `SELECT design_drive_link, production_status, ${VERSION_SQL} AS version FROM order_profiles WHERE order_id = $1`,
+        [order_id]
+      );
+      if (current.rowCount === 0) {
         return res.status(404).json({ error: 'Order not found in cloud database.' });
+      }
+      return res.status(409).json({
+        error: 'EDIT_CONFLICT',
+        message: 'This order was changed by someone else. Reload it and apply your change again.',
+        current: current.rows[0]
+      });
     }
 
     res.status(200).json({ 
         message: 'Design linked successfully (Online)', 
-        order: result.rows[0] 
+        order: result.rows[0],
+        version: result.rows[0].version
     });
 
   } catch (onlineError) { // PATCH /:order_id/design
@@ -286,35 +304,31 @@ router.patch('/:order_id/design', requireRole(['Admin', 'Production']), async (r
     
     console.error('Cloud DB Error. Updating locally...', onlineError.message);
     
-    // 2. ATTEMPT OFFLINE: Update SQLite and flag as pending_update
-    try {
-      const sqliteQuery = `
-        UPDATE order_profiles 
-        SET design_drive_link = ?, sync_status = 'pending_update'
-        WHERE order_id = ?;
-      `;
-      const sqliteValues = [design_drive_link, order_id];
+    // 2. ATTEMPT OFFLINE: record the field as dirty so sync pushes ONLY this change (C3),
+    //    and bump last_modified so an in-flight sync will not mark it synced (H3)
+    const sqliteQuery = `
+      UPDATE order_profiles 
+         SET design_drive_link = ?, ${offlineUpdateBookkeeping('order_profiles', ['design_drive_link'])}
+       WHERE order_id = ?;
+    `;
 
-      req.localDb.run(sqliteQuery, sqliteValues, function(offlineError) {
-        if (offlineError) {
-          console.error('SQLite Error:', offlineError);
-          return res.status(500).json({ error: 'Critical Failure: Both Cloud and Local databases are unreachable.' });
-        }
-        
-        // Safety check for SQLite: 'this.changes' returns how many rows were updated
-        if (this.changes === 0) {
-            return res.status(404).json({ error: 'Order not found in local cache.' });
-        }
+    req.localDb.run(sqliteQuery, [link, order_id], function(offlineError) {
+      if (offlineError) {
+        return sendDbError(res, offlineError, 'linking design file offline');
+      }
+      
+      // Safety check for SQLite: 'this.changes' returns how many rows were updated
+      if (this.changes === 0) {
+          return res.status(404).json({ error: 'Order not found in local cache.' });
+      }
 
-        res.status(200).json({ 
-          message: 'Design linked locally (Offline Mode). Will sync when internet is restored.', 
-          order_id, 
-          design_drive_link 
-        });
+      res.status(200).json({ 
+        message: 'Design linked locally (Offline Mode). Will sync when internet is restored.', 
+        order_id, 
+        design_drive_link: link,
+        version: null // cloud version unknown until the next sync
       });
-    } catch (fallbackError) {
-      res.status(500).json({ error: 'Failed to execute offline fallback.' });
-    }
+    });
   }
 });
 

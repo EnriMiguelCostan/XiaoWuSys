@@ -9,6 +9,7 @@ const {
   capacityFailureResponse
 } = require('../services/capacity');
 const { isConnectionError, sendDbError } = require('../utils/dbErrors');
+const { LOCAL_NOW } = require('../utils/localSync');
 
 router.use(verifyToken);
 
@@ -78,13 +79,13 @@ router.post('/', requireRole(['Admin', 'Production']), async (req, res) => {
     console.error("Cloud DB unreachable. Saving inventory to SQLite:", onlineError.message);
     try {
       const sqliteQuery = `
-        INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, sync_status)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending_insert');
+        INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, sync_status, last_modified)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW});
       `;
       const sqliteValues = [inventory_id, item_name, item_category, quantity_available || 0, minimum_threshold || 0, unit_cost];
       
       req.localDb.run(sqliteQuery, sqliteValues, function(offlineError) {
-        if (offlineError) return res.status(500).json({ error: "Critical Failure: Both databases unreachable." });
+        if (offlineError) return sendDbError(res, offlineError, 'saving inventory item offline');
         
         res.status(201).json({ 
           message: "Inventory item saved locally (Offline Mode).", 
@@ -132,13 +133,13 @@ router.post('/:inventory_id/loss', requireRole(['Admin', 'Production']), async (
     console.error("Cloud DB unreachable. Saving loss to SQLite:", onlineError.message);
     try {
       const sqliteQuery = `
-        INSERT INTO material_loss (loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost, sync_status)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending_insert');
+        INSERT INTO material_loss (loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost, sync_status, last_modified)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW});
       `;
       const sqliteValues = [loss_id, linked_order, inventory_id, quantity_lost, loss_reason, financial_cost || 0.00];
       
       req.localDb.run(sqliteQuery, sqliteValues, function(offlineError) {
-        if (offlineError) return res.status(500).json({ error: "Critical Failure: Both databases unreachable." });
+        if (offlineError) return sendDbError(res, offlineError, 'saving material loss offline');
         
         res.status(201).json({ 
           message: "Material loss saved locally (Offline Mode).", 

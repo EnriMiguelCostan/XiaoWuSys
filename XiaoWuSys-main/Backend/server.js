@@ -6,6 +6,10 @@ const { Server } = require('socket.io');
 const { Pool } = require('pg');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const jwt = require('jsonwebtoken');
+const { verifyToken, requireRole } = require('./middleware/authMiddleware');
+const { createOrderLockManager } = require('./services/orderLocks');
+const { ensureLocalSyncColumns } = require('./utils/localSync');
 
 // Initialize Express and HTTP Server (HTTP server is required for WebSockets)
 const app = express();
@@ -64,21 +68,82 @@ const localDb = new sqlite3.Database(sqliteDbPath, (err) => {
   }
 });
 
-// ================= WEBSOCKETS: CONCURRENCY CONTROL =================
+// Audit fix H5: foreign keys are OFF by default for every new SQLite connection.
+// initLocalDb.js only enabled them on its own short-lived connection, so the running
+// server ignored REFERENCES / ON DELETE CASCADE. Queued first, so it runs before any query.
+localDb.run('PRAGMA foreign_keys = ON;');
+localDb.get('PRAGMA foreign_keys;', (err, row) => {
+  if (err || !row || row.foreign_keys !== 1) {
+    console.error('❌ Could not enable SQLite foreign keys:', err ? err.message : 'PRAGMA returned 0');
+  } else {
+    console.log('🔒 SQLite foreign key enforcement: ON');
+  }
+});
+
+// ================= WEBSOCKETS: CONCURRENCY CONTROL (Audit fix H2) =================
+// "Owner Prevails" edit locks, tracked on the server. Identity/role come from the JWT.
+//
+// Client usage (socket.io-client):
+//   const socket = io(API_URL, { auth: { token } });
+//   socket.emit('editing_order', { orderId }, (res) => { /* res.granted, res.lock */ });
+//   socket.emit('release_order', { orderId });
+//   socket.on('order_locked' | 'order_unlocked' | 'order_lock_revoked' | 'locks_snapshot', ...)
+// Re-emit 'editing_order' at least every 60s while editing to keep the lock (2 min TTL).
+const orderLocks = createOrderLockManager();
+
+io.use((socket, next) => {
+  const header = socket.handshake.headers.authorization || '';
+  const token = socket.handshake.auth?.token || (header.startsWith('Bearer ') ? header.slice(7) : null);
+  if (!token) return next(new Error('Unauthorized: no token provided'));
+  try {
+    const { user_id, role } = jwt.verify(token, process.env.JWT_SECRET);
+    socket.data.user = { user_id, role };
+    next();
+  } catch (err) {
+    next(new Error('Unauthorized: invalid or expired token'));
+  }
+});
+
+const validOrderId = (data) =>
+  data && typeof data.orderId === 'string' && data.orderId.length > 0 && data.orderId.length <= 50;
 
 io.on('connection', (socket) => {
-  console.log(`🔌 Client connected: ${socket.id}`);
+  const user = socket.data.user;
+  console.log(`🔌 Client connected: ${socket.id} (${user.role})`);
+  socket.emit('locks_snapshot', orderLocks.snapshot());
 
-  // Listen for order edits to enforce the "Owner Prevails" logic
-  socket.on('editing_order', (data) => {
-    // Broadcast to other branches/clients that an order is currently locked
-    socket.broadcast.emit('order_locked', { 
-      orderId: data.orderId, 
-      userRole: data.userRole 
-    });
+  socket.on('editing_order', (data, ack) => {
+    const reply = typeof ack === 'function' ? ack : () => {};
+    if (!validOrderId(data)) return reply({ granted: false, error: 'orderId is required.' });
+
+    const result = orderLocks.acquire(data.orderId, user, socket.id);
+    if (!result.granted) {
+      return reply({ granted: false, reason: result.reason, lock: orderLocks.publicView(result.lock) });
+    }
+
+    if (result.previous) {
+      // Owner prevails: tell the lower-ranked editor they lost the lock
+      io.to(result.previous.socketId).emit('order_lock_revoked', {
+        orderId: data.orderId,
+        by: orderLocks.publicView(result.lock)
+      });
+    }
+    socket.broadcast.emit('order_locked', orderLocks.publicView(result.lock));
+    reply({ granted: true, lock: orderLocks.publicView(result.lock) });
+  });
+
+  socket.on('release_order', (data, ack) => {
+    const reply = typeof ack === 'function' ? ack : () => {};
+    if (!validOrderId(data)) return reply({ released: false });
+    const released = orderLocks.release(data.orderId, user.user_id);
+    if (released) socket.broadcast.emit('order_unlocked', { orderId: data.orderId });
+    reply({ released });
   });
 
   socket.on('disconnect', () => {
+    for (const orderId of orderLocks.releaseBySocket(socket.id)) {
+      io.emit('order_unlocked', { orderId });
+    }
     console.log(`🔌 Client disconnected: ${socket.id}`);
   });
 });
@@ -89,6 +154,7 @@ io.on('connection', (socket) => {
 app.use((req, res, next) => {
   req.pgPool = pgPool;
   req.localDb = localDb;
+  req.orderLocks = orderLocks;
   next();
 });
 
@@ -106,20 +172,46 @@ app.get('/api/status', (req, res) => {
 });
 
 // Import the sync function
-const { syncOfflineData } = require('./services/sync');
+const { syncOfflineData, listConflicts, SYNC_TABLES } = require('./services/sync');
 
-// Run the sync script every 5 minutes (300,000 milliseconds)
+// Add local-only sync bookkeeping columns, then warm the cache right away (H4/H5)
+ensureLocalSyncColumns(localDb, SYNC_TABLES.map((t) => t.table))
+  .then(() => syncOfflineData(pgPool, localDb))
+  .catch((err) => console.error('❌ Startup sync failed:', err.message));
+
+// Run the sync script every 5 minutes (300,000 milliseconds).
+// H3: overlapping runs are impossible; a call during a run joins the in-flight one.
 setInterval(() => {
-  syncOfflineData(pgPool, localDb);
+  syncOfflineData(pgPool, localDb).catch(() => {});
 }, 300000);
 
 // Manual Sync Trigger (Frontend will call this when internet returns)
-app.post('/api/sync', async (req, res) => {
+// 200 = done, 409 = some rows conflict with newer cloud edits (C3), 503 = cloud unreachable
+app.post('/api/sync', verifyToken, async (req, res) => {
   try {
-    await syncOfflineData(pgPool, localDb);
-    res.status(200).json({ message: 'Sync process triggered.' });
+    const summary = await syncOfflineData(pgPool, localDb);
+    if (summary.aborted) {
+      return res.status(503).json({ error: 'CLOUD_UNREACHABLE', message: 'Sync paused: cloud database unreachable.', summary });
+    }
+    if (summary.conflicts.length > 0 || summary.unresolved_conflicts > 0) {
+      return res.status(409).json({
+        error: 'SYNC_CONFLICT',
+        message: 'Some offline edits were not applied because the cloud record was changed by someone else.',
+        summary
+      });
+    }
+    res.status(200).json({ message: 'Sync complete.', summary });
   } catch (error) {
     res.status(500).json({ error: 'Sync failed.' });
+  }
+});
+
+// Offline edits blocked by a newer cloud edit, waiting for a human decision (C3)
+app.get('/api/sync/conflicts', verifyToken, requireRole(['Owner', 'Admin']), async (req, res) => {
+  try {
+    res.status(200).json({ conflicts: await listConflicts(localDb) });
+  } catch (error) {
+    res.status(500).json({ error: 'Could not read sync conflicts.' });
   }
 });
 

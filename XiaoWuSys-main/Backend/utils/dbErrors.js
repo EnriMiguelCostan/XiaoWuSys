@@ -76,6 +76,17 @@ const sendDbError = (res, err, context = 'database operation') => {
     // Class 22 = data exception: invalid dates, numbers, UUIDs, strings too long, etc.
     status = 400;
     body = { error: 'INVALID_INPUT', message: 'One or more fields have an invalid format or value.' };
+  } else if (code === 'SQLITE_CONSTRAINT' && /FOREIGN KEY/i.test(err?.message || '')) {
+    // H5: foreign keys are now enforced offline. The parent is not in the local cache yet.
+    status = 400;
+    body = {
+      error: 'INVALID_REFERENCE',
+      message: 'Offline: the referenced customer, order or inventory item is not in the local cache. ' +
+               'It will be available after the next successful sync.'
+    };
+  } else if (code === 'SQLITE_CONSTRAINT') {
+    status = 400;
+    body = { error: 'CONSTRAINT_VIOLATION', message: 'Offline: a required field is missing or a value is not allowed.' };
   } else if (code.startsWith('SQLITE')) {
     // Only reached after the cloud was confirmed unreachable
     body = { error: 'LOCAL_CACHE_ERROR', message: 'Cloud database unreachable and the local cache failed.' };
