@@ -26,7 +26,21 @@ router.param('inventory_id', (req, res, next, value) => {
   next();
 });
 
-const withAvailability = (item) => ({ ...item, quantity_available_net: computeAvailable(item) });
+// Stock health, computed on the server so every screen uses the same rule:
+//   out_of_stock  nothing free to use (available - reserved <= 0)
+//   low_stock     free stock at or below minimum_threshold
+//   in_stock      otherwise
+const STOCK_STATUSES = ['in_stock', 'low_stock', 'out_of_stock'];
+const stockStatusOf = (net, threshold) => {
+  if (net <= 0) return 'out_of_stock';
+  if (net <= threshold) return 'low_stock';
+  return 'in_stock';
+};
+
+const withAvailability = (item) => {
+  const net = computeAvailable(item);
+  return { ...item, quantity_available_net: net, stock_status: stockStatusOf(net, item.minimum_threshold || 0) };
+};
 
 // Business-rule failures inside a transaction (rolled back, then mapped to 404/409)
 class LossRejected extends Error {
@@ -34,13 +48,45 @@ class LossRejected extends Error {
 }
 
 // ==========================================
-// 0. LIST INVENTORY ITEMS (used by the Create Order item picker)
-// -> { source, items: [... , quantity_available_net] }   identical shape online and offline (M10)
+// 0. LIST INVENTORY ITEMS (Catalog page + Create Order item picker)
+// GET /api/inventory?category=Raw&stock_status=low_stock&search=ink
+// -> { source, fetched_at, summary, categories, items: [... , quantity_available_net, stock_status] }
+// Identical shape online and offline (M10). summary/categories describe the whole
+// catalog, not just the filtered page, so the dashboard counts stay stable while filtering.
 // ==========================================
 router.get('/', requireRole(['Admin', 'Production', 'Staff']), async (req, res) => {
+  const v = createValidator();
+  const category = v.optionalString(req.query.category, 'category', 100);
+  const stock_status = v.oneOf(req.query.stock_status, 'stock_status', STOCK_STATUSES, { required: false });
+  const search = v.optionalString(req.query.search, 'search', 100);
+  if (v.failed()) return v.send(res);
+
   try {
     const { source, records } = await listRecords(req, 'inventory_items', { orderBy: 'item_name, inventory_id' });
-    res.status(200).json({ source, items: records.map(withAvailability) });
+    const all = records.map(withAvailability);
+
+    const needle = search ? search.toLowerCase() : null;
+    const items = all.filter((item) =>
+      (!category || item.item_category === category) &&
+      (!stock_status || item.stock_status === stock_status) &&
+      (!needle || item.item_name.toLowerCase().includes(needle))
+    );
+
+    const count = (status) => all.filter((i) => i.stock_status === status).length;
+    res.status(200).json({
+      source,
+      fetched_at: new Date().toISOString(),
+      summary: {
+        total_items: all.length,
+        in_stock: count('in_stock'),
+        low_stock: count('low_stock'),
+        out_of_stock: count('out_of_stock'),
+        unsynced: all.filter((i) => i.sync_status !== 'synced').length,
+        stock_value: Math.round(all.reduce((sum, i) => sum + i.quantity_available * i.unit_cost, 0) * 100) / 100
+      },
+      categories: [...new Set(all.map((i) => i.item_category))].sort(),
+      items
+    });
   } catch (err) {
     sendDbError(res, err, 'listing inventory');
   }
