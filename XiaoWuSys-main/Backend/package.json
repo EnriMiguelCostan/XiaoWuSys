@@ -4,7 +4,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "create-admin": "node scripts/createAdmin.js"
+    "create-admin": "node scripts/createAdmin.js",
+    "migrate": "node scripts/migrate.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",

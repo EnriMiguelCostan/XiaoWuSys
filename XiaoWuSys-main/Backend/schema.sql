@@ -1,5 +1,6 @@
 -- XiaoWuSys Neon PostgreSQL Schema
 -- Run this directly in the Neon.tech SQL Editor
+-- Then apply the migrations in migrations/ (e.g. the last_modified trigger): npm run migrate
 
 -- 1. Users (Fixes D3 missing sync columns & D7 missing role rules)
 CREATE TABLE IF NOT EXISTS users (

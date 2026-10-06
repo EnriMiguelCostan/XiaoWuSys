@@ -6,6 +6,7 @@
 
 
 const { isConnectionError } = require('../utils/dbErrors');
+const { ID_PATTERN } = require('../utils/validation');
 
 // Available stock = what is on hand minus what is already promised to other orders
 const computeAvailable = (row) =>
@@ -23,14 +24,18 @@ const normalizeRequiredItems = (required_items) => {
   for (let i = 0; i < required_items.length; i++) {
     const item = required_items[i] || {};
     const inventory_id = typeof item.inventory_id === 'string' ? item.inventory_id.trim() : '';
-    const raw = item.quantity_needed;
-    const quantity_needed = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : raw;
+    // M7: must be a JSON number; text such as "5" is rejected
+    const quantity_needed = item.quantity_needed;
 
     if (!inventory_id) {
       return { error: `required_items[${i}].inventory_id is required.` };
     }
-    if (typeof quantity_needed !== 'number' || !Number.isInteger(quantity_needed) || quantity_needed <= 0) {
-      return { error: `required_items[${i}].quantity_needed must be a positive whole number.` };
+    if (!ID_PATTERN.test(inventory_id)) {
+      return { error: `required_items[${i}].inventory_id is not a valid ID.` };
+    }
+    if (typeof quantity_needed !== 'number' || !Number.isInteger(quantity_needed) || quantity_needed <= 0
+        || quantity_needed > 2147483647) {
+      return { error: `required_items[${i}].quantity_needed must be a positive whole number (not text or a fraction).` };
     }
 
     totals.set(inventory_id, (totals.get(inventory_id) || 0) + quantity_needed);
