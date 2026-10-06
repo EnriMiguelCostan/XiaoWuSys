@@ -15,7 +15,11 @@ const SYNC_TABLES = [
   {
     table: 'inventory_items',
     id: 'inventory_id',
-    columns: ['inventory_id', 'item_name', 'item_category', 'quantity_available', 'quantity_reserved', 'minimum_threshold', 'unit_cost']
+    columns: ['inventory_id', 'item_name', 'item_category', 'quantity_available', 'quantity_reserved', 'minimum_threshold', 'unit_cost'],
+    // M9: keep the locally reduced stock while an offline loss for this item is still unsynced
+    refreshGuard: ` AND NOT EXISTS (SELECT 1 FROM material_loss ml
+                      WHERE ml.inventory_id = excluded.inventory_id
+                        AND ml.sync_status = 'pending_insert' AND ml.cloud_stock_delta > 0)`
   },
   {
     table: 'customers',
@@ -44,8 +48,9 @@ const SYNC_TABLES = [
   }
 ];
 
-// Parent tables copied Neon -> SQLite so offline orders/items/payments satisfy foreign keys
-const REFRESH_TABLES = ['customers', 'inventory_items', 'order_profiles'];
+// Tables copied Neon -> SQLite (parents first) so offline writes satisfy foreign keys
+// M10: children are refreshed too, so offline reads show the same items/payments/losses.
+const REFRESH_TABLES = ['customers', 'inventory_items', 'order_profiles', 'order_items', 'payments', 'material_loss'];
 
 const specFor = (table) => SYNC_TABLES.find((t) => t.table === table);
 const updatableColumns = (spec) => spec.columns.filter((c) => c !== spec.id);
@@ -106,7 +111,55 @@ const dirtyFieldsFor = (spec, row) => {
 };
 
 // ---------- Push one row to Neon ----------
+
+// M9: an offline material loss carries the stock it removed (cloud_stock_delta). The loss
+// insert and the Neon stock reduction run in ONE transaction, and the reduction is only
+// applied if the loss was actually inserted, so re-running sync never double-counts.
+const pushMaterialLossInsert = async (pgPool, spec, row) => {
+  const cols = spec.columns.filter((c) => row[c] !== undefined && row[c] !== null);
+  const client = await pgPool.connect();
+  let broken;
+  try {
+    await client.query('BEGIN');
+    const inserted = await client.query(
+      `INSERT INTO ${spec.table} (${cols.join(', ')}, last_modified)
+       VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')}, NOW())
+       ON CONFLICT (${spec.id}) DO NOTHING
+       RETURNING ${spec.id}`,
+      cols.map((c) => row[c])
+    );
+    if (inserted.rowCount === 1) {
+      const stock = await client.query(
+        `UPDATE inventory_items
+            SET quantity_available = GREATEST(quantity_available - $1::int, 0), last_modified = NOW()
+          WHERE inventory_id = $2
+          RETURNING quantity_available`,
+        [Number(row.cloud_stock_delta), row.inventory_id]
+      );
+      if (stock.rowCount === 1 && stock.rows[0].quantity_available === 0) {
+        console.warn(`⚠️ Offline loss ${row[spec.id]} took ${row.inventory_id} to 0 stock in the cloud; recount recommended.`);
+      }
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    broken = err;
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release(broken && isConnectionError(broken) ? broken : undefined);
+  }
+  const { rows } = await pgPool.query(
+    `SELECT ${versionExpr} AS version FROM ${spec.table} WHERE ${spec.id} = $1`,
+    [row[spec.id]]
+  );
+  return { outcome: 'synced', version: rows[0] ? rows[0].version : null };
+};
+
 const pushInsert = async (pgPool, spec, row) => {
+  if (spec.table === 'material_loss' && Number(row.cloud_stock_delta) > 0) {
+    return pushMaterialLossInsert(pgPool, spec, row);
+  }
+
   const cols = spec.columns.filter((c) => row[c] !== undefined && row[c] !== null);
   const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
 
@@ -176,7 +229,7 @@ const refreshTable = async (pgPool, localDb, spec) => {
        VALUES (${cols.map(() => '?').join(', ')}, ?, 'synced')
        ON CONFLICT (${spec.id}) DO UPDATE
          SET ${assignments}, cloud_last_modified = excluded.cloud_last_modified
-       WHERE ${spec.table}.sync_status = 'synced' AND ${spec.table}.sync_conflict IS NULL`,
+       WHERE ${spec.table}.sync_status = 'synced' AND ${spec.table}.sync_conflict IS NULL${spec.refreshGuard || ''}`,
       [...cols.map((c) => row[c]), row.version]
     );
   }

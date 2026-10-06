@@ -9,146 +9,216 @@ const {
   capacityFailureResponse
 } = require('../services/capacity');
 const { isConnectionError, sendDbError } = require('../utils/dbErrors');
-const { LOCAL_NOW } = require('../utils/localSync');
+const { LOCAL_NOW, offlineUpdateBookkeeping } = require('../utils/localSync');
+const { createValidator } = require('../utils/validation');
+const {
+  selectList, serialize, listRecords, locateRecord, readLocal,
+  withPgTransaction, withLocalTransaction, sqliteGet, sqliteRun
+} = require('../services/records');
 
 router.use(verifyToken);
 
+// M7: rejects malformed :inventory_id before any query runs
+router.param('inventory_id', (req, res, next, value) => {
+  const v = createValidator();
+  v.id(value, 'inventory_id');
+  if (v.failed()) return v.send(res);
+  next();
+});
+
+const withAvailability = (item) => ({ ...item, quantity_available_net: computeAvailable(item) });
+
+// Business-rule failures inside a transaction (rolled back, then mapped to 404/409)
+class LossRejected extends Error {
+  constructor(status, body) { super(body.error); this.status = status; this.body = body; }
+}
+
 // ==========================================
 // 0. LIST INVENTORY ITEMS (used by the Create Order item picker)
+// -> { source, items: [... , quantity_available_net] }   identical shape online and offline (M10)
 // ==========================================
 router.get('/', requireRole(['Admin', 'Production', 'Staff']), async (req, res) => {
-  const withAvailability = (rows) =>
-    rows.map((row) => ({ ...row, quantity_available_net: computeAvailable(row) }));
-
   try {
-    const result = await req.pgPool.query(
-      `SELECT inventory_id, item_name, item_category, quantity_available, quantity_reserved, minimum_threshold, unit_cost
-       FROM inventory_items ORDER BY item_name`
-    );
-    return res.status(200).json({ source: 'cloud', items: withAvailability(result.rows) });
-  } catch (onlineError) { // GET /  (list inventory)
-    // C5: only a real connection failure may fall back to the offline cache
-    if (!isConnectionError(onlineError)) {
-      return sendDbError(res, onlineError, 'listing inventory');
-    }
-
-    console.error('Cloud DB unreachable. Listing inventory from SQLite:', onlineError.message);
-    req.localDb.all(
-      `SELECT inventory_id, item_name, item_category, quantity_available, quantity_reserved, minimum_threshold, unit_cost
-       FROM inventory_items ORDER BY item_name`,
-      [],
-      (offlineError, rows) => {
-        if (offlineError) {
-          return res.status(500).json({ error: 'Critical Failure: Both databases unreachable.' });
-        }
-        return res.status(200).json({ source: 'local', items: withAvailability(rows) });
-      }
-    );
+    const { source, records } = await listRecords(req, 'inventory_items', { orderBy: 'item_name, inventory_id' });
+    res.status(200).json({ source, items: records.map(withAvailability) });
+  } catch (err) {
+    sendDbError(res, err, 'listing inventory');
   }
 });
 
 // ==========================================
-// 1. ADD NEW INVENTORY ITEM
+// 1. ADD NEW INVENTORY ITEM -> 201 { message, source, item }
 // ==========================================
 router.post('/', requireRole(['Admin', 'Production']), async (req, res) => {
-  const { item_name, item_category, quantity_available, minimum_threshold, unit_cost } = req.body;
+  const body = req.body || {};
 
-  if (!item_name || !item_category || unit_cost === undefined) {
-    return res.status(400).json({ error: 'Name, category, and unit cost are required.' });
-  }
+  const v = createValidator();
+  const item_name = v.requiredString(body.item_name, 'item_name', 255);
+  const item_category = v.requiredString(body.item_category, 'item_category', 100);
+  const quantity_available = v.nonNegativeInt(body.quantity_available, 'quantity_available', 0);
+  const minimum_threshold = v.nonNegativeInt(body.minimum_threshold, 'minimum_threshold', 0);
+  const unit_cost = v.nonNegativeMoney(body.unit_cost, 'unit_cost');
+  if (v.failed()) return v.send(res);
 
   const inventory_id = crypto.randomUUID();
+  const values = [inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost];
 
   try {
-    const query = `
-      INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING *;
-    `;
-    const values = [inventory_id, item_name, item_category, quantity_available || 0, minimum_threshold || 0, unit_cost];
-    
-    const result = await req.pgPool.query(query, values);
-    res.status(201).json({ message: "Inventory item added (Online)", item: result.rows[0] });
-
-  } catch (onlineError) { // POST /  (add item)
-    // C5: only a real connection failure may fall back to the offline cache
-    if (!isConnectionError(onlineError)) {
-      return sendDbError(res, onlineError, 'adding inventory item');
-    }
-    
-    console.error("Cloud DB unreachable. Saving inventory to SQLite:", onlineError.message);
+    let result;
     try {
-      const sqliteQuery = `
-        INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, sync_status, last_modified)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW});
-      `;
-      const sqliteValues = [inventory_id, item_name, item_category, quantity_available || 0, minimum_threshold || 0, unit_cost];
-      
-      req.localDb.run(sqliteQuery, sqliteValues, function(offlineError) {
-        if (offlineError) return sendDbError(res, offlineError, 'saving inventory item offline');
-        
-        res.status(201).json({ 
-          message: "Inventory item saved locally (Offline Mode).", 
-          item: { inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost } 
-        });
-      });
-    } catch (fallbackError) {
-      res.status(500).json({ error: "Offline fallback failed." });
+      const { rows } = await req.pgPool.query(
+        `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${selectList('inventory_items', 'pg')}`,
+        values
+      );
+      result = { source: 'cloud', record: serialize('inventory_items', rows[0]) };
+    } catch (onlineError) {
+      if (!isConnectionError(onlineError)) throw onlineError; // C5
+      console.error('Cloud DB unreachable. Saving inventory to SQLite:', onlineError.message);
+      await sqliteRun(
+        req.localDb,
+        `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, sync_status, last_modified)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+        values
+      );
+      result = { source: 'local', record: await readLocal(req.localDb, 'inventory_items', inventory_id) };
     }
+
+    res.status(201).json({
+      message: result.source === 'cloud' ? 'Inventory item added.' : 'Inventory item saved locally (Offline Mode).',
+      source: result.source,
+      item: withAvailability(result.record)
+    });
+  } catch (err) {
+    sendDbError(res, err, 'adding inventory item');
   }
 });
 
 // ==========================================
-// 2. RECORD MATERIAL LOSS
+// 2. RECORD MATERIAL LOSS (Audit fix M9)
+// Body: { quantity_lost, loss_reason, order_id?, financial_cost? }
+// The loss record and the stock reduction are written in ONE transaction, so they either
+// both happen or neither does. financial_cost defaults to unit_cost x quantity_lost.
+// -> 201 { message, source, loss, item }
+//    404 INVENTORY_ITEM_NOT_FOUND / ORDER_NOT_FOUND
+//    409 INSUFFICIENT_STOCK when the loss is larger than the stock on hand
 // ==========================================
 router.post('/:inventory_id/loss', requireRole(['Admin', 'Production']), async (req, res) => {
   const { inventory_id } = req.params;
-  const { order_id, quantity_lost, loss_reason, financial_cost } = req.body;
+  const body = req.body || {};
 
-  if (!quantity_lost || !loss_reason) {
-    return res.status(400).json({ error: 'Quantity lost and reason are required.' });
-  }
+  const v = createValidator();
+  const quantity_lost = v.positiveInt(body.quantity_lost, 'quantity_lost');
+  const loss_reason = v.requiredString(body.loss_reason, 'loss_reason', 1000);
+  const order_id = v.id(body.order_id, 'order_id', { required: false });
+  const financial_cost = v.nonNegativeMoney(body.financial_cost, 'financial_cost', { required: false, defaultValue: null });
+  if (v.failed()) return v.send(res);
 
   const loss_id = crypto.randomUUID();
-  // If no order_id is provided (e.g., general shop damage), set it to null
-  const linked_order = order_id || null; 
+  const insufficient = (available) => new LossRejected(409, {
+    error: 'INSUFFICIENT_STOCK',
+    message: `Cannot record a loss of ${quantity_lost}: only ${available} in stock.`,
+    quantity_available: available,
+    quantity_lost
+  });
+  const missingItem = () => new LossRejected(404, {
+    error: 'INVENTORY_ITEM_NOT_FOUND', message: `Inventory item ${inventory_id} does not exist.`
+  });
+
+  // ---- Online: lock the stock row, decrement, insert, commit ----
+  const recordInCloud = () => withPgTransaction(req.pgPool, async (client) => {
+    const stock = await client.query(
+      'SELECT quantity_available FROM inventory_items WHERE inventory_id = $1 FOR UPDATE',
+      [inventory_id]
+    );
+    if (stock.rowCount === 0) throw missingItem();
+    if (stock.rows[0].quantity_available < quantity_lost) throw insufficient(stock.rows[0].quantity_available);
+
+    const item = await client.query(
+      `UPDATE inventory_items SET quantity_available = quantity_available - $1, last_modified = NOW()
+        WHERE inventory_id = $2 RETURNING ${selectList('inventory_items', 'pg')}, unit_cost AS raw_unit_cost`,
+      [quantity_lost, inventory_id]
+    );
+    const loss = await client.query(
+      `INSERT INTO material_loss (loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost)
+       VALUES ($1, $2, $3, $4::int, $5, COALESCE($6::numeric, ROUND($7::numeric * $4::int, 2)))
+       RETURNING ${selectList('material_loss', 'pg')}`,
+      [loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost, item.rows[0].raw_unit_cost]
+    );
+    return { source: 'cloud', loss: serialize('material_loss', loss.rows[0]), item: serialize('inventory_items', item.rows[0]) };
+  });
+
+  // ---- Offline: same transaction on a dedicated SQLite connection ----
+  // If the item already exists in Neon, the stock reduction is replayed there when this loss
+  // syncs (cloud_stock_delta). If the item itself was created offline, the reduction is baked
+  // into the item's pending insert instead (delta 0), so it is never applied twice.
+  const recordLocally = () => withLocalTransaction(req.localDbPath, async (tx) => {
+    const stock = await sqliteGet(tx,
+      'SELECT quantity_available, unit_cost, sync_status FROM inventory_items WHERE inventory_id = ?', [inventory_id]);
+    if (!stock) throw missingItem();
+    if (stock.quantity_available < quantity_lost) throw insufficient(stock.quantity_available);
+
+    const itemIsLocalOnly = stock.sync_status === 'pending_insert';
+    await sqliteRun(tx,
+      itemIsLocalOnly
+        ? `UPDATE inventory_items SET quantity_available = quantity_available - ?,
+             ${offlineUpdateBookkeeping('inventory_items', ['quantity_available'])} WHERE inventory_id = ?`
+        : 'UPDATE inventory_items SET quantity_available = quantity_available - ? WHERE inventory_id = ?',
+      [quantity_lost, inventory_id]);
+
+    const cost = financial_cost !== null ? financial_cost : Math.round(stock.unit_cost * quantity_lost * 100) / 100;
+    await sqliteRun(tx,
+      `INSERT INTO material_loss (loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost,
+                                  cloud_stock_delta, sync_status, last_modified)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+      [loss_id, order_id, inventory_id, quantity_lost, loss_reason, cost, itemIsLocalOnly ? 0 : quantity_lost]);
+
+    return {
+      source: 'local',
+      loss: await readLocal(tx, 'material_loss', loss_id),
+      item: await readLocal(tx, 'inventory_items', inventory_id)
+    };
+  });
 
   try {
-    const query = `
-      INSERT INTO material_loss (loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING *;
-    `;
-    const values = [loss_id, linked_order, inventory_id, quantity_lost, loss_reason, financial_cost || 0.00];
-    
-    const result = await req.pgPool.query(query, values);
-    res.status(201).json({ message: "Material loss recorded (Online)", loss: result.rows[0] });
-
-  } catch (onlineError) { // POST /:inventory_id/loss
-    // C5: only a real connection failure may fall back to the offline cache
-    if (!isConnectionError(onlineError)) {
-      return sendDbError(res, onlineError, 'recording material loss');
+    // M7: the inventory item (and the order, if given) must exist
+    const item = await locateRecord(req, 'inventory_items', inventory_id);
+    if (!item.location) return res.status(404).json(missingItem().body);
+    let target = item.location;
+    if (order_id) {
+      const order = await locateRecord(req, 'order_profiles', order_id);
+      if (!order.location) return res.status(404).json({ error: 'ORDER_NOT_FOUND', message: `Order ${order_id} does not exist.` });
+      if (order.location === 'local') target = 'local';
     }
 
-    console.error("Cloud DB unreachable. Saving loss to SQLite:", onlineError.message);
-    try {
-      const sqliteQuery = `
-        INSERT INTO material_loss (loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost, sync_status, last_modified)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW});
-      `;
-      const sqliteValues = [loss_id, linked_order, inventory_id, quantity_lost, loss_reason, financial_cost || 0.00];
-      
-      req.localDb.run(sqliteQuery, sqliteValues, function(offlineError) {
-        if (offlineError) return sendDbError(res, offlineError, 'saving material loss offline');
-        
-        res.status(201).json({ 
-          message: "Material loss saved locally (Offline Mode).", 
-          loss: { loss_id, order_id: linked_order, inventory_id, quantity_lost, loss_reason, financial_cost } 
-        });
-      });
-    } catch (fallbackError) {
-      res.status(500).json({ error: "Offline fallback failed." });
+    let result;
+    if (target === 'local') {
+      result = await recordLocally();
+    } else {
+      try {
+        result = await recordInCloud();
+      } catch (err) {
+        if (err instanceof LossRejected || !isConnectionError(err)) throw err;
+        if (err.commitUnknown) {
+          return res.status(503).json({
+            error: 'COMMIT_UNKNOWN',
+            message: 'Connection to the cloud dropped while saving. Check the loss list before retrying.'
+          });
+        }
+        console.error('Cloud DB unreachable. Recording loss offline:', err.message);
+        result = await recordLocally();
+      }
     }
+
+    res.status(201).json({
+      message: result.source === 'cloud' ? 'Material loss recorded.' : 'Material loss saved locally (Offline Mode).',
+      source: result.source,
+      loss: result.loss,
+      item: withAvailability(result.item)
+    });
+  } catch (err) {
+    if (err instanceof LossRejected) return res.status(err.status).json(err.body);
+    sendDbError(res, err, 'recording material loss');
   }
 });
 
@@ -162,7 +232,7 @@ router.post('/check-capacity', requireRole(['Admin', 'Production', 'Staff']), as
 
   const normalized = normalizeRequiredItems(required_items);
   if (normalized.error) {
-    return res.status(400).json({ error: normalized.error });
+    return res.status(400).json({ error: 'VALIDATION_FAILED', message: normalized.error });
   }
 
   let evaluation;

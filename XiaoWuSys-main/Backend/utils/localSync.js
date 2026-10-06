@@ -17,6 +17,13 @@ const PG_VERSION_FORMAT = 'YYYY-MM-DD"T"HH24:MI:SS.US';
 //   sync_error          Last non-connection error from Neon, for diagnosis
 const LOCAL_SYNC_COLUMNS = ['dirty_fields', 'cloud_last_modified', 'sync_conflict', 'sync_error'];
 
+// Table-specific local-only columns
+//   material_loss.cloud_stock_delta  stock to subtract in Neon when this offline loss syncs (M9);
+//                                    0 when the reduction is already baked into an offline-created item
+const TABLE_EXTRA_COLUMNS = {
+  material_loss: [['cloud_stock_delta', 'INTEGER']]
+};
+
 const all = (db, sql, params = []) =>
   new Promise((resolve, reject) => db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
 const run = (db, sql, params = []) =>
@@ -30,9 +37,10 @@ const ensureLocalSyncColumns = async (db, tables) => {
       console.warn(`⚠️ Local table ${table} not found. Run "node initLocalDb.js" first.`);
       continue;
     }
-    for (const column of LOCAL_SYNC_COLUMNS) {
+    const columns = [...LOCAL_SYNC_COLUMNS.map((c) => [c, 'TEXT']), ...(TABLE_EXTRA_COLUMNS[table] || [])];
+    for (const [column, type] of columns) {
       if (!existing.has(column)) {
-        await run(db, `ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
+        await run(db, `ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
         console.log(`🛠️  Added local sync column ${table}.${column}`);
       }
     }

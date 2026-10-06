@@ -6,6 +6,7 @@ const { Server } = require('socket.io');
 const { Pool } = require('pg');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { verifyToken, requireRole } = require('./middleware/authMiddleware');
 const { createOrderLockManager } = require('./services/orderLocks');
@@ -25,7 +26,14 @@ const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '100kb' }));
+
+// Audit fix M8: Express 5 leaves req.body undefined when a request has no JSON body.
+// Default it to {} so destructuring in routes can never throw.
+app.use((req, res, next) => {
+  if (req.body === undefined || req.body === null) req.body = {};
+  next();
+});
 
 // ================= DATABASE CONFIGURATION =================
 
@@ -72,6 +80,9 @@ const localDb = new sqlite3.Database(sqliteDbPath, (err) => {
 // initLocalDb.js only enabled them on its own short-lived connection, so the running
 // server ignored REFERENCES / ON DELETE CASCADE. Queued first, so it runs before any query.
 localDb.run('PRAGMA foreign_keys = ON;');
+// M9: offline transactions use a short-lived second connection; wait for its lock instead
+// of failing immediately with SQLITE_BUSY.
+localDb.configure('busyTimeout', 5000);
 localDb.get('PRAGMA foreign_keys;', (err, row) => {
   if (err || !row || row.foreign_keys !== 1) {
     console.error('❌ Could not enable SQLite foreign keys:', err ? err.message : 'PRAGMA returned 0');
@@ -154,6 +165,7 @@ io.on('connection', (socket) => {
 app.use((req, res, next) => {
   req.pgPool = pgPool;
   req.localDb = localDb;
+  req.localDbPath = sqliteDbPath;
   req.orderLocks = orderLocks;
   next();
 });
@@ -213,6 +225,35 @@ app.get('/api/sync/conflicts', verifyToken, requireRole(['Owner', 'Admin']), asy
   } catch (error) {
     res.status(500).json({ error: 'Could not read sync conflicts.' });
   }
+});
+
+// ================= ERROR HANDLING (Audit fix M8) =================
+// Every failure leaves the API as structured JSON. No HTML pages, no stack traces.
+
+// Unknown API routes
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'NOT_FOUND', message: `No route for ${req.method} ${req.originalUrl}.` });
+});
+
+// Global error handler (must have 4 arguments). Express 5 also routes rejected
+// promises from async handlers here.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'INVALID_JSON', message: 'Request body is not valid JSON.' });
+  }
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'PAYLOAD_TOO_LARGE', message: 'Request body is too large.' });
+  }
+  if (err.type && err.status >= 400 && err.status < 500) {
+    return res.status(err.status).json({ error: 'BAD_REQUEST', message: 'The request could not be read.' });
+  }
+
+  const errorId = crypto.randomUUID();
+  console.error(`❌ Unhandled error ${errorId} on ${req.method} ${req.originalUrl}:`, err);
+  res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Something went wrong on the server.', error_id: errorId });
 });
 
 // ================= START SERVER =================
