@@ -1,12 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Package, PlusCircle, TrendingUp, LogOut, TriangleAlert, Clock, XCircle, Trash2, Plus, X } from 'lucide-react';
+import { io } from 'socket.io-client';
 import InventoryCatalog from './InventoryCatalog';
 
 const API_BASE = 'http://localhost:5000/api';
+const SOCKET_URL = API_BASE.replace(/\/api\/?$/, '');
 
 const emptyOrderLine = () => ({ inventory_id: '', quantity_needed: '' });
 
+// Polling is only a fallback for when the real-time socket is disconnected
 const INVENTORY_POLL_MS = 30000;
+const CHANGE_HIGHLIGHT_MS = 2500;
 
 // GET /api/inventory. Never throws: resolves to { ok, status, data } or { networkError }.
 const fetchInventorySnapshot = async (token) => {
@@ -50,6 +54,10 @@ export default function App() {
   const [inventoryMeta, setInventoryMeta] = useState({ summary: EMPTY_SUMMARY, categories: [], source: null, fetchedAt: null });
   const [inventoryLoading, setInventoryLoading] = useState(false);
   const [inventoryError, setInventoryError] = useState('');
+  // Real-time push: 'connecting' | 'live' | 'disconnected'; cloudListening = cross-branch NOTIFY active
+  const [liveStatus, setLiveStatus] = useState('connecting');
+  const [cloudListening, setCloudListening] = useState(false);
+  const [recentlyChanged, setRecentlyChanged] = useState([]);
 
   // Sprint 9: Order materials + Capacity Alert (PB 9 & PB 10)
   const [orderLines, setOrderLines] = useState([emptyOrderLine()]);
@@ -98,7 +106,41 @@ export default function App() {
     setInventoryTick(t => t + 1);
   };
 
-  // Load on login / tab change / refresh, then poll while Catalog or Analytics is open
+  // Real-time stock updates over Socket.io (server pushes a full snapshot on every change)
+  useEffect(() => {
+    if (!token) return undefined;
+    const socket = io(SOCKET_URL, { auth: { token }, transports: ['websocket', 'polling'] });
+    let highlightTimer = null;
+
+    socket.on('connect', () => {
+      setLiveStatus('live');
+      socket.emit('inventory_subscribe', {}, (reply) => {
+        if (!reply) return;
+        setCloudListening(Boolean(reply.listening));
+        if (reply.ok) applyInventoryResult({ ok: true, status: 200, data: reply.snapshot });
+      });
+    });
+    socket.on('disconnect', () => setLiveStatus('disconnected'));
+    socket.on('connect_error', () => setLiveStatus('disconnected'));
+    socket.on('inventory_live', ({ listening }) => setCloudListening(Boolean(listening)));
+    socket.on('inventory_updated', ({ changed_ids, snapshot }) => {
+      applyInventoryResult({ ok: true, status: 200, data: snapshot });
+      if (Array.isArray(changed_ids) && changed_ids.length > 0) {
+        setRecentlyChanged(changed_ids);
+        clearTimeout(highlightTimer);
+        highlightTimer = setTimeout(() => setRecentlyChanged([]), CHANGE_HIGHLIGHT_MS);
+      }
+    });
+
+    return () => {
+      clearTimeout(highlightTimer);
+      socket.disconnect();
+    };
+    // applyInventoryResult only calls state setters, which are stable
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  // Load on login / tab change / refresh; poll only while the socket is down
   useEffect(() => {
     if (!token) return undefined;
     let cancelled = false;
@@ -106,7 +148,7 @@ export default function App() {
       if (!cancelled) applyInventoryResult(result);
     });
     load();
-    const timer = activeTab === 'add' ? null : setInterval(() => {
+    const timer = (activeTab === 'add' || liveStatus === 'live') ? null : setInterval(() => {
       if (document.visibilityState === 'visible') load();
     }, INVENTORY_POLL_MS);
     return () => {
@@ -115,7 +157,7 @@ export default function App() {
     };
     // applyInventoryResult only calls state setters, which are stable
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, activeTab, inventoryTick]);
+  }, [token, activeTab, inventoryTick, liveStatus]);
 
   const handleAuth = async (e) => {
     e.preventDefault();
@@ -332,6 +374,9 @@ export default function App() {
             loading={inventoryLoading}
             error={inventoryError}
             onRefresh={refreshInventory}
+            liveStatus={liveStatus}
+            cloudListening={cloudListening}
+            recentlyChanged={recentlyChanged}
           />
         )}
 
