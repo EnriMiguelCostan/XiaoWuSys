@@ -1,9 +1,25 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Package, PlusCircle, TrendingUp, LogOut, TriangleAlert, Clock, XCircle, Trash2, Plus, X } from 'lucide-react';
+import InventoryCatalog from './InventoryCatalog';
 
 const API_BASE = 'http://localhost:5000/api';
 
 const emptyOrderLine = () => ({ inventory_id: '', quantity_needed: '' });
+
+const INVENTORY_POLL_MS = 30000;
+
+// GET /api/inventory. Never throws: resolves to { ok, status, data } or { networkError }.
+const fetchInventorySnapshot = async (token) => {
+  try {
+    const res = await fetch(`${API_BASE}/inventory`, { headers: { Authorization: `Bearer ${token}` } });
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, data };
+  } catch (err) {
+    console.error('Failed to fetch inventory', err);
+    return { networkError: true };
+  }
+};
+const EMPTY_SUMMARY = { total_items: 0, in_stock: 0, low_stock: 0, out_of_stock: 0, unsynced: 0, stock_value: 0 };
 
 // 'YYYY-MM-DD' for the day after the given date string (used as the min for a delayed deadline)
 const dayAfter = (dateStr) => {
@@ -17,8 +33,6 @@ export default function App() {
   const [token, setToken] = useState(localStorage.getItem('xiaomei_token') || '');
   const [user, setUser] = useState(JSON.parse(localStorage.getItem('xiaomei_user')) || null);
   const [activeTab, setActiveTab] = useState('catalog');
-  const [items, setItems] = useState([]);
-  const [refreshKey, setRefreshKey] = useState(0);
 
   // Auth Form State for XiaoMei Printing
   // Public sign-up was removed (audit C1): accounts are created by an Admin.
@@ -31,8 +45,13 @@ export default function App() {
   const [productionDeadline, setProductionDeadline] = useState('');
   const [orderStatusMsg, setOrderStatusMsg] = useState('');
 
-  // Sprint 9: Order materials + Capacity Alert (PB 9 & PB 10)
+  // Inventory snapshot from GET /api/inventory, shared by Catalog, Create Order and Analytics
   const [inventory, setInventory] = useState([]);
+  const [inventoryMeta, setInventoryMeta] = useState({ summary: EMPTY_SUMMARY, categories: [], source: null, fetchedAt: null });
+  const [inventoryLoading, setInventoryLoading] = useState(false);
+  const [inventoryError, setInventoryError] = useState('');
+
+  // Sprint 9: Order materials + Capacity Alert (PB 9 & PB 10)
   const [orderLines, setOrderLines] = useState([emptyOrderLine()]);
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
   const [capacityAlert, setCapacityAlert] = useState(null); // { message, shortages, total_shortfall, pendingOrder }
@@ -40,42 +59,63 @@ export default function App() {
   const [delayedDeadline, setDelayedDeadline] = useState('');
   const [alertError, setAlertError] = useState('');
 
+  const handleLogout = useCallback(() => {
+    setToken('');
+    setUser(null);
+    localStorage.removeItem('xiaomei_token');
+    localStorage.removeItem('xiaomei_user');
+  }, []);
+
+  // Applies one GET /api/inventory result. Only ever called from a promise callback.
+  const applyInventoryResult = ({ ok, status, data, networkError }) => {
+    setInventoryLoading(false);
+    if (networkError) {
+      setInventoryError('Cannot reach the server. Showing the last loaded data.');
+      return;
+    }
+    if (status === 401) {
+      handleLogout(); // expired session
+      return;
+    }
+    if (!ok) {
+      setInventoryError(data.message || data.error || 'Could not load inventory.');
+      return;
+    }
+    setInventory(Array.isArray(data.items) ? data.items : []);
+    setInventoryMeta({
+      summary: data.summary || EMPTY_SUMMARY,
+      categories: Array.isArray(data.categories) ? data.categories : [],
+      source: data.source || null,
+      fetchedAt: data.fetched_at || new Date().toISOString()
+    });
+    setInventoryError('');
+  };
+
+  // Bumping this re-runs the load effect (manual refresh, after an order is saved)
+  const [inventoryTick, setInventoryTick] = useState(0);
+  const refreshInventory = () => {
+    setInventoryLoading(true);
+    setInventoryTick(t => t + 1);
+  };
+
+  // Load on login / tab change / refresh, then poll while Catalog or Analytics is open
   useEffect(() => {
-    async function fetchItems() {
-      try {
-        const res = await fetch(`${API_BASE}/items`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        const data = await res.json();
-        if (res.ok) setItems(Array.isArray(data) ? data : []);
-      } catch (err) {
-        console.error('Failed to fetch items', err);
-      }
-    }
-
-    if (token) {
-      fetchItems();
-    }
-  }, [token, refreshKey]);
-
-  // Load inventory for the Create Order item picker
-  useEffect(() => {
-    async function fetchInventory() {
-      try {
-        const res = await fetch(`${API_BASE}/inventory`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        const data = await res.json();
-        if (res.ok) setInventory(Array.isArray(data.items) ? data.items : []);
-      } catch (err) {
-        console.error('Failed to fetch inventory', err);
-      }
-    }
-
-    if (token && activeTab === 'add') {
-      fetchInventory();
-    }
-  }, [token, activeTab]);
+    if (!token) return undefined;
+    let cancelled = false;
+    const load = () => fetchInventorySnapshot(token).then(result => {
+      if (!cancelled) applyInventoryResult(result);
+    });
+    load();
+    const timer = activeTab === 'add' ? null : setInterval(() => {
+      if (document.visibilityState === 'visible') load();
+    }, INVENTORY_POLL_MS);
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+    // applyInventoryResult only calls state setters, which are stable
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, activeTab, inventoryTick]);
 
   const handleAuth = async (e) => {
     e.preventDefault();
@@ -103,13 +143,6 @@ export default function App() {
       console.error('Server connection error:', err);
       setAuthError('Failed to connect to the backend.');
     }
-  };
-
-  const handleLogout = () => {
-    setToken('');
-    setUser(null);
-    localStorage.removeItem('xiaomei_token');
-    localStorage.removeItem('xiaomei_user');
   };
 
   const postOrder = async (payload) => {
@@ -163,6 +196,7 @@ export default function App() {
       if (res.ok) {
         setOrderStatusMsg(`Order Created Successfully! ID: ${data.order_id || data.id || ''}`);
         resetOrderForm();
+        refreshInventory();
       } else if (res.status === 409) {
         // PB 9 halt caught -> PB 10 warning modal
         setCapacityAlert({
@@ -220,21 +254,7 @@ export default function App() {
     }
   };
 
-  const toggleSoldStatus = async (id) => {
-    const res = await fetch(`${API_BASE}/items/${id}/status`, {
-      method: 'PATCH',
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    if (res.ok) setRefreshKey(prev => prev + 1);
-  };
-
-  // Safe Calculations with fallbacks for undefined properties
-  const totalCost = items.reduce((acc, item) => acc + (item.costPrice || 0), 0);
-  const totalRevenue = items.reduce((acc, item) => acc + (item.sellingPrice || 0), 0);
-  const realizedProfit = items
-    .filter(item => item.status === 'sold')
-    .reduce((acc, item) => acc + ((item.sellingPrice || 0) - (item.costPrice || 0)), 0);
-  const margin = totalRevenue > 0 ? (((totalRevenue - totalCost) / totalRevenue) * 100).toFixed(1) : 0;
+  const lowStockItems = inventory.filter(item => item.stock_status !== 'in_stock');
 
   if (!token) {
     return (
@@ -303,30 +323,16 @@ export default function App() {
 
       <main style={{ maxWidth: '1000px', margin: '2rem auto', padding: '0 1rem' }}>
         {activeTab === 'catalog' && (
-          <div style={styles.grid}>
-            {items.map(item => (
-              <div key={item.id} style={styles.card}>
-                <span style={item.status === 'sold' ? styles.badgeSold : styles.badgeAvailable}>
-                  {item.status}
-                </span>
-                <img src={item.imageUrl || 'https://via.placeholder.com/300'} alt={item.title} style={styles.cardImg} />
-                <div style={{ padding: '1rem' }}>
-                  <h3 style={{ fontSize: '1.1rem' }}>{item.title}</h3>
-                  <p style={{ color: '#64748b', fontSize: '0.875rem', margin: '0.5rem 0' }}>{item.description}</p>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.875rem' }}>
-                    <span>Cost: <strong>${(item.costPrice || 0).toFixed(2)}</strong></span>
-                    <span>Price: <strong>${(item.sellingPrice || 0).toFixed(2)}</strong></span>
-                  </div>
-                  <button 
-                    onClick={() => toggleSoldStatus(item.id)} 
-                    style={item.status === 'sold' ? styles.btnSecondary : styles.btnSuccess}
-                  >
-                    {item.status === 'sold' ? 'Mark Available' : 'Mark as Sold'}
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
+          <InventoryCatalog
+            items={inventory}
+            summary={inventoryMeta.summary}
+            categories={inventoryMeta.categories}
+            source={inventoryMeta.source}
+            fetchedAt={inventoryMeta.fetchedAt}
+            loading={inventoryLoading}
+            error={inventoryError}
+            onRefresh={refreshInventory}
+          />
         )}
 
         {activeTab === 'add' && (
@@ -522,22 +528,52 @@ export default function App() {
         )}
 
         {activeTab === 'metrics' && (
-          <div style={styles.metricsGrid}>
-            <div style={styles.metricCard}>
-              <h4>Total Items</h4>
-              <p>{items.length}</p>
+          <div>
+            <div style={styles.metricsGrid}>
+              <div style={styles.metricCard}>
+                <h4>Total Items</h4>
+                <p>{inventoryMeta.summary.total_items}</p>
+              </div>
+              <div style={styles.metricCard}>
+                <h4>Stock Value</h4>
+                <p>₱{inventoryMeta.summary.stock_value.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+              </div>
+              <div style={styles.metricCard}>
+                <h4>Low Stock</h4>
+                <p style={{ color: '#92400e' }}>{inventoryMeta.summary.low_stock}</p>
+              </div>
+              <div style={styles.metricCard}>
+                <h4>Out of Stock</h4>
+                <p style={{ color: '#991b1b' }}>{inventoryMeta.summary.out_of_stock}</p>
+              </div>
             </div>
-            <div style={styles.metricCard}>
-              <h4>Sourced Cost</h4>
-              <p>${totalCost.toFixed(2)}</p>
-            </div>
-            <div style={styles.metricCard}>
-              <h4>Realized Profit</h4>
-              <p>${realizedProfit.toFixed(2)}</p>
-            </div>
-            <div style={styles.metricCard}>
-              <h4>Profit Margin</h4>
-              <p>{margin}%</p>
+
+            <div style={{ ...styles.formCard, maxWidth: 'none', marginTop: '1.5rem', padding: '1.5rem' }}>
+              <h3 style={{ marginTop: 0, fontSize: '1.05rem' }}>Needs Restocking</h3>
+              {lowStockItems.length === 0 ? (
+                <p style={styles.hint}>All materials are above their minimum threshold.</p>
+              ) : (
+                <table style={styles.table}>
+                  <thead>
+                    <tr>
+                      <th style={styles.th}>Material</th>
+                      <th style={styles.thNum}>Available</th>
+                      <th style={styles.thNum}>Reserved</th>
+                      <th style={styles.thNum}>Min. Threshold</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {lowStockItems.map(item => (
+                      <tr key={item.inventory_id}>
+                        <td style={styles.td}>{item.item_name}</td>
+                        <td style={styles.tdNum}>{item.quantity_available}</td>
+                        <td style={styles.tdNum}>{item.quantity_reserved}</td>
+                        <td style={{ ...styles.tdNum, fontWeight: 'bold' }}>{item.minimum_threshold}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
         )}
@@ -557,12 +593,6 @@ const styles = {
   nav: { display: 'flex', gap: '0.5rem' },
   navBtn: { display: 'flex', alignItems: 'center', gap: '0.25rem', padding: '0.5rem 1rem', background: 'none', border: 'none', cursor: 'pointer', color: '#64748b' },
   navActive: { display: 'flex', alignItems: 'center', gap: '0.25rem', padding: '0.5rem 1rem', background: '#e0e7ff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', color: '#4f46e5', fontWeight: 'bold' },
-  grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: '1.5rem' },
-  card: { background: '#fff', borderRadius: '0.5rem', overflow: 'hidden', border: '1px solid #e2e8f0', position: 'relative' },
-  cardImg: { width: '100%', height: '200px', objectFit: 'cover' },
-  badgeAvailable: { position: 'absolute', top: '10px', right: '10px', background: '#10b981', color: '#fff', padding: '0.25rem 0.5rem', borderRadius: '0.25rem', fontSize: '0.75rem', fontWeight: 'bold', textTransform: 'uppercase' },
-  badgeSold: { position: 'absolute', top: '10px', right: '10px', background: '#ef4444', color: '#fff', padding: '0.25rem 0.5rem', borderRadius: '0.25rem', fontSize: '0.75rem', fontWeight: 'bold', textTransform: 'uppercase' },
-  btnSuccess: { width: '100%', padding: '0.5rem', marginTop: '1rem', background: '#10b981', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer' },
   btnSecondary: { width: '100%', padding: '0.5rem', marginTop: '1rem', background: '#94a3b8', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer' },
   formCard: { background: '#fff', padding: '2rem', borderRadius: '0.5rem', maxWidth: '500px', margin: '0 auto', border: '1px solid #e2e8f0' },
   metricsGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' },
