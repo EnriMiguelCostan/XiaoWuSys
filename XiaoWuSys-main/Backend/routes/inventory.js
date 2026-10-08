@@ -44,7 +44,7 @@ class LossRejected extends Error {
 // Identical shape online and offline (M10). summary/categories describe the whole
 // catalog, not just the filtered page, so the dashboard counts stay stable while filtering.
 // ==========================================
-router.get('/', requireRole(['Admin', 'Production', 'Staff']), async (req, res) => {
+router.get('/', requireRole(['Owner', 'Admin', 'Production', 'Staff']), async (req, res) => {
   const v = createValidator();
   const category = v.optionalString(req.query.category, 'category', 100);
   const stock_status = v.oneOf(req.query.stock_status, 'stock_status', STOCK_STATUSES, { required: false });
@@ -61,7 +61,7 @@ router.get('/', requireRole(['Admin', 'Production', 'Staff']), async (req, res) 
 // ==========================================
 // 1. ADD NEW INVENTORY ITEM -> 201 { message, source, item }
 // ==========================================
-router.post('/', requireRole(['Admin', 'Production']), async (req, res) => {
+router.post('/', requireRole(['Owner', 'Admin', 'Production']), async (req, res) => {
   const body = req.body || {};
 
   const v = createValidator();
@@ -116,7 +116,7 @@ router.post('/', requireRole(['Admin', 'Production']), async (req, res) => {
 //    404 INVENTORY_ITEM_NOT_FOUND / ORDER_NOT_FOUND
 //    409 INSUFFICIENT_STOCK when the loss is larger than the stock on hand
 // ==========================================
-router.post('/:inventory_id/loss', requireRole(['Admin', 'Production']), async (req, res) => {
+router.post('/:inventory_id/loss', requireRole(['Owner', 'Admin', 'Production']), async (req, res) => {
   const { inventory_id } = req.params;
   const body = req.body || {};
 
@@ -171,7 +171,9 @@ router.post('/:inventory_id/loss', requireRole(['Admin', 'Production']), async (
     if (!stock) throw missingItem();
     if (stock.quantity_available < quantity_lost) throw insufficient(stock.quantity_available);
 
-    const itemIsLocalOnly = stock.sync_status === 'pending_insert';
+    // Also bake it in when the item already has unsynced offline edits (e.g. a manual
+    // adjustment): sync pushes the item's absolute quantity, so a replayed delta would double-count.
+    const itemIsLocalOnly = stock.sync_status !== 'synced';
     await sqliteRun(tx,
       itemIsLocalOnly
         ? `UPDATE inventory_items SET quantity_available = quantity_available - ?,
@@ -233,6 +235,121 @@ router.post('/:inventory_id/loss', requireRole(['Admin', 'Production']), async (
   } catch (err) {
     if (err instanceof LossRejected) return res.status(err.status).json(err.body);
     sendDbError(res, err, 'recording material loss');
+  }
+});
+
+// ==========================================
+// 2b. MANUAL STOCK ADJUSTMENT (Catalog +/- controls)
+// Body: { action: 'add' | 'subtract', quantity, reason? }
+// Adds delivered stock or removes stock that was taken out by hand. Lost/damaged stock
+// should go through /loss instead, so its cost is recorded.
+// -> 200 { message, source, previous_quantity, item }
+//    404 INVENTORY_ITEM_NOT_FOUND
+//    409 INSUFFICIENT_STOCK when subtracting more than is on hand
+//    503 COMMIT_UNKNOWN when the connection dropped during COMMIT
+// ==========================================
+router.post('/:inventory_id/adjust', requireRole(['Owner', 'Admin', 'Production']), async (req, res) => {
+  const { inventory_id } = req.params;
+  const body = req.body || {};
+
+  const v = createValidator();
+  const action = v.oneOf(body.action, 'action', ['add', 'subtract']);
+  const quantity = v.positiveInt(body.quantity, 'quantity');
+  const reason = v.optionalString(body.reason, 'reason', 255);
+  if (v.failed()) return v.send(res);
+
+  const delta = action === 'add' ? quantity : -quantity;
+  const missingItem = () => new LossRejected(404, {
+    error: 'INVENTORY_ITEM_NOT_FOUND', message: `Inventory item ${inventory_id} does not exist.`
+  });
+  const insufficient = (available) => new LossRejected(409, {
+    error: 'INSUFFICIENT_STOCK',
+    message: `Cannot subtract ${quantity}: only ${available} in stock.`,
+    quantity_available: available,
+    quantity_requested: quantity
+  });
+
+  // ---- Online: lock the row, apply the change with a SQL guard so stock never goes negative ----
+  const adjustInCloud = () => withPgTransaction(req.pgPool, async (client) => {
+    const stock = await client.query(
+      'SELECT quantity_available FROM inventory_items WHERE inventory_id = $1 FOR UPDATE',
+      [inventory_id]
+    );
+    if (stock.rowCount === 0) throw missingItem();
+    const previous = stock.rows[0].quantity_available;
+    if (previous + delta < 0) throw insufficient(previous);
+
+    const item = await client.query(
+      `UPDATE inventory_items SET quantity_available = quantity_available + $1, last_modified = NOW()
+        WHERE inventory_id = $2 AND quantity_available + $1 >= 0
+        RETURNING ${selectList('inventory_items', 'pg')}`,
+      [delta, inventory_id]
+    );
+    if (item.rowCount !== 1) throw insufficient(previous);
+    return { source: 'cloud', previous, item: serialize('inventory_items', item.rows[0]) };
+  });
+
+  // ---- Offline: same change on a dedicated SQLite connection ----
+  // The new absolute quantity is pushed on sync (pending_update + optimistic version check),
+  // so a concurrent cloud edit becomes a sync conflict instead of being overwritten.
+  // Any offline losses for this item are already included in that absolute value, so their
+  // cloud_stock_delta is cleared to avoid subtracting them twice in Neon.
+  const adjustLocally = () => withLocalTransaction(req.localDbPath, async (tx) => {
+    const stock = await sqliteGet(tx,
+      'SELECT quantity_available FROM inventory_items WHERE inventory_id = ?', [inventory_id]);
+    if (!stock) throw missingItem();
+    const previous = stock.quantity_available;
+    if (previous + delta < 0) throw insufficient(previous);
+
+    await sqliteRun(tx,
+      `UPDATE inventory_items SET quantity_available = quantity_available + ?,
+         ${offlineUpdateBookkeeping('inventory_items', ['quantity_available'])} WHERE inventory_id = ?`,
+      [delta, inventory_id]);
+    await sqliteRun(tx,
+      `UPDATE material_loss SET cloud_stock_delta = 0
+        WHERE inventory_id = ? AND sync_status = 'pending_insert' AND cloud_stock_delta > 0`,
+      [inventory_id]);
+
+    return { source: 'local', previous, item: await readLocal(tx, 'inventory_items', inventory_id) };
+  });
+
+  try {
+    const located = await locateRecord(req, 'inventory_items', inventory_id);
+    if (!located.location) return res.status(404).json(missingItem().body);
+
+    let result;
+    if (located.location === 'local') {
+      result = await adjustLocally();
+    } else {
+      try {
+        result = await adjustInCloud();
+      } catch (err) {
+        if (err instanceof LossRejected || !isConnectionError(err)) throw err;
+        if (err.commitUnknown) {
+          return res.status(503).json({
+            error: 'COMMIT_UNKNOWN',
+            message: 'Connection to the cloud dropped while saving. Refresh the catalog before retrying.'
+          });
+        }
+        console.error('Cloud DB unreachable. Adjusting stock offline:', err.message);
+        result = await adjustLocally();
+      }
+    }
+
+    console.log(`📦 Stock ${action} ${quantity} on ${inventory_id} by ${req.user.user_id} (${req.user.role})` +
+                `${reason ? `: ${reason}` : ''} [${result.source}]`);
+    pushStockChange(req, [inventory_id], `stock_${action}`);
+    res.status(200).json({
+      message: result.source === 'cloud'
+        ? `Stock ${action === 'add' ? 'added' : 'subtracted'}.`
+        : `Stock ${action === 'add' ? 'added' : 'subtracted'} locally (Offline Mode).`,
+      source: result.source,
+      previous_quantity: result.previous,
+      item: withAvailability(result.item)
+    });
+  } catch (err) {
+    if (err instanceof LossRejected) return res.status(err.status).json(err.body);
+    sendDbError(res, err, 'adjusting stock');
   }
 });
 

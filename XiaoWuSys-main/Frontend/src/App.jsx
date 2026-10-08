@@ -377,6 +377,10 @@ export default function App() {
             liveStatus={liveStatus}
             cloudListening={cloudListening}
             recentlyChanged={recentlyChanged}
+            apiBase={API_BASE}
+            token={token}
+            userRole={user?.role}
+            onUnauthorized={handleLogout}
           />
         )}
 
