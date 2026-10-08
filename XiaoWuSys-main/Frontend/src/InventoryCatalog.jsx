@@ -15,7 +15,16 @@ const peso = (n) => `₱${Number(n || 0).toLocaleString('en-PH', { minimumFracti
 
 const formatTime = (iso) => (iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—');
 
-export default function InventoryCatalog({ items, summary, categories, source, fetchedAt, loading, error, onRefresh }) {
+const LIVE_META = {
+  live: { dot: '#10b981', text: 'Live' },
+  connecting: { dot: '#f59e0b', text: 'Connecting…' },
+  disconnected: { dot: '#94a3b8', text: 'Not live · refreshing every 30s' }
+};
+
+export default function InventoryCatalog({
+  items, summary, categories, source, fetchedAt, loading, error, onRefresh,
+  liveStatus = 'disconnected', cloudListening = false, recentlyChanged = []
+}) {
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('');
   const [status, setStatus] = useState('');
@@ -43,7 +52,10 @@ export default function InventoryCatalog({ items, summary, categories, source, f
         <div>
           <h2 style={{ fontSize: '1.25rem', margin: 0, color: '#08060d' }}>Inventory</h2>
           <p style={s.meta}>
-            Last updated {formatTime(fetchedAt)} · refreshes every 30s
+            <span style={{ ...s.liveDot, background: (LIVE_META[liveStatus] || LIVE_META.disconnected).dot }} aria-hidden="true" />
+            <span style={{ fontWeight: 'bold' }}>{(LIVE_META[liveStatus] || LIVE_META.disconnected).text}</span>
+            {liveStatus === 'live' && !cloudListening && <span> (this server only)</span>}
+            <span> · Last updated {formatTime(fetchedAt)}</span>
           </p>
         </div>
         <button type="button" onClick={onRefresh} style={s.refreshBtn} disabled={loading} aria-label="Refresh inventory">
@@ -116,7 +128,11 @@ export default function InventoryCatalog({ items, summary, categories, source, f
             ? Math.min(100, (item.quantity_reserved / item.quantity_available) * 100)
             : 0;
           return (
-            <div key={item.inventory_id} data-inventory-id={item.inventory_id} style={{ ...s.card, borderTop: `4px solid ${meta.bar}` }}>
+            <div
+              key={item.inventory_id}
+              data-inventory-id={item.inventory_id}
+              style={{ ...s.card, borderTop: `4px solid ${meta.bar}`, ...(recentlyChanged.includes(item.inventory_id) ? s.cardChanged : {}) }}
+            >
               <div style={s.cardHead}>
                 <div style={{ minWidth: 0 }}>
                   <h3 style={s.itemName} title={item.item_name}>{item.item_name}</h3>
@@ -163,7 +179,9 @@ export default function InventoryCatalog({ items, summary, categories, source, f
 const s = {
   root: { textAlign: 'left' }, // index.css centers #root text
   topBar: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '1rem', gap: '1rem' },
-  meta: { margin: '0.25rem 0 0', fontSize: '0.8rem', color: '#64748b' },
+  meta: { display: 'flex', alignItems: 'center', gap: '0.35rem', margin: '0.25rem 0 0', fontSize: '0.8rem', color: '#64748b' },
+  liveDot: { display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%' },
+  cardChanged: { boxShadow: '0 0 0 3px #a5b4fc', transition: 'box-shadow 0.3s ease' },
   refreshBtn: { display: 'flex', alignItems: 'center', gap: '0.25rem', padding: '0.5rem 1rem', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '0.375rem', cursor: 'pointer', color: '#4f46e5', fontWeight: 'bold', fontSize: '0.875rem' },
   banner: { display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem', borderRadius: '0.375rem', marginBottom: '1rem', fontSize: '0.875rem' },
   summaryGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '1rem', marginBottom: '1rem' },
@@ -177,7 +195,7 @@ const s = {
   select: { flex: '1 1 150px', padding: '0.65rem', border: '1px solid #cbd5e1', borderRadius: '0.375rem', background: '#fff', fontSize: '0.875rem' },
   empty: { textAlign: 'center', color: '#64748b', padding: '2rem', background: '#fff', borderRadius: '0.5rem', border: '1px dashed #cbd5e1' },
   grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '1.5rem' },
-  card: { position: 'relative', background: '#fff', borderRadius: '0.5rem', border: '1px solid #e2e8f0', padding: '1rem' },
+  card: { position: 'relative', background: '#fff', borderRadius: '0.5rem', border: '1px solid #e2e8f0', padding: '1rem', transition: 'box-shadow 0.6s ease' },
   cardHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.5rem', marginBottom: '1rem' },
   itemName: { fontSize: '1.05rem', margin: 0, color: '#0f172a', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   category: { fontSize: '0.8rem', color: '#64748b' },

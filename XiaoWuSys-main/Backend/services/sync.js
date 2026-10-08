@@ -213,11 +213,14 @@ const pushUpdate = async (pgPool, spec, row) => {
 };
 
 // ---------- Neon -> SQLite refresh of parent tables ----------
-const refreshTable = async (pgPool, localDb, spec) => {
+// ids: optional list to refresh only those rows (used by the real-time NOTIFY handler)
+const refreshTable = async (pgPool, localDb, spec, ids = null) => {
   const cols = spec.columns;
   // ::text keeps timestamps/NUMERIC exact and avoids JS Date timezone shifts
   const { rows } = await pgPool.query(
-    `SELECT ${cols.map((c) => `${c}::text AS ${c}`).join(', ')}, ${versionExpr} AS version FROM ${spec.table}`
+    `SELECT ${cols.map((c) => `${c}::text AS ${c}`).join(', ')}, ${versionExpr} AS version FROM ${spec.table}` +
+      (ids ? ` WHERE ${spec.id} = ANY($1::text[])` : ''),
+    ids ? [ids] : []
   );
 
   const assignments = updatableColumns(spec).map((c) => `${c} = excluded.${c}`).join(', ');
@@ -229,18 +232,28 @@ const refreshTable = async (pgPool, localDb, spec) => {
        VALUES (${cols.map(() => '?').join(', ')}, ?, 'synced')
        ON CONFLICT (${spec.id}) DO UPDATE
          SET ${assignments}, cloud_last_modified = excluded.cloud_last_modified
-       WHERE ${spec.table}.sync_status = 'synced' AND ${spec.table}.sync_conflict IS NULL${spec.refreshGuard || ''}`,
+       WHERE ${spec.table}.sync_status = 'synced' AND ${spec.table}.sync_conflict IS NULL
+         AND ${spec.table}.cloud_last_modified IS NOT excluded.cloud_last_modified${spec.refreshGuard || ''}`,
       [...cols.map((c) => row[c]), row.version]
     );
   }
   return rows.length;
 };
 
-const refreshLocalCache = async (pgPool, localDb) => {
+// Same as above, but returns how many local rows actually changed (new or newer version)
+const refreshTableCounting = async (pgPool, localDb, spec) => {
+  const before = await sqliteAll(localDb, `SELECT total_changes() AS n`);
+  const rows = await refreshTable(pgPool, localDb, spec);
+  const after = await sqliteAll(localDb, `SELECT total_changes() AS n`);
+  return { rows, changed: after[0].n - before[0].n };
+};
+
+const refreshLocalCache = async (pgPool, localDb, summary) => {
   for (const table of REFRESH_TABLES) {
     try {
-      const count = await refreshTable(pgPool, localDb, specFor(table));
-      console.log(`⬇️  Refreshed ${count} ${table} row(s) into local cache`);
+      const { rows: count, changed } = await refreshTableCounting(pgPool, localDb, specFor(table));
+      if (table === 'inventory_items' && changed > 0) summary.inventory_changed = true;
+      console.log(`⬇️  Refreshed ${count} ${table} row(s) into local cache (${changed} changed)`);
     } catch (err) {
       if (isConnectionError(err)) throw err;
       console.error(`❌ Failed to refresh ${table} from cloud:`, err.message);
@@ -250,7 +263,7 @@ const refreshLocalCache = async (pgPool, localDb) => {
 
 // ---------- Main sync run ----------
 const runSync = async (pgPool, localDb) => {
-  const summary = { synced: 0, conflicts: [], failed: 0, requeued: 0, aborted: false };
+  const summary = { synced: 0, conflicts: [], failed: 0, requeued: 0, aborted: false, inventory_changed: false };
   console.log('🔄 Checking for offline data to sync...');
 
   for (const spec of SYNC_TABLES) {
@@ -276,6 +289,7 @@ const runSync = async (pgPool, localDb) => {
           continue;
         }
 
+        if (spec.table === 'inventory_items' || spec.table === 'material_loss') summary.inventory_changed = true;
         if ((await markAsSynced(localDb, spec, row, result.version)) === 1) {
           summary.synced++;
         } else {
@@ -298,7 +312,7 @@ const runSync = async (pgPool, localDb) => {
     }
   }
 
-  await refreshLocalCache(pgPool, localDb);
+  await refreshLocalCache(pgPool, localDb, summary);
   // Conflicts from earlier runs are skipped (not re-pushed) but still need a decision
   summary.unresolved_conflicts = (await listConflicts(localDb)).length;
   console.log(`✅ Sync finished: synced=${summary.synced} requeued=${summary.requeued} ` +
@@ -346,4 +360,9 @@ const listConflicts = async (localDb) => {
   return result;
 };
 
-module.exports = { syncOfflineData, isSyncRunning, listConflicts, SYNC_TABLES };
+// Real-time: copy just these cloud rows into the local cache, so offline mode starts from
+// current numbers instead of the last 5-minute refresh. Same guards as the full refresh.
+const refreshLocalRows = (pgPool, localDb, table, ids) =>
+  refreshTable(pgPool, localDb, specFor(table), ids);
+
+module.exports = { syncOfflineData, isSyncRunning, listConflicts, refreshLocalRows, SYNC_TABLES };

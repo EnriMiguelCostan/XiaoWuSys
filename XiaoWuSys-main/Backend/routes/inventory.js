@@ -3,7 +3,6 @@ const crypto = require('crypto');
 const router = express.Router();
 const { verifyToken, requireRole } = require('../middleware/authMiddleware');
 const {
-  computeAvailable,
   normalizeRequiredItems,
   evaluateCapacity,
   capacityFailureResponse
@@ -12,9 +11,16 @@ const { isConnectionError, sendDbError } = require('../utils/dbErrors');
 const { LOCAL_NOW, offlineUpdateBookkeeping } = require('../utils/localSync');
 const { createValidator } = require('../utils/validation');
 const {
-  selectList, serialize, listRecords, locateRecord, readLocal,
+  selectList, serialize, locateRecord, readLocal,
   withPgTransaction, withLocalTransaction, sqliteGet, sqliteRun
 } = require('../services/records');
+
+const { STOCK_STATUSES, withAvailability, buildInventorySnapshot } = require('../services/inventorySnapshot');
+
+// Real-time push (Socket.io) after any stock change made by this server
+const pushStockChange = (req, ids, reason) => {
+  if (req.inventoryEvents) req.inventoryEvents.notifyChanged(ids, reason);
+};
 
 router.use(verifyToken);
 
@@ -25,22 +31,6 @@ router.param('inventory_id', (req, res, next, value) => {
   if (v.failed()) return v.send(res);
   next();
 });
-
-// Stock health, computed on the server so every screen uses the same rule:
-//   out_of_stock  nothing free to use (available - reserved <= 0)
-//   low_stock     free stock at or below minimum_threshold
-//   in_stock      otherwise
-const STOCK_STATUSES = ['in_stock', 'low_stock', 'out_of_stock'];
-const stockStatusOf = (net, threshold) => {
-  if (net <= 0) return 'out_of_stock';
-  if (net <= threshold) return 'low_stock';
-  return 'in_stock';
-};
-
-const withAvailability = (item) => {
-  const net = computeAvailable(item);
-  return { ...item, quantity_available_net: net, stock_status: stockStatusOf(net, item.minimum_threshold || 0) };
-};
 
 // Business-rule failures inside a transaction (rolled back, then mapped to 404/409)
 class LossRejected extends Error {
@@ -62,31 +52,7 @@ router.get('/', requireRole(['Admin', 'Production', 'Staff']), async (req, res) 
   if (v.failed()) return v.send(res);
 
   try {
-    const { source, records } = await listRecords(req, 'inventory_items', { orderBy: 'item_name, inventory_id' });
-    const all = records.map(withAvailability);
-
-    const needle = search ? search.toLowerCase() : null;
-    const items = all.filter((item) =>
-      (!category || item.item_category === category) &&
-      (!stock_status || item.stock_status === stock_status) &&
-      (!needle || item.item_name.toLowerCase().includes(needle))
-    );
-
-    const count = (status) => all.filter((i) => i.stock_status === status).length;
-    res.status(200).json({
-      source,
-      fetched_at: new Date().toISOString(),
-      summary: {
-        total_items: all.length,
-        in_stock: count('in_stock'),
-        low_stock: count('low_stock'),
-        out_of_stock: count('out_of_stock'),
-        unsynced: all.filter((i) => i.sync_status !== 'synced').length,
-        stock_value: Math.round(all.reduce((sum, i) => sum + i.quantity_available * i.unit_cost, 0) * 100) / 100
-      },
-      categories: [...new Set(all.map((i) => i.item_category))].sort(),
-      items
-    });
+    res.status(200).json(await buildInventorySnapshot(req, { category, stock_status, search }));
   } catch (err) {
     sendDbError(res, err, 'listing inventory');
   }
@@ -130,6 +96,7 @@ router.post('/', requireRole(['Admin', 'Production']), async (req, res) => {
       result = { source: 'local', record: await readLocal(req.localDb, 'inventory_items', inventory_id) };
     }
 
+    pushStockChange(req, [inventory_id], 'item_added');
     res.status(201).json({
       message: result.source === 'cloud' ? 'Inventory item added.' : 'Inventory item saved locally (Offline Mode).',
       source: result.source,
@@ -256,6 +223,7 @@ router.post('/:inventory_id/loss', requireRole(['Admin', 'Production']), async (
       }
     }
 
+    pushStockChange(req, [inventory_id], 'material_loss');
     res.status(201).json({
       message: result.source === 'cloud' ? 'Material loss recorded.' : 'Material loss saved locally (Offline Mode).',
       source: result.source,

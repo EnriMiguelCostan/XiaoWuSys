@@ -11,6 +11,8 @@ const jwt = require('jsonwebtoken');
 const { verifyToken, requireRole } = require('./middleware/authMiddleware');
 const { createOrderLockManager } = require('./services/orderLocks');
 const { ensureLocalSyncColumns } = require('./utils/localSync');
+const { createInventoryEvents } = require('./services/inventoryEvents');
+const { checkCloudSchema } = require('./services/schemaCheck');
 
 // Initialize Express and HTTP Server (HTTP server is required for WebSockets)
 const app = express();
@@ -102,6 +104,15 @@ localDb.get('PRAGMA foreign_keys;', (err, row) => {
 // Re-emit 'editing_order' at least every 60s while editing to keep the lock (2 min TTL).
 const orderLocks = createOrderLockManager();
 
+// Real-time stock push: Postgres NOTIFY (all branches) + this server's own writes
+const inventoryEvents = createInventoryEvents({
+  io,
+  pgPool,
+  localDb,
+  databaseUrl: process.env.DATABASE_URL,
+  listenUrl: process.env.PG_LISTEN_URL
+});
+
 io.use((socket, next) => {
   const header = socket.handshake.headers.authorization || '';
   const token = socket.handshake.auth?.token || (header.startsWith('Bearer ') ? header.slice(7) : null);
@@ -122,6 +133,7 @@ io.on('connection', (socket) => {
   const user = socket.data.user;
   console.log(`🔌 Client connected: ${socket.id} (${user.role})`);
   socket.emit('locks_snapshot', orderLocks.snapshot());
+  inventoryEvents.attachSocket(socket); // 'inventory_subscribe' -> live 'inventory_updated'
 
   socket.on('editing_order', (data, ack) => {
     const reply = typeof ack === 'function' ? ack : () => {};
@@ -167,6 +179,7 @@ app.use((req, res, next) => {
   req.localDb = localDb;
   req.localDbPath = sqliteDbPath;
   req.orderLocks = orderLocks;
+  req.inventoryEvents = inventoryEvents;
   next();
 });
 
@@ -187,21 +200,29 @@ app.get('/api/status', (req, res) => {
 const { syncOfflineData, listConflicts, SYNC_TABLES } = require('./services/sync');
 
 // Add local-only sync bookkeeping columns, then warm the cache right away (H4/H5)
+// Runs a sync and pushes stock changes it pulled from / pushed to the cloud
+const syncAndNotify = async () => {
+  const summary = await syncOfflineData(pgPool, localDb);
+  if (summary && summary.inventory_changed && !summary.joined) inventoryEvents.notifyChanged([], 'sync');
+  return summary;
+};
+
 ensureLocalSyncColumns(localDb, SYNC_TABLES.map((t) => t.table))
-  .then(() => syncOfflineData(pgPool, localDb))
+  .then(() => checkCloudSchema(pgPool))
+  .then(() => syncAndNotify())
   .catch((err) => console.error('❌ Startup sync failed:', err.message));
 
 // Run the sync script every 5 minutes (300,000 milliseconds).
 // H3: overlapping runs are impossible; a call during a run joins the in-flight one.
 setInterval(() => {
-  syncOfflineData(pgPool, localDb).catch(() => {});
+  syncAndNotify().catch(() => {});
 }, 300000);
 
 // Manual Sync Trigger (Frontend will call this when internet returns)
 // 200 = done, 409 = some rows conflict with newer cloud edits (C3), 503 = cloud unreachable
 app.post('/api/sync', verifyToken, async (req, res) => {
   try {
-    const summary = await syncOfflineData(pgPool, localDb);
+    const summary = await syncAndNotify();
     if (summary.aborted) {
       return res.status(503).json({ error: 'CLOUD_UNREACHABLE', message: 'Sync paused: cloud database unreachable.', summary });
     }
