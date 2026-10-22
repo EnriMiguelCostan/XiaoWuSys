@@ -15,7 +15,8 @@ const ID_PATTERN = /^[A-Za-z0-9_.:@-]{1,50}$/; // matches VARCHAR(50) IDs (UUIDs
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Asia/Manila';
 
 const PAYMENT_TYPES = ['Cash', 'GCash', 'Bank Transfer'];
-const PRODUCTION_STATUSES = ['Pending', 'Printing', 'Completed', 'Delayed', 'Cancelled'];
+// Sprint 11 / PB 13 adds 'Approved' to the lifecycle: Pending -> Approved -> Printing -> Completed
+const PRODUCTION_STATUSES = ['Pending', 'Approved', 'Printing', 'Completed', 'Delayed', 'Cancelled'];
 
 // 'YYYY-MM-DDTHH:MM:SS' for a Date, as seen on a wall clock in the business timezone
 const localDateTime = (date, timeZone = BUSINESS_TIMEZONE) => {

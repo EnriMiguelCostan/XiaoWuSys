@@ -219,21 +219,30 @@ router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess
   const size = v.optionalString(body.size, 'size', 50);
   const custom_name = v.optionalString(body.custom_name, 'custom_name', 255);
   const custom_number = v.optionalString(body.custom_number, 'custom_number', 50);
+  // Sprint 11 / PB 13: an item MAY link to a stock item. It is optional here, but items
+  // without an inventory_id block job-order approval (see POST /:order_id/approve).
+  const inventory_id = v.id(body.inventory_id, 'inventory_id', { required: false });
   if (v.failed()) return v.send(res);
 
   try {
     const order = await locateRecord(req, 'order_profiles', order_id);
     if (!order.location) return notFound(res, 'Order', order_id);
 
+    // If a stock link was supplied, the referenced inventory item must exist (M7).
+    if (inventory_id) {
+      const stock = await locateRecord(req, 'inventory_items', inventory_id);
+      if (!stock.location) return notFound(res, 'Inventory item', inventory_id);
+    }
+
     const line_item_id = crypto.randomUUID();
-    const values = [line_item_id, order_id, product_type, quantity, size, custom_name, custom_number];
+    const values = [line_item_id, order_id, inventory_id || null, product_type, quantity, size, custom_name, custom_number];
 
     const { source, record } = await writeCloudFirst(
       order.location,
       async () => {
         const { rows } = await req.pgPool.query(
-          `INSERT INTO order_items (line_item_id, order_id, product_type, quantity, size, custom_name, custom_number)
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING ${selectList('order_items', 'pg')}`,
+          `INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity, size, custom_name, custom_number)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING ${selectList('order_items', 'pg')}`,
           values
         );
         return { source: 'cloud', record: serialize('order_items', rows[0]) };
@@ -241,8 +250,8 @@ router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess
       async () => {
         await sqliteRun(
           req.localDb,
-          `INSERT INTO order_items (line_item_id, order_id, product_type, quantity, size, custom_name, custom_number, sync_status, last_modified)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+          `INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity, size, custom_name, custom_number, sync_status, last_modified)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
           values
         );
         return { source: 'local', record: await readLocal(req.localDb, 'order_items', line_item_id) };

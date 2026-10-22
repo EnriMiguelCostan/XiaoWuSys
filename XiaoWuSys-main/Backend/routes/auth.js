@@ -6,8 +6,12 @@ const router = express.Router();
 const { verifyToken, requireRole } = require('../middleware/authMiddleware');
 const { isConnectionError } = require('../utils/dbErrors');
 
-// Audit fix C1: roles are an allow-list enforced on the server, never trusted from the client
-const ALLOWED_ROLES = ['Admin', 'Production', 'Staff'];
+// Audit fix C1: roles are an allow-list enforced on the server, never trusted from the client.
+// Sprint 11 / PB 13: an Owner may additionally create other Owners; an Admin cannot.
+const BASE_ALLOWED_ROLES = ['Admin', 'Production', 'Staff'];
+// The caller's role comes from the verified JWT (req.user.role), never from the body.
+const allowedRolesFor = (callerRole) =>
+  callerRole === 'Owner' ? ['Owner', ...BASE_ALLOWED_ROLES] : BASE_ALLOWED_ROLES;
 const MAX_USERNAME_LENGTH = 100; // matches users.username VARCHAR(100)
 const MIN_PASSWORD_LENGTH = 8;
 const MAX_PASSWORD_BYTES = 72;   // bcrypt silently ignores anything beyond 72 bytes
@@ -17,8 +21,11 @@ const MAX_PASSWORD_BYTES = 72;   // bcrypt silently ignores anything beyond 72 b
 // Public self-registration is disabled: only a logged-in Admin can create accounts.
 // Bootstrap the first Admin with:  npm run create-admin
 // ==========================================
-router.post('/register', verifyToken, requireRole(['Admin']), async (req, res) => {
+router.post('/register', verifyToken, requireRole(['Owner', 'Admin']), async (req, res) => {
   const { username, password, role } = req.body || {};
+
+  // What this caller is permitted to create, derived from their JWT role (never the body).
+  const allowedRoles = allowedRolesFor(req.user.role);
 
   if (typeof username !== 'string' || username.trim() === '') {
     return res.status(400).json({ error: 'Username is required.' });
@@ -32,8 +39,8 @@ router.post('/register', verifyToken, requireRole(['Admin']), async (req, res) =
   if (Buffer.byteLength(password, 'utf8') > MAX_PASSWORD_BYTES) {
     return res.status(400).json({ error: `Password must be at most ${MAX_PASSWORD_BYTES} bytes.` });
   }
-  if (!ALLOWED_ROLES.includes(role)) {
-    return res.status(400).json({ error: `Role must be one of: ${ALLOWED_ROLES.join(', ')}.` });
+  if (!allowedRoles.includes(role)) {
+    return res.status(400).json({ error: `Role must be one of: ${allowedRoles.join(', ')}.` });
   }
 
   const user_id = crypto.randomUUID();

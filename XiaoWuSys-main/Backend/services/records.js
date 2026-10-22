@@ -18,7 +18,8 @@ const ENTITIES = {
     id: 'order_id',
     fields: {
       order_id: 'text', customer_id: 'text', date_created: 'timestamp', production_deadline: 'timestamp',
-      production_status: 'text', design_drive_link: 'text', total_quote_amount: 'money'
+      production_status: 'text', design_drive_link: 'text', total_quote_amount: 'money',
+      approved_by: 'text', approved_at: 'timestamp'
     }
   },
   order_items: {

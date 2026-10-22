@@ -29,7 +29,8 @@ db.serialize(() => {
         minimum_threshold INTEGER NOT NULL DEFAULT 0,
         unit_cost REAL NOT NULL,
         sync_status TEXT DEFAULT 'synced' CHECK (sync_status IN ('synced', 'pending_insert', 'pending_update')),
-        last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
+        last_modified DATETIME DEFAULT CURRENT_TIMESTAMP,
+        CHECK (quantity_reserved >= 0 AND quantity_available >= 0)
     )
   `);
   
@@ -65,9 +66,11 @@ db.serialize(() => {
         customer_id TEXT REFERENCES customers(customer_id) ON DELETE RESTRICT,
         date_created DATETIME DEFAULT CURRENT_TIMESTAMP,
         production_deadline DATETIME NOT NULL,
-        production_status TEXT DEFAULT 'Pending' CHECK (production_status IN ('Pending', 'Printing', 'Completed', 'Delayed', 'Cancelled')),
+        production_status TEXT DEFAULT 'Pending' CHECK (production_status IN ('Pending', 'Approved', 'Printing', 'Completed', 'Delayed', 'Cancelled')),
         design_drive_link TEXT,
         total_quote_amount REAL DEFAULT 0.00,
+        approved_by TEXT REFERENCES users(user_id) ON DELETE SET NULL,
+        approved_at DATETIME,
         sync_status TEXT DEFAULT 'synced' CHECK (sync_status IN ('synced', 'pending_insert', 'pending_update')),
         last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
     )
@@ -117,6 +120,23 @@ db.serialize(() => {
         last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // ---------- Sprint 11 / PB 13: patch pre-existing local caches ----------
+  // CREATE TABLE IF NOT EXISTS above only covers fresh databases. For a cache created by an
+  // earlier version, add the new approval columns. SQLite cannot ALTER a CHECK constraint on
+  // an existing table, so the extended production_status allow-list and the inventory
+  // non-negative CHECK apply to freshly created tables only; the backend's SQL guards remain
+  // the real protection for reservations and adjustments.
+  // "duplicate column name" simply means this cache was already patched, so it is ignored.
+  const addColumnIfMissing = (table, columnDef) => {
+    db.run(`ALTER TABLE ${table} ADD COLUMN ${columnDef}`, (err) => {
+      if (err && !/duplicate column name/i.test(err.message)) {
+        console.error(`❌ Failed to add column to ${table}:`, err.message);
+      }
+    });
+  };
+  addColumnIfMissing('order_profiles', 'approved_by TEXT REFERENCES users(user_id) ON DELETE SET NULL');
+  addColumnIfMissing('order_profiles', 'approved_at DATETIME');
 
   console.log('🎉 SQLite schema initialization complete!');
 });
