@@ -1,7 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Package, PlusCircle, TrendingUp, LogOut, TriangleAlert, Clock, XCircle, Trash2, Plus, X } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { Package, PlusCircle, TrendingUp, LogOut, TriangleAlert, Clock, XCircle, Trash2, Plus, X, ClipboardList } from 'lucide-react';
 import { io } from 'socket.io-client';
 import InventoryCatalog from './InventoryCatalog';
+import OrdersPage from './OrdersPage';
+import { ResultDialog } from './Dialogs';
+import { createApi, errorText } from './api';
 
 const API_BASE = 'http://localhost:5000/api';
 const SOCKET_URL = API_BASE.replace(/\/api\/?$/, '');
@@ -46,6 +49,14 @@ export default function App() {
 
   // Create Order Profile State
   const [customerId, setCustomerId] = useState('');
+  // Customer picker: choose a saved customer or type a new one (POST /api/customers)
+  const [customers, setCustomers] = useState([]);
+  const [customersTick, setCustomersTick] = useState(0);
+  const [newCustomerMode, setNewCustomerMode] = useState(false);
+  const [newCustomer, setNewCustomer] = useState({ full_name: '', contact_number: '', platform_source: '' });
+  const [quoteAmount, setQuoteAmount] = useState('');
+  const [orderResult, setOrderResult] = useState(null); // ResultDialog after creating an order
+  const [ordersRefreshKey, setOrdersRefreshKey] = useState(0);
   const [productionDeadline, setProductionDeadline] = useState('');
   const [orderStatusMsg, setOrderStatusMsg] = useState('');
 
@@ -159,6 +170,20 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, activeTab, inventoryTick, liveStatus]);
 
+  const api = useMemo(() => createApi({ apiBase: API_BASE, token, onUnauthorized: handleLogout }), [token, handleLogout]);
+
+  useEffect(() => {
+    if (!token || activeTab !== 'add') return undefined;
+    let cancelled = false;
+    api('GET', '/customers').then(({ ok, data }) => {
+      if (cancelled || !ok) return;
+      const list = data.customers || [];
+      setCustomers(list);
+      if (list.length === 0) setNewCustomerMode(true);
+    });
+    return () => { cancelled = true; };
+  }, [api, token, activeTab, customersTick]);
+
   const handleAuth = async (e) => {
     e.preventDefault();
     setAuthError('');
@@ -203,6 +228,9 @@ export default function App() {
   const resetOrderForm = () => {
     setCustomerId('');
     setProductionDeadline('');
+    setQuoteAmount('');
+    setNewCustomer({ full_name: '', contact_number: '', platform_source: '' });
+    setNewCustomerMode(false);
     setOrderLines([emptyOrderLine()]);
   };
 
@@ -225,18 +253,62 @@ export default function App() {
       inventory_id: line.inventory_id,
       quantity_needed: Number(line.quantity_needed)
     }));
-    const pendingOrder = {
-      customer_id: customerId,
-      production_deadline: productionDeadline,
-      required_items
-    };
+    const quote = quoteAmount.trim() === '' ? 0 : Number(quoteAmount);
+    if (!Number.isFinite(quote) || quote < 0 || Math.abs(Math.round(quote * 100) - quote * 100) > 1e-6) {
+      setOrderResult({ type: 'error', title: 'Check the quote', message: 'Quote amount must be 0 or more, with at most 2 decimal places.' });
+      return;
+    }
 
     setIsSubmittingOrder(true);
     try {
+      // 1) Customer: saved one, or create the new one first
+      let resolvedCustomerId = customerId;
+      if (newCustomerMode) {
+        const name = newCustomer.full_name.trim();
+        if (!name) {
+          setOrderResult({ type: 'error', title: 'Customer name needed', message: 'Type the customer name, or pick a saved customer.' });
+          return;
+        }
+        const created = await api('POST', '/customers', {
+          full_name: name,
+          contact_number: newCustomer.contact_number.trim() || undefined,
+          platform_source: newCustomer.platform_source.trim() || undefined
+        });
+        if (created.ok) {
+          resolvedCustomerId = created.data.customer.customer_id;
+        } else if (created.status === 409 && created.data.existing) {
+          resolvedCustomerId = created.data.existing.customer_id; // same customer already saved: reuse it
+        } else {
+          setOrderResult({ type: 'error', title: 'Customer not saved', message: errorText(created.data, 'Could not save the customer.') });
+          return;
+        }
+        setCustomersTick(t => t + 1);
+        setCustomerId(resolvedCustomerId);
+        setNewCustomerMode(false);
+      }
+      if (!resolvedCustomerId) {
+        setOrderResult({ type: 'error', title: 'Choose a customer', message: 'Select a customer for this order.' });
+        return;
+      }
+
+      const pendingOrder = {
+        customer_id: resolvedCustomerId,
+        production_deadline: productionDeadline,
+        required_items,
+        total_quote_amount: Math.round(quote * 100) / 100
+      };
       const { res, data } = await postOrder(pendingOrder);
 
       if (res.ok) {
-        setOrderStatusMsg(`Order Created Successfully! ID: ${data.order_id || data.id || ''}`);
+        const shortId = String(data.order_id || '').slice(0, 8).toUpperCase();
+        setOrderStatusMsg(`Order Created Successfully! ID: #${shortId}`);
+        setOrderResult({
+          type: 'success',
+          title: 'Order created',
+          message: `Order #${shortId} was saved${data.source === 'local' ? ' offline (it will sync later)' : ''}.\n` +
+                   `${(data.items || []).length} material(s) reserved in the Catalog. You can follow it in the Orders tab.`
+        });
+        setOrdersRefreshKey(k => k + 1);
         resetOrderForm();
         refreshInventory();
       } else if (res.status === 409) {
@@ -250,10 +322,12 @@ export default function App() {
       } else {
         const missing = data.missing_inventory_ids ? ` (${data.missing_inventory_ids.join(', ')})` : '';
         setOrderStatusMsg(`Error: ${data.message || data.error || 'Failed to create order.'}${missing}`);
+        setOrderResult({ type: 'error', title: 'Order not created', message: `${data.message || data.error || 'Failed to create order.'}${missing}` });
       }
     } catch (err) {
       console.error('Error creating order:', err);
       setOrderStatusMsg('Error: Network connection failure.');
+      setOrderResult({ type: 'error', title: 'Order not created', message: 'Network connection failure. Check that the backend is running.' });
     } finally {
       setIsSubmittingOrder(false);
     }
@@ -277,12 +351,13 @@ export default function App() {
       const { res, data } = await postOrder({ ...pendingOrder, production_deadline, resolution });
 
       if (res.ok) {
-        const id = data.order_id || data.id || '';
-        setOrderStatusMsg(
-          resolution === 'Delayed'
-            ? `Notice: Order ${id} logged as DELAYED. New deadline: ${production_deadline}.`
-            : `Notice: Order ${id} logged as CANCELLED (lost sale recorded).`
-        );
+        const id = String(data.order_id || data.id || '').slice(0, 8).toUpperCase();
+        const notice = resolution === 'Delayed'
+          ? `Order #${id} logged as DELAYED. New deadline: ${production_deadline}. Resume it from the Orders tab when stock arrives.`
+          : `Order #${id} logged as CANCELLED (lost sale recorded).`;
+        setOrderStatusMsg(`Notice: ${notice}`);
+        setOrderResult({ type: 'warning', title: resolution === 'Delayed' ? 'Order delayed' : 'Order cancelled', message: notice });
+        setOrdersRefreshKey(k => k + 1);
         resetOrderForm();
         closeCapacityAlert();
       } else {
@@ -354,6 +429,9 @@ export default function App() {
           <button style={activeTab === 'add' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('add')}>
             <PlusCircle size={18} /> Create Order
           </button>
+          <button style={activeTab === 'orders' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('orders')}>
+            <ClipboardList size={18} /> Orders
+          </button>
           <button style={activeTab === 'metrics' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('metrics')}>
             <TrendingUp size={18} /> Analytics
           </button>
@@ -402,15 +480,57 @@ export default function App() {
             )}
 
             <form onSubmit={handleCreateOrder}>
-              <label style={styles.label}>Customer ID</label>
-              <input 
-                type="text" 
-                placeholder="Enter Customer ID" 
-                value={customerId} 
-                onChange={e => setCustomerId(e.target.value)} 
-                style={styles.input} 
-                required 
-              />
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <label style={styles.label} htmlFor="order-customer">Customer</label>
+                {!(newCustomerMode && customers.length === 0) && (
+                  <button
+                    type="button"
+                    onClick={() => setNewCustomerMode(m => !m)}
+                    style={{ ...styles.btnLink, marginBottom: '0.25rem' }}
+                  >
+                    {newCustomerMode ? 'Pick a saved customer' : '+ New customer'}
+                  </button>
+                )}
+              </div>
+              {newCustomerMode ? (
+                <div style={styles.customerBox}>
+                  <input
+                    type="text" placeholder="Customer full name *" maxLength={255} required
+                    value={newCustomer.full_name}
+                    onChange={e => setNewCustomer({ ...newCustomer, full_name: e.target.value })}
+                    style={styles.input}
+                  />
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input
+                      type="text" placeholder="Contact number" maxLength={50}
+                      value={newCustomer.contact_number}
+                      onChange={e => setNewCustomer({ ...newCustomer, contact_number: e.target.value })}
+                      style={{ ...styles.input, marginBottom: 0 }}
+                    />
+                    <input
+                      type="text" placeholder="From (Facebook, walk-in…)" maxLength={100}
+                      value={newCustomer.platform_source}
+                      onChange={e => setNewCustomer({ ...newCustomer, platform_source: e.target.value })}
+                      style={{ ...styles.input, marginBottom: 0 }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <select
+                  id="order-customer"
+                  value={customerId}
+                  onChange={e => setCustomerId(e.target.value)}
+                  style={styles.input}
+                  required
+                >
+                  <option value="">Select customer…</option>
+                  {customers.map(c => (
+                    <option key={c.customer_id} value={c.customer_id}>
+                      {c.full_name}{c.contact_number ? ` · ${c.contact_number}` : ''}
+                    </option>
+                  ))}
+                </select>
+              )}
 
               <label style={styles.label}>Production Deadline</label>
               <input 
@@ -419,6 +539,15 @@ export default function App() {
                 onChange={e => setProductionDeadline(e.target.value)} 
                 style={styles.input} 
                 required 
+              />
+
+              <label style={styles.label} htmlFor="order-quote">Quote Amount (₱, optional)</label>
+              <input
+                id="order-quote"
+                type="number" min="0" step="0.01" inputMode="decimal" placeholder="0.00"
+                value={quoteAmount}
+                onChange={e => setQuoteAmount(e.target.value)}
+                style={styles.input}
               />
 
               <label style={styles.label}>Required Materials</label>
@@ -576,6 +705,24 @@ export default function App() {
           </div>
         )}
 
+        {activeTab === 'orders' && (
+          <OrdersPage
+            apiBase={API_BASE}
+            token={token}
+            userRole={user?.role}
+            onUnauthorized={handleLogout}
+            refreshKey={ordersRefreshKey}
+            onStockChanged={refreshInventory}
+          />
+        )}
+
+        <ResultDialog
+          result={orderResult}
+          onClose={() => setOrderResult(null)}
+          actionLabel={orderResult && orderResult.type !== 'error' && activeTab === 'add' ? 'View Orders' : undefined}
+          onAction={() => { setOrderResult(null); setActiveTab('orders'); }}
+        />
+
         {activeTab === 'metrics' && (
           <div>
             <div style={styles.metricsGrid}>
@@ -651,6 +798,7 @@ const styles = {
   hint: { fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' },
   lineRow: { display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem' },
   iconBtn: { padding: '0.6rem', background: 'none', border: '1px solid #cbd5e1', borderRadius: '0.375rem', cursor: 'pointer', color: '#64748b' },
+  customerBox: { padding: '0.75rem', marginBottom: '1rem', border: '1px dashed #c7d2fe', borderRadius: '0.375rem', background: '#f8fafc' },
   btnLink: { display: 'flex', alignItems: 'center', gap: '0.25rem', background: 'none', border: 'none', color: '#4f46e5', cursor: 'pointer', fontSize: '0.875rem', padding: '0.25rem 0', marginBottom: '1rem' },
   modalOverlay: { position: 'fixed', inset: 0, background: 'rgba(15, 23, 42, 0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem', zIndex: 50 },
   modalCard: { position: 'relative', background: '#fff', padding: '1.5rem', borderRadius: '0.5rem', width: '100%', maxWidth: '520px', borderTop: '4px solid #f59e0b', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.25)' },

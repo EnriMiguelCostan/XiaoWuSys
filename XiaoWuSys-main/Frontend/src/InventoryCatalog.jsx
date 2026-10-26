@@ -1,14 +1,19 @@
 import { useMemo, useState } from 'react';
-import { RefreshCw, Search, CloudOff, TriangleAlert, PackagePlus, X, Plus, Minus, CircleCheck } from 'lucide-react';
+import { RefreshCw, Search, CloudOff, TriangleAlert, PackagePlus, X, Plus, Minus, Pencil, Trash2 } from 'lucide-react';
+import { createApi, errorText, peso } from './api';
+import { ResultDialog, ConfirmDialog } from './Dialogs';
+import RecycleBin from './RecycleBin';
 
 // Inventory / Catalog page. Data comes from GET /api/inventory (owned by App.jsx so the
 // Create Order picker and Analytics share the same snapshot). Styling is inline only,
 // matching the rest of the frontend.
 //
-// Stock changes (all re-broadcast to every client over Socket.io by the server):
-//   POST /api/inventory                    add a new item
-//   POST /api/inventory/:id/adjust         add / subtract stock by hand
-//   POST /api/inventory/:id/loss           subtract lost/damaged stock and record its cost
+// Changes (all re-broadcast to every client over Socket.io by the server):
+//   POST   /api/inventory                  add a new item (duplicates rejected)
+//   PATCH  /api/inventory/:id              edit name / category / threshold / unit cost
+//   DELETE /api/inventory/:id              move to the Recycle Bin (restorable)
+//   POST   /api/inventory/:id/adjust       add / subtract stock (Manage Stock panel)
+//   POST   /api/inventory/:id/loss         subtract lost/damaged stock and record its cost
 
 const STATUS_META = {
   in_stock: { label: 'In Stock', bg: '#dcfce7', color: '#166534', bar: '#10b981' },
@@ -16,15 +21,13 @@ const STATUS_META = {
   out_of_stock: { label: 'Out of Stock', bg: '#fee2e2', color: '#991b1b', bar: '#ef4444' }
 };
 
-// Roles allowed to change stock (must match requireRole in Backend/routes/inventory.js)
+// Roles allowed to change the catalog (must match requireRole in Backend/routes/inventory.js)
 const STOCK_EDIT_ROLES = ['Owner', 'Admin', 'Production'];
 
 const SUBTRACT_REASONS = {
   taken: 'Taken / used',
   lost: 'Lost / damaged (records material loss)'
 };
-
-const peso = (n) => `₱${Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 const formatTime = (iso) => (iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—');
 
@@ -35,7 +38,7 @@ const LIVE_META = {
 };
 
 const EMPTY_NEW_ITEM = { item_name: '', item_category: '', quantity_available: '', minimum_threshold: '', unit_cost: '' };
-const EMPTY_ADJUST = { inventory_id: '', action: 'add', quantity: '', reason: 'taken', note: '' };
+const EMPTY_ADJUST = { inventory_id: '', action: 'add', quantity: '', reason: 'taken' };
 
 // '5' -> 5, '' -> null, '2.5' / '-1' / 'abc' -> NaN
 const toWholeNumber = (value) => {
@@ -43,12 +46,22 @@ const toWholeNumber = (value) => {
   if (text === '') return null;
   return /^\d+$/.test(text) ? Number(text) : NaN;
 };
+// '12.5' -> 12.5, '' -> 0, bad -> NaN (at most 2 decimals)
+const toMoney = (value) => {
+  const text = String(value ?? '').trim();
+  if (text === '') return 0;
+  const n = Number(text);
+  return Number.isFinite(n) && n >= 0 && Math.abs(Math.round(n * 100) - n * 100) < 1e-6 ? Math.round(n * 100) / 100 : NaN;
+};
+// Same rule as the backend: case and spaces are ignored ("Deli A4" = "deli  a4" = "DeliA4")
+const nameKey = (s) => String(s || '').toLowerCase().replace(/\s+/g, '');
 
 export default function InventoryCatalog({
   items, summary, categories, source, fetchedAt, loading, error, onRefresh,
   liveStatus = 'disconnected', cloudListening = false, recentlyChanged = [],
   apiBase, token, userRole, onUnauthorized
 }) {
+  const api = useMemo(() => createApi({ apiBase, token, onUnauthorized }), [apiBase, token, onUnauthorized]);
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('');
   const [status, setStatus] = useState('');
@@ -60,13 +73,15 @@ export default function InventoryCatalog({
   const [panelTab, setPanelTab] = useState('new'); // 'new' | 'adjust'
   const [newItem, setNewItem] = useState(EMPTY_NEW_ITEM);
   const [adjust, setAdjust] = useState(EMPTY_ADJUST);
-  const [panelMsg, setPanelMsg] = useState(null); // { type: 'ok' | 'error', text }
   const [panelBusy, setPanelBusy] = useState(false);
 
-  // Per-card quick +/- controls
-  const [cardQty, setCardQty] = useState({});   // { [inventory_id]: '1' }
-  const [cardMsg, setCardMsg] = useState({});   // { [inventory_id]: { type, text } }
-  const [cardBusy, setCardBusy] = useState({}); // { [inventory_id]: true }
+  // Pop-ups
+  const [result, setResult] = useState(null);          // ResultDialog
+  const [editing, setEditing] = useState(null);        // { item, form }
+  const [editBusy, setEditBusy] = useState(false);
+  const [toDelete, setToDelete] = useState(null);      // item awaiting delete confirmation
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [binOpen, setBinOpen] = useState(false);
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -86,81 +101,48 @@ export default function InventoryCatalog({
     { key: 'out_of_stock', label: 'Out of Stock', value: summary.out_of_stock, color: STATUS_META.out_of_stock.color }
   ];
 
-  // ---------- API ----------
-  // Never throws: resolves to { ok, status, data } or { ok: false, data: { message } } on network failure
-  const apiPost = async (path, body) => {
-    try {
-      const res = await fetch(`${apiBase}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify(body)
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.status === 401 && onUnauthorized) onUnauthorized();
-      return { ok: res.ok, status: res.status, data };
-    } catch (err) {
-      console.error(`POST ${path} failed`, err);
-      return { ok: false, status: 0, data: { message: 'Cannot reach the server. Check that the backend is running.' } };
-    }
-  };
-
-  const errorText = (data, fallback) => data.message || data.error || fallback;
-  const offlineSuffix = (data) => (data.source === 'local' ? ' (saved offline, will sync later)' : '');
-
-  // Shared add/subtract call used by the panel and the card buttons
-  const changeStock = (item, action, quantity, reason) => {
-    if (action === 'subtract' && reason === 'lost') {
-      return apiPost(`/inventory/${encodeURIComponent(item.inventory_id)}/loss`, {
-        quantity_lost: quantity,
-        loss_reason: 'Lost / damaged (manual stock count)'
-      });
-    }
-    return apiPost(`/inventory/${encodeURIComponent(item.inventory_id)}/adjust`, {
-      action,
-      quantity,
-      reason: action === 'add' ? 'Stock received' : 'Taken / used (manual adjustment)'
-    });
-  };
+  const offlineSuffix = (data) => (data.source === 'local' ? '\nSaved offline: it will sync to the cloud when the connection returns.' : '');
+  const fail = (title, message) => setResult({ type: 'error', title, message });
 
   // ---------- Panel: new item ----------
   const handleAddItem = async (e) => {
     e.preventDefault();
-    setPanelMsg(null);
-
-    const name = newItem.item_name.trim();
+    const name = newItem.item_name.trim().replace(/\s+/g, ' ');
     const cat = newItem.item_category.trim();
     const qty = toWholeNumber(newItem.quantity_available);
     const min = toWholeNumber(newItem.minimum_threshold);
-    const costText = String(newItem.unit_cost).trim();
-    const cost = costText === '' ? 0 : Number(costText);
+    const cost = toMoney(newItem.unit_cost);
 
-    if (!name || !cat) return setPanelMsg({ type: 'error', text: 'Item name and category are required.' });
-    if (Number.isNaN(qty) || Number.isNaN(min)) {
-      return setPanelMsg({ type: 'error', text: 'Quantity and minimum threshold must be whole numbers (0 or more).' });
-    }
-    if (!Number.isFinite(cost) || cost < 0 || Math.abs(Math.round(cost * 100) - cost * 100) > 1e-6) {
-      return setPanelMsg({ type: 'error', text: 'Unit cost must be 0 or more, with at most 2 decimal places.' });
-    }
-    const duplicate = items.find((i) => i.item_name.trim().toLowerCase() === name.toLowerCase());
+    if (!name || !cat) return fail('Missing details', 'Item name and category are required.');
+    if (Number.isNaN(qty) || Number.isNaN(min)) return fail('Check the numbers', 'Quantity and low-stock alert must be whole numbers (0 or more).');
+    if (Number.isNaN(cost)) return fail('Check the unit cost', 'Unit cost must be 0 or more, with at most 2 decimal places.');
+    const duplicate = items.find((i) => nameKey(i.item_name) === nameKey(name));
     if (duplicate) {
-      return setPanelMsg({
-        type: 'error',
-        text: `"${duplicate.item_name}" is already in the catalog. Use "Add / Subtract Stock" to change its quantity.`
+      return setResult({
+        type: 'warning',
+        title: 'Duplicate item',
+        message: `"${duplicate.item_name}" is already in the catalog, so it was not added again.\nUse "Add / Subtract Stock" to change its quantity.`
       });
     }
 
     setPanelBusy(true);
-    const { ok, data } = await apiPost('/inventory', {
-      item_name: name,
-      item_category: cat,
-      quantity_available: qty ?? 0,
-      minimum_threshold: min ?? 0,
-      unit_cost: Math.round(cost * 100) / 100
+    const { ok, status: code, data } = await api('POST', '/inventory', {
+      item_name: name, item_category: cat, quantity_available: qty ?? 0, minimum_threshold: min ?? 0, unit_cost: cost
     });
     setPanelBusy(false);
 
-    if (!ok) return setPanelMsg({ type: 'error', text: errorText(data, 'Could not add the item.') });
-    setPanelMsg({ type: 'ok', text: `Added "${data.item?.item_name || name}" with ${data.item?.quantity_available ?? qty ?? 0} in stock${offlineSuffix(data)}.` });
+    if (!ok) {
+      return setResult({
+        type: code === 409 ? 'warning' : 'error',
+        title: code === 409 ? 'Duplicate item' : 'Item not added',
+        message: errorText(data, 'Could not add the item.')
+      });
+    }
+    setResult({
+      type: 'success',
+      title: 'Item added',
+      message: `"${data.item?.item_name || name}" was added with ${data.item?.quantity_available ?? qty ?? 0} in stock.${offlineSuffix(data)}`
+    });
     setNewItem((prev) => ({ ...EMPTY_NEW_ITEM, item_category: prev.item_category })); // keep category for the next entry
     onRefresh();
   };
@@ -168,68 +150,110 @@ export default function InventoryCatalog({
   // ---------- Panel: add / subtract ----------
   const handleAdjust = async (e) => {
     e.preventDefault();
-    setPanelMsg(null);
-
     const item = items.find((i) => i.inventory_id === adjust.inventory_id);
     const qty = toWholeNumber(adjust.quantity);
-    if (!item) return setPanelMsg({ type: 'error', text: 'Choose an item first.' });
-    if (!qty || Number.isNaN(qty)) return setPanelMsg({ type: 'error', text: 'Quantity must be a whole number greater than 0.' });
+    if (!item) return fail('Choose an item', 'Select the item whose stock you want to change.');
+    if (!qty || Number.isNaN(qty)) return fail('Check the quantity', 'Quantity must be a whole number greater than 0.');
     if (adjust.action === 'subtract' && qty > item.quantity_available) {
-      return setPanelMsg({ type: 'error', text: `Cannot subtract ${qty}: only ${item.quantity_available} of "${item.item_name}" in stock.` });
+      return fail('Not enough stock', `Cannot subtract ${qty}: only ${item.quantity_available} of "${item.item_name}" in stock.`);
     }
 
     setPanelBusy(true);
-    const { ok, data } = await changeStock(item, adjust.action, qty, adjust.reason);
+    const id = encodeURIComponent(item.inventory_id);
+    const { ok, data } = adjust.action === 'subtract' && adjust.reason === 'lost'
+      ? await api('POST', `/inventory/${id}/loss`, { quantity_lost: qty, loss_reason: 'Lost / damaged (manual stock count)' })
+      : await api('POST', `/inventory/${id}/adjust`, {
+        action: adjust.action, quantity: qty,
+        reason: adjust.action === 'add' ? 'Stock received' : 'Taken / used (manual adjustment)'
+      });
     setPanelBusy(false);
 
-    if (!ok) return setPanelMsg({ type: 'error', text: errorText(data, 'Could not update the stock.') });
+    if (!ok) return fail('Stock not changed', errorText(data, 'Could not update the stock.'));
     const newQty = data.item?.quantity_available;
-    setPanelMsg({
-      type: 'ok',
-      text: `${adjust.action === 'add' ? 'Added' : 'Subtracted'} ${qty} ${adjust.action === 'add' ? 'to' : 'from'} "${item.item_name}".` +
-            `${newQty !== undefined ? ` Now ${newQty} in stock` : ''}${offlineSuffix(data)}.`
+    setResult({
+      type: 'success',
+      title: adjust.action === 'add' ? 'Stock added' : 'Stock subtracted',
+      message: `${adjust.action === 'add' ? 'Added' : 'Subtracted'} ${qty} ${adjust.action === 'add' ? 'to' : 'from'} "${item.item_name}".` +
+               `${newQty !== undefined ? ` Now ${newQty} in stock.` : ''}${offlineSuffix(data)}`
     });
     setAdjust((prev) => ({ ...prev, quantity: '' }));
     onRefresh();
   };
 
-  // ---------- Card +/- ----------
-  const handleCardChange = async (item, action) => {
-    const id = item.inventory_id;
-    const qty = toWholeNumber(cardQty[id] ?? '1');
-    setCardMsg((m) => ({ ...m, [id]: null }));
-
-    if (!qty || Number.isNaN(qty)) {
-      return setCardMsg((m) => ({ ...m, [id]: { type: 'error', text: 'Enter a whole number above 0.' } }));
+  // ---------- Card: edit ----------
+  const openEdit = (item) => setEditing({
+    item,
+    form: {
+      item_name: item.item_name,
+      item_category: item.item_category,
+      minimum_threshold: String(item.minimum_threshold),
+      unit_cost: String(item.unit_cost)
     }
-    if (action === 'subtract' && qty > item.quantity_available) {
-      return setCardMsg((m) => ({ ...m, [id]: { type: 'error', text: `Only ${item.quantity_available} in stock.` } }));
+  });
+
+  const handleEditSave = async (e) => {
+    e.preventDefault();
+    const { item, form } = editing;
+    const name = form.item_name.trim().replace(/\s+/g, ' ');
+    const cat = form.item_category.trim();
+    const min = toWholeNumber(form.minimum_threshold);
+    const cost = toMoney(form.unit_cost);
+    if (!name || !cat) return fail('Missing details', 'Item name and category cannot be empty.');
+    if (min === null || Number.isNaN(min)) return fail('Check the numbers', 'Low-stock alert must be a whole number (0 or more).');
+    if (Number.isNaN(cost)) return fail('Check the unit cost', 'Unit cost must be 0 or more, with at most 2 decimal places.');
+    const duplicate = items.find((i) => i.inventory_id !== item.inventory_id && nameKey(i.item_name) === nameKey(name));
+    if (duplicate) {
+      return setResult({ type: 'warning', title: 'Duplicate name', message: `Another item is already called "${duplicate.item_name}". Choose a different name.` });
     }
 
-    setCardBusy((b) => ({ ...b, [id]: true }));
-    const { ok, data } = await changeStock(item, action, qty, 'taken');
-    setCardBusy((b) => ({ ...b, [id]: false }));
+    const body = {};
+    if (name !== item.item_name) body.item_name = name;
+    if (cat !== item.item_category) body.item_category = cat;
+    if (min !== item.minimum_threshold) body.minimum_threshold = min;
+    if (cost !== item.unit_cost) body.unit_cost = cost;
+    if (Object.keys(body).length === 0) {
+      setEditing(null);
+      return setResult({ type: 'warning', title: 'No changes', message: 'Nothing was changed, so nothing was saved.' });
+    }
+    if (item.version) body.expected_version = item.version;
 
+    setEditBusy(true);
+    const { ok, status: code, data } = await api('PATCH', `/inventory/${encodeURIComponent(item.inventory_id)}`, body);
+    setEditBusy(false);
     if (!ok) {
-      return setCardMsg((m) => ({ ...m, [id]: { type: 'error', text: errorText(data, 'Update failed.') } }));
+      return setResult({
+        type: code === 409 ? 'warning' : 'error',
+        title: code === 409 && data.error === 'EDIT_CONFLICT' ? 'Changed by someone else' : code === 409 ? 'Duplicate name' : 'Not saved',
+        message: errorText(data, 'Could not save the changes.')
+      });
     }
-    setCardMsg((m) => ({ ...m, [id]: { type: 'ok', text: `${action === 'add' ? '+' : '−'}${qty} saved${offlineSuffix(data)}` } }));
-    setCardQty((q) => ({ ...q, [id]: '1' }));
+    setEditing(null);
+    setResult({ type: 'success', title: 'Item updated', message: `${data.message}${offlineSuffix(data)}` });
     onRefresh();
   };
 
-  const openAdjustFor = (item) => {
-    setPanelOpen(true);
-    setPanelTab('adjust');
-    setPanelMsg(null);
-    setAdjust({ ...EMPTY_ADJUST, inventory_id: item.inventory_id, action: 'subtract', reason: 'lost' });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+  // ---------- Card: delete (to Recycle Bin) ----------
+  const handleDelete = async () => {
+    const item = toDelete;
+    setDeleteBusy(true);
+    const { ok, data } = await api('DELETE', `/inventory/${encodeURIComponent(item.inventory_id)}`);
+    setDeleteBusy(false);
+    setToDelete(null);
+    if (!ok) return fail('Not deleted', errorText(data, 'Could not delete the item.'));
+    setResult({ type: 'success', title: 'Moved to Recycle Bin', message: data.message });
+    onRefresh();
   };
 
   const selectedAdjustItem = items.find((i) => i.inventory_id === adjust.inventory_id);
+  const binCount = summary.recycle_bin || 0;
 
   return (
     <div style={s.root}>
+      {/* Category suggestions for the Add and Edit forms */}
+      <datalist id="inventory-category-options">
+        {categories.map((c) => <option key={c} value={c} />)}
+      </datalist>
+
       {/* Header: title, freshness, actions */}
       <div style={s.topBar}>
         <div>
@@ -241,15 +265,21 @@ export default function InventoryCatalog({
             <span> · Last updated {formatTime(fetchedAt)}</span>
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
           {canEdit && (
             <button
               type="button"
-              onClick={() => { setPanelOpen((o) => !o); setPanelMsg(null); }}
+              onClick={() => setPanelOpen((o) => !o)}
               style={panelOpen ? s.manageBtnActive : s.manageBtn}
               aria-expanded={panelOpen}
             >
               <PackagePlus size={16} /> {panelOpen ? 'Close Stock Manager' : 'Manage Stock'}
+            </button>
+          )}
+          {canEdit && (
+            <button type="button" onClick={() => setBinOpen(true)} style={s.refreshBtn} aria-label={`Recycle Bin, ${binCount} items`}>
+              <Trash2 size={16} /> Recycle Bin
+              {binCount > 0 && <span style={s.binBadge}>{binCount}</span>}
             </button>
           )}
           <button type="button" onClick={onRefresh} style={s.refreshBtn} disabled={loading} aria-label="Refresh inventory">
@@ -280,27 +310,15 @@ export default function InventoryCatalog({
           </div>
 
           <div style={s.tabs} role="tablist">
-            <button
-              type="button" role="tab" aria-selected={panelTab === 'new'}
-              onClick={() => { setPanelTab('new'); setPanelMsg(null); }}
-              style={panelTab === 'new' ? s.tabActive : s.tab}
-            >
+            <button type="button" role="tab" aria-selected={panelTab === 'new'} onClick={() => setPanelTab('new')}
+              style={panelTab === 'new' ? s.tabActive : s.tab}>
               Add New Item
             </button>
-            <button
-              type="button" role="tab" aria-selected={panelTab === 'adjust'}
-              onClick={() => { setPanelTab('adjust'); setPanelMsg(null); }}
-              style={panelTab === 'adjust' ? s.tabActive : s.tab}
-            >
+            <button type="button" role="tab" aria-selected={panelTab === 'adjust'} onClick={() => setPanelTab('adjust')}
+              style={panelTab === 'adjust' ? s.tabActive : s.tab}>
               Add / Subtract Stock
             </button>
           </div>
-
-          {panelMsg && (
-            <p style={{ ...s.msg, ...(panelMsg.type === 'ok' ? s.msgOk : s.msgError) }} role="status">
-              {panelMsg.type === 'ok' ? <CircleCheck size={16} /> : <TriangleAlert size={16} />} {panelMsg.text}
-            </p>
-          )}
 
           {panelTab === 'new' ? (
             <form onSubmit={handleAddItem} style={s.formGrid}>
@@ -321,36 +339,21 @@ export default function InventoryCatalog({
                   onChange={(e) => setNewItem({ ...newItem, item_category: e.target.value })}
                   style={s.input}
                 />
-                <datalist id="inventory-category-options">
-                  {categories.map((c) => <option key={c} value={c} />)}
-                </datalist>
               </label>
               <label style={s.field}>
                 <span style={s.fieldLabel}>Quantity in stock</span>
-                <input
-                  type="number" min="0" step="1" inputMode="numeric" placeholder="0"
-                  value={newItem.quantity_available}
-                  onChange={(e) => setNewItem({ ...newItem, quantity_available: e.target.value })}
-                  style={s.input}
-                />
+                <input type="number" min="0" step="1" inputMode="numeric" placeholder="0" value={newItem.quantity_available}
+                  onChange={(e) => setNewItem({ ...newItem, quantity_available: e.target.value })} style={s.input} />
               </label>
               <label style={s.field}>
                 <span style={s.fieldLabel}>Low-stock alert at</span>
-                <input
-                  type="number" min="0" step="1" inputMode="numeric" placeholder="0"
-                  value={newItem.minimum_threshold}
-                  onChange={(e) => setNewItem({ ...newItem, minimum_threshold: e.target.value })}
-                  style={s.input}
-                />
+                <input type="number" min="0" step="1" inputMode="numeric" placeholder="0" value={newItem.minimum_threshold}
+                  onChange={(e) => setNewItem({ ...newItem, minimum_threshold: e.target.value })} style={s.input} />
               </label>
               <label style={s.field}>
                 <span style={s.fieldLabel}>Unit cost (₱)</span>
-                <input
-                  type="number" min="0" step="0.01" inputMode="decimal" placeholder="0.00"
-                  value={newItem.unit_cost}
-                  onChange={(e) => setNewItem({ ...newItem, unit_cost: e.target.value })}
-                  style={s.input}
-                />
+                <input type="number" min="0" step="0.01" inputMode="decimal" placeholder="0.00" value={newItem.unit_cost}
+                  onChange={(e) => setNewItem({ ...newItem, unit_cost: e.target.value })} style={s.input} />
               </label>
               <button type="submit" style={{ ...s.submitBtn, gridColumn: '1 / -1' }} disabled={panelBusy}>
                 <Plus size={16} /> {panelBusy ? 'Saving…' : 'Add Item to Inventory'}
@@ -363,11 +366,7 @@ export default function InventoryCatalog({
               )}
               <label style={{ ...s.field, gridColumn: '1 / -1' }}>
                 <span style={s.fieldLabel}>Item *</span>
-                <select
-                  value={adjust.inventory_id} required
-                  onChange={(e) => setAdjust({ ...adjust, inventory_id: e.target.value })}
-                  style={s.input}
-                >
+                <select value={adjust.inventory_id} required onChange={(e) => setAdjust({ ...adjust, inventory_id: e.target.value })} style={s.input}>
                   <option value="" style={s.option}>Select an item…</option>
                   {items.map((i) => (
                     <option key={i.inventory_id} value={i.inventory_id} style={s.option}>
@@ -379,30 +378,20 @@ export default function InventoryCatalog({
               <div style={{ ...s.field, gridColumn: '1 / -1' }}>
                 <span style={s.fieldLabel}>Action</span>
                 <div style={{ display: 'flex', gap: '0.5rem' }}>
-                  <button
-                    type="button" onClick={() => setAdjust({ ...adjust, action: 'add' })}
-                    style={adjust.action === 'add' ? { ...s.toggle, ...s.toggleAdd } : s.toggle}
-                    aria-pressed={adjust.action === 'add'}
-                  >
+                  <button type="button" onClick={() => setAdjust({ ...adjust, action: 'add' })}
+                    style={adjust.action === 'add' ? { ...s.toggle, ...s.toggleAdd } : s.toggle} aria-pressed={adjust.action === 'add'}>
                     <Plus size={16} /> Add stock
                   </button>
-                  <button
-                    type="button" onClick={() => setAdjust({ ...adjust, action: 'subtract' })}
-                    style={adjust.action === 'subtract' ? { ...s.toggle, ...s.toggleSub } : s.toggle}
-                    aria-pressed={adjust.action === 'subtract'}
-                  >
+                  <button type="button" onClick={() => setAdjust({ ...adjust, action: 'subtract' })}
+                    style={adjust.action === 'subtract' ? { ...s.toggle, ...s.toggleSub } : s.toggle} aria-pressed={adjust.action === 'subtract'}>
                     <Minus size={16} /> Subtract stock
                   </button>
                 </div>
               </div>
               <label style={s.field}>
                 <span style={s.fieldLabel}>Quantity *</span>
-                <input
-                  type="number" min="1" step="1" inputMode="numeric" required placeholder="1"
-                  value={adjust.quantity}
-                  onChange={(e) => setAdjust({ ...adjust, quantity: e.target.value })}
-                  style={s.input}
-                />
+                <input type="number" min="1" step="1" inputMode="numeric" required placeholder="1" value={adjust.quantity}
+                  onChange={(e) => setAdjust({ ...adjust, quantity: e.target.value })} style={s.input} />
               </label>
               {adjust.action === 'subtract' ? (
                 <label style={s.field}>
@@ -419,7 +408,7 @@ export default function InventoryCatalog({
               {selectedAdjustItem && (
                 <p style={{ ...s.hint, gridColumn: '1 / -1' }}>
                   Currently <strong>{selectedAdjustItem.quantity_available}</strong> in stock
-                  {selectedAdjustItem.quantity_reserved > 0 && <> ({selectedAdjustItem.quantity_reserved} reserved)</>}.
+                  {selectedAdjustItem.quantity_reserved > 0 && <> ({selectedAdjustItem.quantity_reserved} reserved for orders)</>}.
                   {' '}Low-stock alert at {selectedAdjustItem.minimum_threshold}.
                 </p>
               )}
@@ -439,13 +428,8 @@ export default function InventoryCatalog({
       {/* Summary cards double as quick status filters */}
       <div style={s.summaryGrid}>
         {summaryCards.map((card) => (
-          <button
-            key={card.label}
-            type="button"
-            onClick={() => setStatus(card.key)}
-            style={{ ...s.summaryCard, ...(status === card.key ? s.summaryCardActive : {}) }}
-            aria-pressed={status === card.key}
-          >
+          <button key={card.label} type="button" onClick={() => setStatus(card.key)}
+            style={{ ...s.summaryCard, ...(status === card.key ? s.summaryCardActive : {}) }} aria-pressed={status === card.key}>
             <span style={s.summaryLabel}>{card.label}</span>
             <span style={{ ...s.summaryValue, color: card.color }}>{card.value}</span>
             {card.sub && <span style={s.summarySub}>{card.sub}</span>}
@@ -457,14 +441,8 @@ export default function InventoryCatalog({
       <div style={s.filters}>
         <div style={s.searchWrap}>
           <Search size={16} color="#64748b" />
-          <input
-            type="text"
-            placeholder="Search materials…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            style={s.searchInput}
-            aria-label="Search materials"
-          />
+          <input type="text" placeholder="Search materials…" value={search} onChange={(e) => setSearch(e.target.value)}
+            style={s.searchInput} aria-label="Search materials" />
         </div>
         <select value={category} onChange={(e) => setCategory(e.target.value)} style={s.select} aria-label="Filter by category">
           <option value="" style={s.option}>All categories</option>
@@ -486,9 +464,7 @@ export default function InventoryCatalog({
           No inventory items yet.{canEdit ? ' Click "Manage Stock" above to add your first item.' : ' Items added by an Owner, Admin or Production user will appear here.'}
         </p>
       )}
-      {items.length > 0 && visible.length === 0 && (
-        <p style={s.empty}>No items match these filters.</p>
-      )}
+      {items.length > 0 && visible.length === 0 && <p style={s.empty}>No items match these filters.</p>}
 
       <div style={s.grid}>
         {visible.map((item) => {
@@ -497,14 +473,9 @@ export default function InventoryCatalog({
             ? Math.min(100, (item.quantity_reserved / item.quantity_available) * 100)
             : 0;
           const id = item.inventory_id;
-          const busy = Boolean(cardBusy[id]);
-          const msg = cardMsg[id];
           return (
-            <div
-              key={id}
-              data-inventory-id={id}
-              style={{ ...s.card, borderTop: `4px solid ${meta.bar}`, ...(recentlyChanged.includes(id) ? s.cardChanged : {}) }}
-            >
+            <div key={id} data-inventory-id={id}
+              style={{ ...s.card, borderTop: `4px solid ${meta.bar}`, ...(recentlyChanged.includes(id) ? s.cardChanged : {}) }}>
               <div style={s.cardHead}>
                 <div style={{ minWidth: 0 }}>
                   <h3 style={s.itemName} title={item.item_name}>{item.item_name}</h3>
@@ -537,54 +508,92 @@ export default function InventoryCatalog({
                 <span>Unit cost: <strong>{peso(item.unit_cost)}</strong></span>
               </div>
 
-              {/* Manual stock correction: received, taken, or lost */}
               {canEdit && (
-                <div style={s.adjustBox}>
-                  <span style={s.adjustLabel}>Adjust stock</span>
-                  <div style={s.adjustRow}>
-                    <button
-                      type="button" onClick={() => handleCardChange(item, 'subtract')}
-                      style={{ ...s.stepBtn, color: '#b91c1c', borderColor: '#fecaca' }}
-                      disabled={busy || item.quantity_available === 0}
-                      aria-label={`Subtract from ${item.item_name}`}
-                      title="Subtract (taken / used)"
-                    >
-                      <Minus size={16} />
-                    </button>
-                    <input
-                      type="number" min="1" step="1" inputMode="numeric"
-                      value={cardQty[id] ?? '1'}
-                      onChange={(e) => setCardQty((q) => ({ ...q, [id]: e.target.value }))}
-                      style={s.stepInput}
-                      aria-label={`Quantity to add or subtract for ${item.item_name}`}
-                    />
-                    <button
-                      type="button" onClick={() => handleCardChange(item, 'add')}
-                      style={{ ...s.stepBtn, color: '#15803d', borderColor: '#bbf7d0' }}
-                      disabled={busy}
-                      aria-label={`Add to ${item.item_name}`}
-                      title="Add (stock received)"
-                    >
-                      <Plus size={16} />
-                    </button>
-                    <button type="button" onClick={() => openAdjustFor(item)} style={s.moreBtn} disabled={busy} title="Record lost / damaged stock">
-                      Lost?
-                    </button>
-                  </div>
-                  {busy && <span style={s.cardNote}>Saving…</span>}
-                  {!busy && msg && (
-                    <span style={{ ...s.cardNote, color: msg.type === 'ok' ? '#166534' : '#991b1b' }}>{msg.text}</span>
-                  )}
+                <div style={s.cardActions}>
+                  <button type="button" onClick={() => openEdit(item)} style={s.editBtn} aria-label={`Edit ${item.item_name}`}>
+                    <Pencil size={14} /> Edit
+                  </button>
+                  <button type="button" onClick={() => setToDelete(item)} style={s.deleteBtn} aria-label={`Delete ${item.item_name}`}>
+                    <Trash2 size={14} /> Delete
+                  </button>
                 </div>
               )}
 
-              {item.sync_status !== 'synced' && (
-                <span style={s.pending}>Pending sync</span>
-              )}
+              {item.sync_status !== 'synced' && <span style={s.pending}>Pending sync</span>}
             </div>
           );
         })}
       </div>
+
+      {/* Edit item window */}
+      {editing && (
+        <div style={s.overlay} onClick={editBusy ? undefined : () => setEditing(null)}>
+          <form role="dialog" aria-modal="true" aria-labelledby="edit-item-title" onSubmit={handleEditSave}
+            style={s.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={s.panelHead}>
+              <h3 id="edit-item-title" style={{ margin: 0, fontSize: '1.1rem', color: '#0f172a' }}>Edit Item</h3>
+              <button type="button" onClick={() => setEditing(null)} style={s.panelClose} aria-label="Close" disabled={editBusy}>
+                <X size={18} />
+              </button>
+            </div>
+            <div style={s.formGrid}>
+              <label style={{ ...s.field, gridColumn: '1 / -1' }}>
+                <span style={s.fieldLabel}>Item name *</span>
+                <input type="text" maxLength={255} required value={editing.form.item_name} style={s.input} autoFocus
+                  onChange={(e) => setEditing({ ...editing, form: { ...editing.form, item_name: e.target.value } })} />
+              </label>
+              <label style={{ ...s.field, gridColumn: '1 / -1' }}>
+                <span style={s.fieldLabel}>Category *</span>
+                <input type="text" maxLength={100} required list="inventory-category-options" value={editing.form.item_category} style={s.input}
+                  onChange={(e) => setEditing({ ...editing, form: { ...editing.form, item_category: e.target.value } })} />
+              </label>
+              <label style={s.field}>
+                <span style={s.fieldLabel}>Low-stock alert at</span>
+                <input type="number" min="0" step="1" inputMode="numeric" required value={editing.form.minimum_threshold} style={s.input}
+                  onChange={(e) => setEditing({ ...editing, form: { ...editing.form, minimum_threshold: e.target.value } })} />
+              </label>
+              <label style={s.field}>
+                <span style={s.fieldLabel}>Unit cost (₱)</span>
+                <input type="number" min="0" step="0.01" inputMode="decimal" value={editing.form.unit_cost} style={s.input}
+                  onChange={(e) => setEditing({ ...editing, form: { ...editing.form, unit_cost: e.target.value } })} />
+              </label>
+              <p style={{ ...s.hint, gridColumn: '1 / -1' }}>
+                Stock on hand: <strong>{editing.item.quantity_available}</strong>. To change the quantity, use
+                {' '}<strong>Manage Stock → Add / Subtract Stock</strong>, so every stock movement is recorded.
+              </p>
+              <div style={{ display: 'flex', gap: '0.5rem', gridColumn: '1 / -1', justifyContent: 'flex-end' }}>
+                <button type="button" onClick={() => setEditing(null)} style={s.refreshBtn} disabled={editBusy}>Cancel</button>
+                <button type="submit" style={s.submitBtn} disabled={editBusy}>{editBusy ? 'Saving…' : 'Save Changes'}</button>
+              </div>
+            </div>
+          </form>
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={Boolean(toDelete)}
+        title="Move to Recycle Bin?"
+        message={toDelete ? `"${toDelete.item_name}" will be removed from the catalog and kept in the Recycle Bin, where you can restore it at any time.` : ''}
+        confirmLabel="Move to Recycle Bin"
+        danger
+        busy={deleteBusy}
+        onConfirm={handleDelete}
+        onCancel={() => setToDelete(null)}
+      />
+
+      {binOpen && (
+        <RecycleBin
+          apiBase={apiBase}
+          token={token}
+          userRole={userRole}
+          onUnauthorized={onUnauthorized}
+          onClose={() => setBinOpen(false)}
+          onResult={(r) => { setResult(r); onRefresh(); }}
+          refreshKey={`${binCount}:${fetchedAt}`}
+        />
+      )}
+
+      <ResultDialog result={result} onClose={() => setResult(null)} />
     </div>
   );
 }
@@ -600,6 +609,7 @@ const s = {
   liveDot: { display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%' },
   cardChanged: { boxShadow: '0 0 0 3px #a5b4fc', transition: 'box-shadow 0.3s ease' },
   refreshBtn: { display: 'flex', alignItems: 'center', gap: '0.25rem', padding: '0.5rem 1rem', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '0.375rem', cursor: 'pointer', color: '#4f46e5', fontWeight: 'bold', fontSize: '0.875rem' },
+  binBadge: { marginLeft: '0.25rem', minWidth: '1.25rem', padding: '0 0.35rem', background: '#ef4444', color: '#fff', borderRadius: '999px', fontSize: '0.7rem', lineHeight: '1.25rem', textAlign: 'center' },
   manageBtn: { display: 'flex', alignItems: 'center', gap: '0.35rem', padding: '0.5rem 1rem', background: '#4f46e5', border: '1px solid #4f46e5', borderRadius: '0.375rem', cursor: 'pointer', color: '#fff', fontWeight: 'bold', fontSize: '0.875rem' },
   manageBtnActive: { display: 'flex', alignItems: 'center', gap: '0.35rem', padding: '0.5rem 1rem', background: '#e0e7ff', border: '1px solid #4f46e5', borderRadius: '0.375rem', cursor: 'pointer', color: '#4f46e5', fontWeight: 'bold', fontSize: '0.875rem' },
   banner: { display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem', borderRadius: '0.375rem', marginBottom: '1rem', fontSize: '0.875rem' },
@@ -620,10 +630,7 @@ const s = {
   toggle: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.6rem', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '0.375rem', cursor: 'pointer', color: '#334155', fontWeight: 'bold', fontSize: '0.875rem' },
   toggleAdd: { background: '#dcfce7', borderColor: '#16a34a', color: '#166534' },
   toggleSub: { background: '#fee2e2', borderColor: '#ef4444', color: '#991b1b' },
-  submitBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.35rem', padding: '0.75rem', background: '#4f46e5', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.9rem' },
-  msg: { display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 0.75rem', borderRadius: '0.375rem', margin: '0 0 1rem', fontSize: '0.875rem' },
-  msgOk: { background: '#dcfce7', color: '#166534' },
-  msgError: { background: '#fee2e2', color: '#991b1b' },
+  submitBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.35rem', padding: '0.75rem 1.25rem', background: '#4f46e5', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.9rem' },
 
   summaryGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '1rem', marginBottom: '1rem' },
   summaryCard: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '0.25rem', background: '#fff', padding: '1rem', borderRadius: '0.5rem', border: '1px solid #e2e8f0', cursor: 'pointer', textAlign: 'left' },
@@ -652,12 +659,10 @@ const s = {
   barTrack: { height: '6px', background: '#e2e8f0', borderRadius: '3px', overflow: 'hidden', marginBottom: '0.5rem' },
   barFill: { height: '100%', borderRadius: '3px' },
   cardFoot: { display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: '#334155' },
-  adjustBox: { marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px dashed #e2e8f0', display: 'flex', flexDirection: 'column', gap: '0.35rem' },
-  adjustLabel: { fontSize: '0.7rem', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase' },
-  adjustRow: { display: 'flex', gap: '0.35rem', alignItems: 'stretch' },
-  stepBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: '2.25rem', background: '#fff', border: '1px solid', borderRadius: '0.375rem', cursor: 'pointer' },
-  stepInput: { ...control, flex: 1, minWidth: 0, padding: '0.4rem', border: '1px solid #cbd5e1', borderRadius: '0.375rem', textAlign: 'center', fontSize: '0.9rem' },
-  moreBtn: { padding: '0 0.6rem', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '0.375rem', cursor: 'pointer', color: '#475569', fontSize: '0.75rem', fontWeight: 'bold' },
-  cardNote: { fontSize: '0.75rem', color: '#64748b' },
+  cardActions: { display: 'flex', gap: '0.5rem', marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px dashed #e2e8f0' },
+  editBtn: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.45rem', background: '#fff', border: '1px solid #c7d2fe', borderRadius: '0.375rem', cursor: 'pointer', color: '#4338ca', fontWeight: 'bold', fontSize: '0.8rem' },
+  deleteBtn: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.45rem', background: '#fff', border: '1px solid #fecaca', borderRadius: '0.375rem', cursor: 'pointer', color: '#b91c1c', fontWeight: 'bold', fontSize: '0.8rem' },
+  overlay: { position: 'fixed', inset: 0, background: 'rgba(15, 23, 42, 0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem', zIndex: 60 },
+  modal: { background: '#fff', borderRadius: '0.5rem', borderTop: '4px solid #4f46e5', padding: '1.25rem', width: '100%', maxWidth: '520px', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.25)', textAlign: 'left' },
   pending: { position: 'absolute', bottom: '-0.6rem', right: '1rem', padding: '0.1rem 0.5rem', background: '#e0e7ff', color: '#4f46e5', borderRadius: '999px', fontSize: '0.7rem', fontWeight: 'bold' }
 };
