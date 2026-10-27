@@ -178,6 +178,27 @@ Use `selectList(table, 'pg'|'sqlite')` + `serialize(table, row)` for every new q
 
 ---
 
+## 3b. Changes after this file was written (Catalog Recycle Bin + Orders tab, migration 004)
+Read this before §4: some of it is already built.
+- **Reservation model chosen: "available = on-hand".** `POST /api/orders` now saves the order's materials as `order_items` (with `inventory_id`) **and** reserves stock (`quantity_reserved += qty`) in one transaction. `order_profiles.stock_reserved` records it. `computeAvailable` is unchanged (`available − reserved`).
+  - So §4.5 approval must **not** reserve again. It only checks the preconditions and changes the status.
+  - §4.1 item 2 is done for orders created through `POST /api/orders`.
+- **`PATCH /api/orders/:order_id/status`** (cloud only) moves stock as orders progress:
+  - transitions: `Pending → Printing → Completed`, any open order `→ Cancelled`, `Delayed → Pending`;
+  - `Cancelled` releases the reservation;
+  - `Completed` consumes it (`available −= qty`, `reserved −= qty`);
+  - `Delayed → Pending` reserves the stock at that point.
+  - When adding `Approved`, put it between `Pending` and `Printing` in `STATUS_TRANSITIONS`, in both `routes/orders.js` and `Frontend/src/OrdersPage.jsx`.
+- **Inventory soft delete:**
+  - `deleted_at` / `deleted_by` mark items in the Recycle Bin. `purged_at` marks items permanently removed but kept because orders or losses reference them.
+  - Every catalog, capacity and order query must filter with `ACTIVE_ITEM_SQL` from `services/records.js`.
+- **`inventory_audit_log`:** append-only, backend-only trace of every catalog change, written in the same transaction as the change. View it with `npm run audit-log`.
+- **Item names are unique**, ignoring case and spaces (`uq_inventory_items_name`).
+- **`/api/customers`** (GET, POST) exists. Owner is now allowed on all order and inventory routes.
+- **Startup:**
+  - The server creates the SQLite tables itself (`services/localSchema.js`). `initLocalDb.js` is optional.
+  - It applies pending migrations (`AUTO_MIGRATE=false` turns this off), so your next migration is `005_...sql`.
+
 ## 4. Sprint 11 objectives: PB 13 "Approve Job Order & Reserve Blank Stock"
 
 ### 4.1 Prerequisites (do these first, in the same PR)

@@ -107,7 +107,13 @@ const createInventoryEvents = ({ io, pgPool, localDb, databaseUrl, listenUrl }) 
     const onFailure = (err) => {
       if (failed) return;
       failed = true;
-      if (err) console.error('⚠️ Inventory LISTEN connection lost:', err.message);
+      // 57P01 "terminating connection due to administrator command" is Neon suspending an
+      // idle compute (scale to zero). Expected and harmless: we reconnect and resync.
+      if (err && err.code === '57P01') {
+        console.log('ℹ️  Neon closed the idle real-time connection (auto-suspend). Reconnecting…');
+      } else if (err) {
+        console.error('⚠️ Inventory LISTEN connection lost:', err.message);
+      }
       setListening(false);
       c.removeAllListeners();
       c.end().catch(() => {});

@@ -15,7 +15,8 @@ const SYNC_TABLES = [
   {
     table: 'inventory_items',
     id: 'inventory_id',
-    columns: ['inventory_id', 'item_name', 'item_category', 'quantity_available', 'quantity_reserved', 'minimum_threshold', 'unit_cost'],
+    columns: ['inventory_id', 'item_name', 'item_category', 'quantity_available', 'quantity_reserved', 'minimum_threshold', 'unit_cost',
+              'deleted_at', 'deleted_by', 'purged_at'],
     // M9: keep the locally reduced stock while an offline loss for this item is still unsynced
     refreshGuard: ` AND NOT EXISTS (SELECT 1 FROM material_loss ml
                       WHERE ml.inventory_id = excluded.inventory_id
@@ -29,7 +30,8 @@ const SYNC_TABLES = [
   {
     table: 'order_profiles',
     id: 'order_id',
-    columns: ['order_id', 'customer_id', 'date_created', 'production_deadline', 'production_status', 'design_drive_link', 'total_quote_amount']
+    columns: ['order_id', 'customer_id', 'date_created', 'production_deadline', 'production_status', 'design_drive_link', 'total_quote_amount',
+              'stock_reserved']
   },
   {
     table: 'order_items',
@@ -45,6 +47,12 @@ const SYNC_TABLES = [
     table: 'material_loss',
     id: 'loss_id',
     columns: ['loss_id', 'order_id', 'inventory_id', 'quantity_lost', 'loss_reason', 'date_recorded', 'financial_cost']
+  },
+  {
+    // Backend-only audit trail: pushed (insert-only) but never refreshed back into the cache
+    table: 'inventory_audit_log',
+    id: 'audit_id',
+    columns: ['audit_id', 'inventory_id', 'action', 'item_name', 'details', 'performed_by', 'performed_role', 'created_at']
   }
 ];
 
@@ -248,11 +256,29 @@ const refreshTableCounting = async (pgPool, localDb, spec) => {
   return { rows, changed: after[0].n - before[0].n };
 };
 
+// Items permanently deleted in Neon (by any branch) are removed from this cache too, unless
+// they still have unsynced local edits or local rows that reference them.
+const pruneDeletedInventory = async (pgPool, localDb) => {
+  const { rows } = await pgPool.query('SELECT inventory_id FROM inventory_items');
+  return sqliteRun(
+    localDb,
+    `DELETE FROM inventory_items
+      WHERE sync_status = 'synced' AND sync_conflict IS NULL
+        AND inventory_id NOT IN (SELECT value FROM json_each(?))
+        AND NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.inventory_id = inventory_items.inventory_id)
+        AND NOT EXISTS (SELECT 1 FROM material_loss ml WHERE ml.inventory_id = inventory_items.inventory_id)`,
+    [JSON.stringify(rows.map((r) => r.inventory_id))]
+  );
+};
+
 const refreshLocalCache = async (pgPool, localDb, summary) => {
   for (const table of REFRESH_TABLES) {
     try {
       const { rows: count, changed } = await refreshTableCounting(pgPool, localDb, specFor(table));
-      if (table === 'inventory_items' && changed > 0) summary.inventory_changed = true;
+      if (table === 'inventory_items') {
+        const pruned = await pruneDeletedInventory(pgPool, localDb);
+        if (changed > 0 || pruned > 0) summary.inventory_changed = true;
+      }
       console.log(`⬇️  Refreshed ${count} ${table} row(s) into local cache (${changed} changed)`);
     } catch (err) {
       if (isConnectionError(err)) throw err;

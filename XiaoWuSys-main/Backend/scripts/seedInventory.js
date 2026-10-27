@@ -4,7 +4,7 @@
 //
 //   npm run seed-inventory
 //
-// Safe to run more than once: an item whose name already exists (case-insensitive) is
+// Safe to run more than once: an item whose name already exists (ignoring case and spaces) is
 // skipped, never duplicated or re-counted. Change stock afterwards with the Catalog's
 // +/- controls. unit_cost is 0 because the delivery note has no prices; edit it later.
 // If Neon is unreachable, items go into the local SQLite cache as pending_insert and are
@@ -40,7 +40,9 @@ const seedCloud = async () => {
       const { rowCount } = await pool.query(
         `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost)
          SELECT $1::varchar, $2::varchar, $3::varchar, $4::int, $5::int, 0::numeric
-          WHERE NOT EXISTS (SELECT 1 FROM inventory_items WHERE LOWER(item_name) = LOWER($2::varchar))`,
+          WHERE NOT EXISTS (SELECT 1 FROM inventory_items
+                             WHERE LOWER(REGEXP_REPLACE(item_name, '\\s', '', 'g')) = LOWER(REGEXP_REPLACE($2::varchar, '\\s', '', 'g')))
+         ON CONFLICT DO NOTHING`,
         [crypto.randomUUID(), item.item_name, item.item_category, item.quantity_available, item.minimum_threshold]
       );
       console.log(rowCount === 1
@@ -62,7 +64,7 @@ const seedLocal = () => new Promise((resolve, reject) => {
         const changes = await run(
           `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, sync_status, last_modified)
            SELECT ?, ?, ?, ?, ?, 0, 'pending_insert', ${LOCAL_NOW}
-            WHERE NOT EXISTS (SELECT 1 FROM inventory_items WHERE LOWER(item_name) = LOWER(?))`,
+            WHERE NOT EXISTS (SELECT 1 FROM inventory_items WHERE LOWER(REPLACE(item_name, ' ', '')) = LOWER(REPLACE(?, ' ', '')))`,
           [crypto.randomUUID(), item.item_name, item.item_category, item.quantity_available, item.minimum_threshold, item.item_name]
         );
         console.log(changes === 1
