@@ -1,31 +1,36 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, ClipboardList, X, ChevronLeft, ChevronRight, CloudOff, Printer, CircleCheck, CircleX, RotateCcw, Wallet } from 'lucide-react';
+import { RefreshCw, ClipboardList, X, ChevronLeft, ChevronRight, CloudOff, Printer, CircleCheck, CircleX, RotateCcw, Wallet, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { createApi, errorText, peso, formatDateTime } from './api';
 import { ResultDialog, ConfirmDialog } from './Dialogs';
 
 // Orders tab: every order profile, newest first, with its materials, payments and status.
 //   GET   /api/orders?status=&limit=&offset=      list
 //   GET   /api/orders/:id                         detail (items, payments, totals)
-//   PATCH /api/orders/:id/status                  Pending -> Printing -> Completed, Cancel, resume Delayed
+//   POST  /api/orders/:id/approve                 Owner only: Pending/Delayed -> Approved (PB 13)
+//   PATCH /api/orders/:id/status                  Approved -> Printing -> Completed, Cancel, resume Delayed
 //   POST  /api/orders/:id/payments                record a payment
-// Status changes move stock (release on Cancel, consume on Complete), and the Catalog
-// updates by itself through the real-time push.
+// Status changes move stock (reserve on approval, release on Cancel, consume on Complete),
+// and the Catalog updates by itself through the real-time push.
 
 const PAGE_SIZE = 20;
 const WRITE_ROLES = ['Owner', 'Admin', 'Production'];
 const PAYMENT_TYPES = ['Cash', 'GCash', 'Bank Transfer'];
+const APPROVABLE = ['Pending', 'Delayed'];
 
-export const ORDER_STATUS_META = {
+const ORDER_STATUS_META = {
   Pending: { bg: '#e0e7ff', color: '#3730a3' },
+  Approved: { bg: '#ccfbf1', color: '#115e59' },
   Printing: { bg: '#dbeafe', color: '#1e40af' },
   Completed: { bg: '#dcfce7', color: '#166534' },
   Delayed: { bg: '#fef3c7', color: '#92400e' },
   Cancelled: { bg: '#fee2e2', color: '#991b1b' }
 };
 
-// Must match STATUS_TRANSITIONS in Backend/routes/orders.js
+// Must match STATUS_TRANSITIONS in Backend/routes/orders.js.
+// Pending -> Approved is not a status change: it is the Owner-only Approve Job Order button.
 const ACTIONS = {
-  Pending: [{ to: 'Printing', label: 'Start Printing', Icon: Printer }, { to: 'Cancelled', label: 'Cancel Order', Icon: CircleX, danger: true }],
+  Pending: [{ to: 'Cancelled', label: 'Cancel Order', Icon: CircleX, danger: true }],
+  Approved: [{ to: 'Printing', label: 'Start Printing', Icon: Printer }, { to: 'Cancelled', label: 'Cancel Order', Icon: CircleX, danger: true }],
   Printing: [{ to: 'Completed', label: 'Mark Completed', Icon: CircleCheck }, { to: 'Cancelled', label: 'Cancel Order', Icon: CircleX, danger: true }],
   Delayed: [{ to: 'Pending', label: 'Resume (reserve stock)', Icon: RotateCcw }, { to: 'Cancelled', label: 'Cancel Order', Icon: CircleX, danger: true }],
   Completed: [],
@@ -33,10 +38,37 @@ const ACTIONS = {
 };
 
 const shortId = (id) => (id ? String(id).slice(0, 8).toUpperCase() : '—');
+const toCentavos = (n) => Math.round(Number(n || 0) * 100);
+
+// What the server will check before approving (§4.4), worked out from the loaded detail so
+// the button can explain itself. The server stays the real check.
+// Money is compared in integer centavos, like the backend; offline payments do not count.
+const approvalReadiness = (detail) => {
+  const { order, items, payments } = detail;
+  const quoteC = toCentavos(order.total_quote_amount);
+  const requiredC = Math.ceil(quoteC / 2);
+  const paidC = payments.filter((p) => p.sync_status === 'synced').reduce((sum, p) => sum + toCentavos(p.amount), 0);
+  const offlinePayments = payments.filter((p) => p.sync_status !== 'synced').length;
+  const unlinked = items.filter((i) => !i.inventory_id).length;
+  const problems = [];
+  if (order.sync_status !== 'synced' || detail.source === 'local') problems.push('Approval needs an internet connection, and the order must be synced to the cloud.');
+  if (quoteC <= 0) problems.push('Set a quote amount for this order first.');
+  else if (paidC < requiredC) problems.push(`A 50% downpayment is required: ${peso((requiredC - paidC) / 100)} more to go.`);
+  if (offlinePayments > 0) problems.push(`${offlinePayments} payment(s) saved offline do not count until they sync.`);
+  if (items.length === 0) problems.push('Add at least one material to this order.');
+  else if (unlinked > 0) problems.push(`${unlinked} item(s) are not linked to a stock item.`);
+  return {
+    quoteC, requiredC, paidC,
+    percent: requiredC > 0 ? Math.min(100, Math.floor((paidC / requiredC) * 100)) : 0,
+    blocking: problems.filter((p) => !p.includes('do not count until')),
+    notes: problems
+  };
+};
 
 export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, refreshKey, onStockChanged }) {
   const api = useMemo(() => createApi({ apiBase, token, onUnauthorized }), [apiBase, token, onUnauthorized]);
   const canWrite = WRITE_ROLES.includes(userRole);
+  const isOwner = userRole === 'Owner'; // UI only; the server enforces Owner-only approval
 
   const [statusFilter, setStatusFilter] = useState('');
   const [page, setPage] = useState(0);
@@ -55,6 +87,8 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
   const [pendingAction, setPendingAction] = useState(null); // { to, label }
   const [payment, setPayment] = useState({ amount: '', payment_type: 'Cash' });
   const [result, setResult] = useState(null);
+  const [confirmApprove, setConfirmApprove] = useState(false);
+  const [shortageAlert, setShortageAlert] = useState(null); // { message, shortages, total_shortfall }
 
   // Customers (names for the list)
   useEffect(() => {
@@ -115,6 +149,80 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
     reload();
   };
 
+  const reloadDetail = () => { setResult(null); setDetailTick((t) => t + 1); reload(); };
+
+  // PB 13: Owner approves the job order; the server re-checks everything in one transaction
+  const approveOrder = async () => {
+    setBusy(true);
+    const { ok, status, data } = await api('POST', `/orders/${encodeURIComponent(selectedId)}/approve`, {
+      expected_version: detail?.order?.version || ''
+    });
+    setBusy(false);
+    setConfirmApprove(false);
+
+    if (ok) {
+      const held = (data.reserved || []).map((x) => `• ${x.item_name || x.inventory_id}: ${x.quantity}`).join('\n');
+      setResult({
+        type: 'success',
+        title: 'Job order approved',
+        message: (data.newly_reserved ? 'Materials reserved:\n' : 'Materials were already reserved when the order was created:\n') + held
+      });
+      setDetailTick((t) => t + 1); // keep the success dialog open (reloadDetail() would clear it)
+      reload();
+      return;
+    }
+
+    const err = data.error;
+    if (status === 409 && err === 'INSUFFICIENT_INVENTORY') {
+      setShortageAlert({ message: data.message, shortages: data.shortages || [], total_shortfall: data.total_shortfall });
+      return;
+    }
+    if (status === 402) {
+      setResult({
+        type: 'warning',
+        title: 'Downpayment required',
+        message: `${peso(data.remaining)} more is needed before this job order can be approved.\n`
+          + `Paid ${peso(data.total_paid)} of the ${peso(data.required_downpayment)} required (50% of ${peso(data.total_quote_amount)}).`
+          + (data.unsynced_payments > 0 ? `\n${data.unsynced_payments} payment(s) saved offline do not count yet. Sync, then try again.` : '')
+      });
+      return;
+    }
+    if (status === 409 && (err === 'EDIT_CONFLICT' || err === 'ALREADY_APPROVED')) {
+      setResult({
+        type: 'warning',
+        title: err === 'ALREADY_APPROVED' ? 'Already approved' : 'Order changed, reload',
+        message: err === 'ALREADY_APPROVED'
+          ? 'Someone already approved this job order. Reload to see its current state.'
+          : 'This order was changed by someone else after you opened it. Reload it, check it again, then approve.'
+      });
+      setDetailTick((t) => t + 1);
+      return;
+    }
+    if (status === 409 && err === 'ORDER_LOCKED') {
+      const until = data.lock?.expiresAt ? ` until ${formatDateTime(data.lock.expiresAt.replace('Z', ''), { utc: true })} at the latest` : '';
+      setResult({
+        type: 'warning',
+        title: 'Order is being edited',
+        message: `A ${data.lock?.role || 'another'} user is editing this order right now${until}. Try again when they finish.`
+      });
+      return;
+    }
+    if (status === 503 || status === 0) {
+      setResult({ type: 'error', title: 'Approval needs an internet connection', message: errorText(data, 'Nothing was changed. Try again when the connection is back.') });
+      return;
+    }
+    if (status === 403) {
+      setResult({ type: 'error', title: 'Owner only', message: 'Only the Owner can approve job orders.' });
+      return;
+    }
+    if (status === 422 && err === 'ITEMS_NOT_LINKED_TO_STOCK') {
+      const n = (data.unlinked_line_item_ids || []).length;
+      setResult({ type: 'warning', title: 'Materials not linked to stock', message: n ? `${n} item(s) on this order are not linked to a stock item, so their stock cannot be reserved.` : errorText(data, 'Add materials first.') });
+      return;
+    }
+    setResult({ type: 'error', title: 'Not approved', message: errorText(data, 'Could not approve this job order.') });
+  };
+
   const addPayment = async (e) => {
     e.preventDefault();
     const amount = Number(payment.amount);
@@ -134,6 +242,7 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
 
   const order = detail?.order;
   const hasNext = list.orders.length === PAGE_SIZE;
+  const readiness = order && APPROVABLE.includes(order.production_status) ? approvalReadiness(detail) : null;
 
   return (
     <div style={o.root}>
@@ -226,6 +335,9 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                   <Info label="Deadline" value={formatDateTime(order.production_deadline, { withTime: false })} />
                   <Info label="Quote" value={peso(order.total_quote_amount)} />
                   <Info label="Paid / Balance" value={`${peso(detail.totals.total_paid)} / ${peso(detail.totals.balance)}`} />
+                  {order.approved_at && (
+                    <Info label="Approved" value={formatDateTime(order.approved_at, { utc: true })} sub="by the Owner" />
+                  )}
                 </div>
                 <p style={{ ...o.meta, margin: '0.25rem 0 1rem' }}>Full order ID: <code style={o.code}>{order.order_id}</code></p>
 
@@ -236,7 +348,10 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                     <tbody>
                       {detail.items.map((it) => (
                         <tr key={it.line_item_id}>
-                          <td style={o.td}>{it.product_type}</td>
+                          <td style={o.td}>
+                            {it.product_type}
+                            {!it.inventory_id && <span style={o.unlinked}>not linked to stock</span>}
+                          </td>
                           <td style={o.td}>{[it.size, it.custom_name, it.custom_number].filter(Boolean).join(' · ') || '—'}</td>
                           <td style={o.tdNum}>{it.quantity}</td>
                         </tr>
@@ -269,6 +384,45 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                     </select>
                     <button type="submit" style={o.btnPrimary} disabled={busy}><Wallet size={16} /> Add Payment</button>
                   </form>
+                )}
+
+                {readiness && (
+                  <section style={o.approvalBox} aria-labelledby="approval-title">
+                    <h4 id="approval-title" style={{ ...o.h4, margin: '0 0 0.5rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      <ShieldCheck size={18} color="#115e59" /> Job order approval
+                    </h4>
+                    {readiness.quoteC > 0 ? (
+                      <>
+                        <p style={o.progressText}>
+                          {peso(readiness.paidC / 100)} of {peso(readiness.requiredC / 100)} required (50%)
+                        </p>
+                        <div style={o.progressTrack} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={readiness.percent}
+                          aria-label="Downpayment progress">
+                          <div style={{ ...o.progressFill, width: `${readiness.percent}%`, background: readiness.paidC >= readiness.requiredC ? '#10b981' : '#f59e0b' }} />
+                        </div>
+                      </>
+                    ) : (
+                      <p style={o.progressText}>No quote yet</p>
+                    )}
+                    <p style={{ ...o.meta, margin: '0.4rem 0 0' }}>
+                      {order.stock_reserved ? 'Materials are already reserved for this order.' : 'Approving will reserve this order\u2019s materials.'}
+                    </p>
+                    {readiness.notes.length > 0 && (
+                      <ul style={o.problemList}>
+                        {readiness.notes.map((n) => <li key={n}>{n}</li>)}
+                      </ul>
+                    )}
+                    {isOwner ? (
+                      <button type="button" style={{ ...o.btnApprove, ...(readiness.blocking.length || busy ? o.btnDisabled : {}) }}
+                        disabled={busy || readiness.blocking.length > 0}
+                        title={readiness.blocking[0] || 'Approve this job order'}
+                        onClick={() => setConfirmApprove(true)}>
+                        <ShieldCheck size={16} /> Approve Job Order
+                      </button>
+                    ) : (
+                      <p style={{ ...o.meta, marginTop: '0.6rem' }}>Waiting for the Owner to approve this job order before printing can start.</p>
+                    )}
+                  </section>
                 )}
 
                 {canWrite && (ACTIONS[order.production_status] || []).length > 0 && (
@@ -304,7 +458,58 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
         onConfirm={() => changeStatus(pendingAction)}
         onCancel={() => setPendingAction(null)}
       />
-      <ResultDialog result={result} onClose={() => setResult(null)} />
+      <ConfirmDialog
+        open={confirmApprove}
+        title="Approve this job order?"
+        message={order?.stock_reserved
+          ? 'The order moves to Approved and printing can start. Its materials are already reserved.'
+          : 'The order moves to Approved and its materials are reserved from stock now.'}
+        confirmLabel="Approve Job Order"
+        busy={busy}
+        onConfirm={approveOrder}
+        onCancel={() => setConfirmApprove(false)}
+      />
+
+      {shortageAlert && (
+        <div style={{ ...o.overlay, zIndex: 100 }} onClick={() => setShortageAlert(null)}>
+          <div role="alertdialog" aria-modal="true" aria-labelledby="approve-shortage-title" style={o.shortageCard} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+              <TriangleAlert size={22} color="#92400e" />
+              <h3 id="approve-shortage-title" style={{ fontSize: '1.15rem', margin: 0, color: '#92400e' }}>Not enough stock to approve</h3>
+            </div>
+            <p style={{ fontSize: '0.875rem', color: '#334155', margin: '0 0 0.75rem' }}>
+              {shortageAlert.message || 'Not enough free stock to approve this job order. Nothing was reserved.'}
+            </p>
+            <table style={o.table}>
+              <thead>
+                <tr>
+                  <th style={o.th}>Material</th>
+                  <th style={o.thNum}>Requested</th>
+                  <th style={o.thNum}>Available</th>
+                  <th style={o.thNum}>Shortfall</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shortageAlert.shortages.map((s) => (
+                  <tr key={s.inventory_id}>
+                    <td style={o.td}>{s.item_name || s.inventory_id}</td>
+                    <td style={o.tdNum}>{s.requested}</td>
+                    <td style={o.tdNum}>{s.available}</td>
+                    <td style={{ ...o.tdNum, color: '#991b1b', fontWeight: 'bold' }}>-{s.shortfall ?? Math.max(0, s.requested - s.available)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.75rem' }}>
+              <button type="button" style={o.btnPrimary} onClick={() => setShortageAlert(null)} autoFocus>OK</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ResultDialog result={result} onClose={() => setResult(null)}
+        actionLabel={result?.title === 'Order changed, reload' || result?.title === 'Already approved' ? 'Reload order' : undefined}
+        onAction={reloadDetail} />
     </div>
   );
 }
@@ -353,5 +558,14 @@ const o = {
   infoLabel: { fontSize: '0.7rem', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase' },
   infoValue: { fontSize: '0.95rem', color: '#0f172a', fontWeight: 'bold' },
   h4: { fontSize: '0.95rem', margin: '1rem 0 0.5rem', color: '#0f172a' },
-  payForm: { display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }
+  payForm: { display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' },
+  unlinked: { marginLeft: '0.4rem', padding: '0.05rem 0.4rem', background: '#fef3c7', color: '#92400e', borderRadius: '999px', fontSize: '0.65rem', fontWeight: 'bold' },
+  approvalBox: { marginTop: '1rem', padding: '0.85rem', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '0.5rem' },
+  progressText: { margin: 0, fontSize: '0.9rem', fontWeight: 'bold', color: '#0f172a' },
+  progressTrack: { height: '8px', background: '#e2e8f0', borderRadius: '999px', overflow: 'hidden', marginTop: '0.4rem' },
+  progressFill: { height: '100%', borderRadius: '999px', transition: 'width 0.3s' },
+  problemList: { margin: '0.5rem 0 0', paddingLeft: '1.1rem', fontSize: '0.8rem', color: '#92400e', lineHeight: 1.5 },
+  btnApprove: { display: 'flex', alignItems: 'center', gap: '0.35rem', marginTop: '0.75rem', padding: '0.55rem 1rem', background: '#0f766e', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', color: '#fff', fontWeight: 'bold', fontSize: '0.85rem' },
+  btnDisabled: { background: '#94a3b8', cursor: 'not-allowed' },
+  shortageCard: { background: '#fff', borderRadius: '0.5rem', borderTop: '4px solid #f59e0b', padding: '1.25rem', width: '100%', maxWidth: '520px', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.25)', textAlign: 'left' }
 };
