@@ -35,6 +35,8 @@ if (!process.env.DATABASE_URL) fail('DATABASE_URL is not set (check your .env).'
 if (!username) fail('ADMIN_USERNAME is required.');
 if (username.length > 100) fail('ADMIN_USERNAME must be at most 100 characters.');
 if (password.length < 8) fail('ADMIN_PASSWORD must be at least 8 characters.');
+// Same rule as the website (routes/auth.js)
+if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) fail('ADMIN_PASSWORD must contain at least one letter and one number.');
 if (Buffer.byteLength(password, 'utf8') > 72) fail('ADMIN_PASSWORD must be at most 72 bytes.');
 if (!BOOTSTRAP_ROLES.includes(role)) fail(`ADMIN_ROLE must be one of: ${BOOTSTRAP_ROLES.join(', ')}.`);
 

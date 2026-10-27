@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  RefreshCw, ClipboardList, X, ChevronLeft, ChevronRight, CloudOff, Printer, CircleCheck, CircleX, RotateCcw, Wallet,
-  ShieldCheck, TriangleAlert, ArrowUp, ArrowDown, ArrowUpDown
+  RefreshCw, ClipboardList, X, ChevronLeft, ChevronRight, CloudOff, Printer, CircleCheck, CircleX, RotateCcw, Wallet, ShieldCheck, TriangleAlert, ArrowUp, ArrowDown, ArrowUpDown, Pencil, Copy, Link2, Shirt
 } from 'lucide-react';
-import { createApi, errorText, peso, formatDateTime } from './api';
+import { createApi, errorText, peso, formatDateTime, copyText, todayInManila } from './api';
 import { ResultDialog, ConfirmDialog } from './Dialogs';
 
 // Orders tab: every order profile, newest first, with its materials, payments and status.
@@ -54,6 +53,55 @@ const ACTIONS = {
 };
 
 const shortId = (id) => (id ? String(id).slice(0, 8).toUpperCase() : '—');
+const EDITABLE = ['Pending', 'Approved', 'Printing', 'Delayed'];
+const QUOTE_EDITABLE = ['Pending', 'Delayed'];
+const EMPTY_PRINT_LINE = { product_type: 'Jersey print', quantity: '1', size: '', custom_name: '', custom_number: '' };
+const lineText = (it) => {
+  const extra = [it.size, it.custom_name, it.custom_number && `#${it.custom_number}`].filter(Boolean).join(', ');
+  return `${it.quantity} x ${it.product_type}${extra ? ` (${extra})` : ''}`;
+};
+const escapeHtml = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// Text the staff can paste into Messenger / Facebook to update the customer
+const messengerSummary = (detail, customer) => {
+  const { order, items, totals } = detail;
+  return [
+    `Hi ${customer?.full_name || ''}! Here is your XiaoMei Printshop order #${shortId(order.order_id)}:`,
+    ...items.map((it) => `• ${lineText(it)}`),
+    `Deadline: ${formatDateTime(order.production_deadline, { withTime: false })}`,
+    `Total: ${peso(order.total_quote_amount)}`,
+    `Paid: ${peso(totals.total_paid)}`,
+    `Balance: ${peso(totals.balance)}`,
+    `Status: ${order.production_status}`,
+    order.design_drive_link ? `Design: ${order.design_drive_link}` : null,
+    'Thank you!'
+  ].filter(Boolean).join('\n');
+};
+
+// Printable job order for the production team (opens the browser's print window)
+const printJobOrder = (detail, customer) => {
+  const { order, items, totals, payments } = detail;
+  const w = window.open('', '_blank', 'width=800,height=900');
+  if (!w) return false;
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Job Order #${escapeHtml(shortId(order.order_id))}</title>
+<style>body{font-family:Arial,sans-serif;margin:24px;color:#111}h1{font-size:20px;margin:0 0 4px}table{width:100%;border-collapse:collapse;margin:12px 0}
+th,td{border:1px solid #999;padding:6px;text-align:left;font-size:13px}td.n,th.n{text-align:right}.meta{font-size:13px;margin:2px 0}.sign{margin-top:40px;display:flex;gap:40px}
+.sign div{flex:1;border-top:1px solid #333;padding-top:4px;font-size:12px}@media print{button{display:none}}</style></head><body>
+<h1>XiaoMei Printshop — Job Order #${escapeHtml(shortId(order.order_id))}</h1>
+<p class="meta"><b>Customer:</b> ${escapeHtml(customer?.full_name || order.customer_id)} ${customer?.contact_number ? `· ${escapeHtml(customer.contact_number)}` : ''}</p>
+<p class="meta"><b>Status:</b> ${escapeHtml(order.production_status)} · <b>Deadline:</b> ${escapeHtml(formatDateTime(order.production_deadline, { withTime: false }))}</p>
+${order.design_drive_link ? `<p class="meta"><b>Design file:</b> ${escapeHtml(order.design_drive_link)}</p>` : ''}
+<table><thead><tr><th>Item / material</th><th>Size</th><th>Name</th><th>No.</th><th class="n">Qty</th></tr></thead><tbody>
+${items.map((it) => `<tr><td>${escapeHtml(it.product_type)}</td><td>${escapeHtml(it.size || '')}</td><td>${escapeHtml(it.custom_name || '')}</td><td>${escapeHtml(it.custom_number || '')}</td><td class="n">${escapeHtml(it.quantity)}</td></tr>`).join('')}
+</tbody></table>
+<p class="meta"><b>Quote:</b> ${escapeHtml(peso(order.total_quote_amount))} · <b>Paid:</b> ${escapeHtml(peso(totals.total_paid))} (${payments.length} payment(s)) · <b>Balance:</b> ${escapeHtml(peso(totals.balance))}</p>
+<div class="sign"><div>Prepared by</div><div>Printed by</div><div>Released to customer</div></div>
+<p><button onclick="window.print()">Print</button></p></body></html>`);
+  w.document.close();
+  w.focus();
+  setTimeout(() => w.print(), 300);
+  return true;
+};
 const toCentavos = (n) => Math.round(Number(n || 0) * 100);
 
 // What the server will check before approving (§4.4), worked out from the loaded detail so
@@ -107,6 +155,9 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
   const [result, setResult] = useState(null);
   const [confirmApprove, setConfirmApprove] = useState(false);
   const [shortageAlert, setShortageAlert] = useState(null); // { message, shortages, total_shortfall }
+  const [editDetails, setEditDetails] = useState(null);     // { deadline, quote } while editing
+  const [designDraft, setDesignDraft] = useState(null);     // string while editing the design link
+  const [printLine, setPrintLine] = useState(null);         // EMPTY_PRINT_LINE shape while adding
 
   // Customers (names for the list)
   useEffect(() => {
@@ -172,7 +223,9 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
     return () => { cancelled = true; };
   }, [api, selectedId, detailTick, refreshKey]);
 
-  const openOrder = (id) => { setDetail(null); setDetailError(''); setSelectedId(id); setPayment({ amount: '', payment_type: 'Cash' }); };
+  const resetEditors = () => { setEditDetails(null); setDesignDraft(null); setPrintLine(null); };
+  const openOrder = (id) => {
+    resetEditors(); setDetail(null); setDetailError(''); setSelectedId(id); setPayment({ amount: '', payment_type: 'Cash' }); };
   const closeOrder = () => { setSelectedId(null); setDetail(null); };
   const customerName = (id) => customers[id]?.full_name || id || '—';
 
@@ -283,6 +336,71 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
     setResult({ type: 'success', title: 'Payment recorded', message: `${peso(amount)} (${payment.payment_type}) recorded. ${data.source === 'local' ? 'Saved offline; it will sync later.' : ''}` });
     setPayment({ amount: '', payment_type: payment.payment_type });
     setDetailTick((t) => t + 1);
+  };
+
+  // ---- Edit deadline / quote ----
+  const saveDetails = async (e) => {
+    e.preventDefault();
+    const body = {};
+    if (editDetails.deadline && editDetails.deadline !== String(detail.order.production_deadline).slice(0, 10)) body.production_deadline = editDetails.deadline;
+    if (QUOTE_EDITABLE.includes(detail.order.production_status)) {
+      const q = editDetails.quote.trim() === '' ? 0 : Number(editDetails.quote);
+      if (!Number.isFinite(q) || q < 0 || Math.abs(Math.round(q * 100) - q * 100) > 1e-6) {
+        return setResult({ type: 'error', title: 'Please check the quote', message: 'The quote must be a peso amount of 0 or more, like 1500 or 1500.50.' });
+      }
+      if (q !== detail.order.total_quote_amount) body.total_quote_amount = Math.round(q * 100) / 100;
+    }
+    if (Object.keys(body).length === 0) { setEditDetails(null); return setResult({ type: 'warning', title: 'No changes', message: 'Nothing was changed, so nothing was saved.' }); }
+    setBusy(true);
+    const { ok, data } = await api('PATCH', `/orders/${encodeURIComponent(selectedId)}/details`, { ...body, expected_version: detail.order.version || undefined });
+    setBusy(false);
+    if (!ok) return setResult({ type: data.error === 'EDIT_CONFLICT' ? 'warning' : 'error', title: 'Not saved', message: errorText(data, 'The order details were not saved.') });
+    setEditDetails(null);
+    setResult({ type: 'success', title: 'Order updated', message: data.message });
+    setDetailTick((t) => t + 1);
+    reload();
+  };
+
+  // ---- Design link (Google Drive) ----
+  const saveDesign = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    const { ok, data } = await api('PATCH', `/orders/${encodeURIComponent(selectedId)}/design`, {
+      design_drive_link: designDraft.trim(), expected_version: detail.order.version || undefined
+    });
+    setBusy(false);
+    if (!ok) return setResult({ type: 'error', title: 'Design link not saved', message: errorText(data, 'The design link was not saved.') });
+    setDesignDraft(null);
+    setResult({ type: 'success', title: 'Design linked', message: data.message });
+    setDetailTick((t) => t + 1);
+  };
+
+  // ---- Print details (size, name, number per piece) ----
+  const savePrintLine = async (e) => {
+    e.preventDefault();
+    const qty = Number(printLine.quantity);
+    if (!Number.isInteger(qty) || qty < 1) return setResult({ type: 'error', title: 'Check the quantity', message: 'The quantity must be a whole number of at least 1.' });
+    setBusy(true);
+    const { ok, data } = await api('POST', `/orders/${encodeURIComponent(selectedId)}/items`, {
+      product_type: printLine.product_type.trim(), quantity: qty,
+      size: printLine.size.trim() || undefined, custom_name: printLine.custom_name.trim() || undefined, custom_number: printLine.custom_number.trim() || undefined
+    });
+    setBusy(false);
+    if (!ok) return setResult({ type: 'error', title: 'Not added', message: errorText(data, 'The print detail was not added.') });
+    setPrintLine({ ...EMPTY_PRINT_LINE, product_type: printLine.product_type });
+    setDetailTick((t) => t + 1);
+  };
+
+  const copySummary = async () => {
+    const ok = await copyText(messengerSummary(detail, customers[detail.order.customer_id]));
+    setResult(ok
+      ? { type: 'success', title: 'Copied for Messenger', message: 'The order summary was copied. Paste it into the customer\u2019s Messenger chat.' }
+      : { type: 'error', title: 'Could not copy', message: 'Your browser blocked copying.' });
+  };
+  const printOrder = () => {
+    if (!printJobOrder(detail, customers[detail.order.customer_id])) {
+      setResult({ type: 'error', title: 'Could not open the print window', message: 'Allow pop-ups for this site, then try again.' });
+    }
   };
 
   const order = detail?.order;
@@ -398,7 +516,15 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                   </span>
                 )}
               </h3>
-              <button type="button" onClick={closeOrder} style={o.close} aria-label="Close" disabled={busy}><X size={18} /></button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                {order && (
+                  <>
+                    <button type="button" onClick={copySummary} style={o.headBtn} title="Copy a summary to paste in Messenger"><Copy size={14} /> Copy for Messenger</button>
+                    <button type="button" onClick={printOrder} style={o.headBtn} title="Print a job order for production"><Printer size={14} /> Print</button>
+                  </>
+                )}
+                <button type="button" onClick={closeOrder} style={o.close} aria-label="Close" disabled={busy}><X size={18} /></button>
+              </div>
             </div>
 
             {detailError && <p style={{ ...o.banner, background: '#fee2e2', color: '#991b1b' }}>{detailError}</p>}
@@ -419,6 +545,64 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                   )}
                 </div>
                 <p style={{ ...o.meta, margin: '0.25rem 0 1rem' }}>Full order ID: <code style={o.code}>{order.order_id}</code></p>
+
+                {/* Edit deadline / quote */}
+                {canWrite && EDITABLE.includes(order.production_status) && (
+                  editDetails ? (
+                    <form onSubmit={saveDetails} style={o.editBox}>
+                      <label style={o.control}>
+                        <span style={o.controlLabel}>Deadline</span>
+                        <input type="date" min={todayInManila()} value={editDetails.deadline} required style={o.input}
+                          onChange={(e) => setEditDetails({ ...editDetails, deadline: e.target.value })} />
+                      </label>
+                      <label style={o.control}>
+                        <span style={o.controlLabel}>Quote (₱)</span>
+                        <input type="number" min="0" step="0.01" inputMode="decimal" value={editDetails.quote} style={o.input}
+                          disabled={!QUOTE_EDITABLE.includes(order.production_status)}
+                          title={QUOTE_EDITABLE.includes(order.production_status) ? '' : 'The quote is fixed after approval'}
+                          onChange={(e) => setEditDetails({ ...editDetails, quote: e.target.value })} />
+                      </label>
+                      <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'flex-end' }}>
+                        <button type="button" style={o.btn} onClick={() => setEditDetails(null)} disabled={busy}>Cancel</button>
+                        <button type="submit" style={o.btnPrimary} disabled={busy}>Save</button>
+                      </div>
+                      {!QUOTE_EDITABLE.includes(order.production_status) && (
+                        <p style={{ ...o.meta, flexBasis: '100%' }}>The quote cannot change after approval, because the downpayment was based on it.</p>
+                      )}
+                    </form>
+                  ) : (
+                    <button type="button" style={o.linkBtn} onClick={() => setEditDetails({
+                      deadline: String(order.production_deadline).slice(0, 10) < todayInManila() ? todayInManila() : String(order.production_deadline).slice(0, 10),
+                      quote: String(order.total_quote_amount ?? 0)
+                    })}>
+                      <Pencil size={14} /> Edit deadline / quote
+                    </button>
+                  )
+                )}
+
+                {/* Design file */}
+                <div style={o.designRow}>
+                  <Link2 size={16} color="#475569" />
+                  {designDraft !== null ? (
+                    <form onSubmit={saveDesign} style={{ display: 'flex', gap: '0.4rem', flex: 1, flexWrap: 'wrap' }}>
+                      <input type="url" value={designDraft} onChange={(e) => setDesignDraft(e.target.value)} required autoFocus
+                        placeholder="https://drive.google.com/…" style={{ ...o.input, flex: '1 1 240px' }} />
+                      <button type="button" style={o.btn} onClick={() => setDesignDraft(null)} disabled={busy}>Cancel</button>
+                      <button type="submit" style={o.btnPrimary} disabled={busy}>Save link</button>
+                    </form>
+                  ) : (
+                    <>
+                      {order.design_drive_link
+                        ? <a href={order.design_drive_link} target="_blank" rel="noopener noreferrer" style={o.link}>Open design file (Google Drive)</a>
+                        : <span style={o.meta}>No design file linked yet.</span>}
+                      {canWrite && EDITABLE.includes(order.production_status) && (
+                        <button type="button" style={o.linkBtn} onClick={() => setDesignDraft(order.design_drive_link || '')}>
+                          {order.design_drive_link ? 'Change' : 'Link design file'}
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
 
                 <h4 style={o.h4}>Materials ({detail.totals.item_count} line{detail.totals.item_count === 1 ? '' : 's'}, {detail.totals.total_quantity} total)</h4>
                 {detail.items.length === 0 ? <p style={o.meta}>No materials on this order.</p> : (
@@ -443,6 +627,47 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                       </tr>
                     </tfoot>
                   </table>
+                )}
+
+                {canWrite && EDITABLE.includes(order.production_status) && (
+                  printLine ? (
+                    <form onSubmit={savePrintLine} style={o.editBox}>
+                      <label style={{ ...o.control, flex: '2 1 160px' }}>
+                        <span style={o.controlLabel}>What</span>
+                        <input value={printLine.product_type} required maxLength={100} style={o.input}
+                          onChange={(e) => setPrintLine({ ...printLine, product_type: e.target.value })} />
+                      </label>
+                      <label style={{ ...o.control, flex: '0 1 70px' }}>
+                        <span style={o.controlLabel}>Qty</span>
+                        <input type="number" min="1" step="1" value={printLine.quantity} required style={o.input}
+                          onChange={(e) => setPrintLine({ ...printLine, quantity: e.target.value })} />
+                      </label>
+                      <label style={{ ...o.control, flex: '0 1 80px' }}>
+                        <span style={o.controlLabel}>Size</span>
+                        <input value={printLine.size} maxLength={50} placeholder="M" style={o.input}
+                          onChange={(e) => setPrintLine({ ...printLine, size: e.target.value })} />
+                      </label>
+                      <label style={{ ...o.control, flex: '1 1 120px' }}>
+                        <span style={o.controlLabel}>Name</span>
+                        <input value={printLine.custom_name} maxLength={255} placeholder="DELA CRUZ" style={o.input}
+                          onChange={(e) => setPrintLine({ ...printLine, custom_name: e.target.value })} />
+                      </label>
+                      <label style={{ ...o.control, flex: '0 1 70px' }}>
+                        <span style={o.controlLabel}>No.</span>
+                        <input value={printLine.custom_number} maxLength={50} placeholder="7" style={o.input}
+                          onChange={(e) => setPrintLine({ ...printLine, custom_number: e.target.value })} />
+                      </label>
+                      <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'flex-end' }}>
+                        <button type="button" style={o.btn} onClick={() => setPrintLine(null)} disabled={busy}>Done</button>
+                        <button type="submit" style={o.btnPrimary} disabled={busy}>Add</button>
+                      </div>
+                      <p style={{ ...o.meta, flexBasis: '100%' }}>Print details (sizes, names, numbers) do not use stock. Add one line per piece, or one line per size with its quantity.</p>
+                    </form>
+                  ) : (
+                    <button type="button" style={o.linkBtn} onClick={() => setPrintLine(EMPTY_PRINT_LINE)}>
+                      <Shirt size={14} /> Add print details (size / name / number)
+                    </button>
+                  )
                 )}
 
                 <h4 style={o.h4}>Payments</h4>
@@ -695,5 +920,10 @@ const o = {
   footHint: { fontSize: '0.78rem', color: '#92400e', flex: '1 1 180px' },
   btnApprove: { display: 'flex', alignItems: 'center', gap: '0.35rem', padding: '0.55rem 1rem', background: '#0f766e', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', color: '#fff', fontWeight: 'bold', fontSize: '0.85rem' },
   btnDisabled: { background: '#94a3b8', cursor: 'not-allowed' },
+  headBtn: { display: 'flex', alignItems: 'center', gap: '0.25rem', padding: '0.3rem 0.6rem', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '0.375rem', cursor: 'pointer', color: '#334155', fontWeight: 'bold', fontSize: '0.75rem' },
+  linkBtn: { display: 'inline-flex', alignItems: 'center', gap: '0.3rem', padding: '0.25rem 0', background: 'none', border: 'none', cursor: 'pointer', color: '#4f46e5', fontWeight: 'bold', fontSize: '0.82rem' },
+  editBox: { display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'flex-end', padding: '0.75rem', margin: '0.25rem 0 0.75rem', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '0.5rem' },
+  designRow: { display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', margin: '0.5rem 0 0.25rem' },
+  link: { color: '#2563eb', fontWeight: 'bold', fontSize: '0.85rem' },
   shortageCard: { background: '#fff', borderRadius: '0.5rem', borderTop: '4px solid #f59e0b', padding: '1.25rem', width: '100%', maxWidth: '520px', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.25)', textAlign: 'left' }
 };

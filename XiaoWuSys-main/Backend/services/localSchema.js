@@ -22,6 +22,8 @@ const LOCAL_TABLES = [
       quantity_reserved INTEGER NOT NULL DEFAULT 0,
       minimum_threshold INTEGER NOT NULL DEFAULT 0,
       unit_cost REAL NOT NULL,
+      unit TEXT NOT NULL DEFAULT 'pcs',
+      supplier TEXT,
       deleted_at TEXT,
       deleted_by TEXT,
       purged_at TEXT,
@@ -34,6 +36,8 @@ const LOCAL_TABLES = [
       username TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       role TEXT NOT NULL CHECK (role IN ('Owner', 'Admin', 'Production', 'Staff')),
+      is_active INTEGER NOT NULL DEFAULT 1,
+      tokens_valid_after TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP

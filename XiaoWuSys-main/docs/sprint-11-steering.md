@@ -206,6 +206,18 @@ Read this before §4: some of it is already built.
 - **`STATUS_TRANSITIONS`**: `Pending → Cancelled` only. `Approved → Printing | Cancelled`. Production cannot start without approval. `PATCH /status` with `Approved` is rejected.
 - **`POST /api/orders/:order_id/items`** with an `inventory_id` on an order that holds stock reserves that item in the same transaction. Offline, this returns 503 `ITEM_RESERVATION_REQUIRES_CLOUD`.
 
+## 3c. Hardening pass (migration 006): read before adding routes
+- **App factory.** `Backend/app.js` builds the API, and `server.js` only wires up the databases, sockets and sync. Register every new router in `app.js`.
+- **Tests.** Run `npm test` (Node's built-in runner). It needs a real `sqlite3`, `bcrypt`, `express` and `jsonwebtoken`, so run `npm install` first. Every new route gets a test in `Backend/tests/`, using `startTestServer()`, which works offline on a temporary SQLite file. Fixture data lives in `tests/fixtures/data.js`.
+- **Accounts:**
+  - `routes/auth.js` has user management, password reset/change and a login lockout (5 tries / 15 minutes).
+  - The `users` table is pulled down into SQLite (`pullOnly` in `services/sync.js`), so offline login works. It is never pushed up.
+  - Deactivating an account or changing its password/role sets `users.tokens_valid_after`. `services/sessions.js` then rejects older tokens, using the `ims` claim.
+- **Inventory** has `unit` and `supplier`. **Orders** have `PATCH /:order_id/details` for the deadline and quote; the quote is frozen from Approved onwards.
+- **Reports:** `/api/reports/dashboard` and `/api/reports/export/{inventory,orders,payments}.csv`. Exports are protected against formula injection.
+- **Offline-only mode.** It runs when `CLOUD_DISABLED=true` or there is no `DATABASE_URL`. `npm run demo` uses a separate `demo_cache.db` with fixture data.
+- **Configuration:** `CORS_ORIGINS` sets the allowed frontend origins, and `VITE_API_URL` sets the frontend's API address. The server refuses to start without `JWT_SECRET`.
+
 ## 4. Sprint 11 objectives: PB 13 "Approve Job Order & Reserve Blank Stock"
 
 ### 4.1 Prerequisites (do these first, in the same PR)
