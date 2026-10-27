@@ -101,24 +101,41 @@ router.use(verifyToken);
 
 // ==========================================
 // LIST ORDERS (M10)
-// GET /api/orders?status=Pending&customer_id=CUST-001&limit=50&offset=0
-// -> { source, orders: [...], limit, offset, unsynced }
+// GET /api/orders?status=Pending&customer_id=CUST-001&sort=production_deadline&dir=asc&limit=50&offset=0
+//   sort: date_created (default) | production_deadline | total_quote_amount | production_status
+//   dir:  desc (default) | asc
+// Sorting runs in the database, so it is correct across pages (not just within one page).
+// The ORDER BY text comes only from the allow-list below, never from the request.
+// -> { source, orders: [...], limit, offset, sort, dir, unsynced }
 // ==========================================
+const STATUS_RANK_SQL = `CASE production_status ${PRODUCTION_STATUSES.map((st, i) => `WHEN '${st}' THEN ${i}`).join(' ')} ELSE 99 END`;
+// Qualified names on purpose: a bare name in ORDER BY would match the SELECT alias, and the
+// select list returns money as text (so 1000 would sort before 999).
+const ORDER_SORTS = {
+  date_created: 'order_profiles.date_created',
+  production_deadline: 'order_profiles.production_deadline',
+  total_quote_amount: 'order_profiles.total_quote_amount',
+  production_status: STATUS_RANK_SQL // lifecycle order: Pending, Approved, Printing, ...
+};
+
 router.get('/', requireRole(READ_ROLES), async (req, res) => {
   const v = createValidator();
   const status = v.oneOf(req.query.status, 'status', PRODUCTION_STATUSES, { required: false });
   const customer_id = v.id(req.query.customer_id, 'customer_id', { required: false });
+  const sort = v.oneOf(req.query.sort, 'sort', Object.keys(ORDER_SORTS), { required: false }) || 'date_created';
+  const dir = v.oneOf(req.query.dir, 'dir', ['asc', 'desc'], { required: false }) || 'desc';
   const { limit, offset } = v.pagination(req.query);
   if (v.failed()) return v.send(res);
 
   try {
     const result = await listRecords(req, 'order_profiles', {
       filters: [['production_status', status], ['customer_id', customer_id]],
-      orderBy: 'date_created DESC, order_id',
+      // Ties broken by newest first, then order_id, so paging is stable
+      orderBy: `${ORDER_SORTS[sort]} ${dir.toUpperCase()}, order_profiles.date_created DESC, order_profiles.order_id`,
       limit,
       offset
     });
-    res.status(200).json({ source: result.source, orders: result.records, limit, offset, unsynced: result.unsynced });
+    res.status(200).json({ source: result.source, orders: result.records, limit, offset, sort, dir, unsynced: result.unsynced });
   } catch (err) {
     sendDbError(res, err, 'listing orders');
   }

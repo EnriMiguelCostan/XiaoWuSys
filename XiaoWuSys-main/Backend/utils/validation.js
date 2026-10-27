@@ -71,7 +71,8 @@ const FIELD_LABELS = {
   full_name: 'Customer name', contact_number: 'Mobile number', platform_source: 'Where the customer came from',
   loss_reason: 'Reason', reason: 'Reason', resolution: 'Resolution', status: 'Status', action: 'Action',
   product_type: 'Product type', size: 'Size', custom_name: 'Custom name', custom_number: 'Custom number',
-  category: 'Category', stock_status: 'Stock status', search: 'Search', limit: 'Page size', offset: 'Page'
+  category: 'Category', stock_status: 'Stock status', search: 'Search', limit: 'Page size', offset: 'Page',
+  sort: 'Sort by', dir: 'Sort direction'
 };
 const labelOf = (field) =>
   FIELD_LABELS[field] || String(field).replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());

@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, ClipboardList, X, ChevronLeft, ChevronRight, CloudOff, Printer, CircleCheck, CircleX, RotateCcw, Wallet, ShieldCheck, TriangleAlert } from 'lucide-react';
+import {
+  RefreshCw, ClipboardList, X, ChevronLeft, ChevronRight, CloudOff, Printer, CircleCheck, CircleX, RotateCcw, Wallet,
+  ShieldCheck, TriangleAlert, ArrowUp, ArrowDown, ArrowUpDown
+} from 'lucide-react';
 import { createApi, errorText, peso, formatDateTime } from './api';
 import { ResultDialog, ConfirmDialog } from './Dialogs';
 
@@ -16,6 +19,19 @@ const PAGE_SIZE = 20;
 const WRITE_ROLES = ['Owner', 'Admin', 'Production'];
 const PAYMENT_TYPES = ['Cash', 'GCash', 'Bank Transfer'];
 const APPROVABLE = ['Pending', 'Delayed'];
+
+// Sort options (the server sorts, see GET /api/orders?sort=&dir=)
+const SORT_OPTIONS = [
+  { key: 'date_created', dir: 'desc', label: 'Newest first' },
+  { key: 'date_created', dir: 'asc', label: 'Oldest first' },
+  { key: 'production_deadline', dir: 'asc', label: 'Deadline: soonest first' },
+  { key: 'production_deadline', dir: 'desc', label: 'Deadline: latest first' },
+  { key: 'total_quote_amount', dir: 'desc', label: 'Quote: highest first' },
+  { key: 'total_quote_amount', dir: 'asc', label: 'Quote: lowest first' },
+  { key: 'production_status', dir: 'asc', label: 'Status (workflow order)' }
+];
+const DEFAULT_SORT = { key: 'date_created', dir: 'desc' };
+const SORT_DEFAULT_DIR = { date_created: 'desc', production_deadline: 'asc', total_quote_amount: 'desc', production_status: 'asc' };
 
 const ORDER_STATUS_META = {
   Pending: { bg: '#e0e7ff', color: '#3730a3' },
@@ -71,6 +87,8 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
   const isOwner = userRole === 'Owner'; // UI only; the server enforces Owner-only approval
 
   const [statusFilter, setStatusFilter] = useState('');
+  const [customerFilter, setCustomerFilter] = useState('');
+  const [sort, setSort] = useState(DEFAULT_SORT); // { key, dir }: sorted by the server across all pages
   const [page, setPage] = useState(0);
   const [list, setList] = useState({ orders: [], source: null, unsynced: 0 });
   const [loading, setLoading] = useState(true);
@@ -102,8 +120,11 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
   // Orders page
   useEffect(() => {
     let cancelled = false;
-    const qs = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(page * PAGE_SIZE) });
+    const qs = new URLSearchParams({
+      limit: String(PAGE_SIZE), offset: String(page * PAGE_SIZE), sort: sort.key, dir: sort.dir
+    });
     if (statusFilter) qs.set('status', statusFilter);
+    if (customerFilter) qs.set('customer_id', customerFilter);
     api('GET', `/orders?${qs}`).then(({ ok, data }) => {
       if (cancelled) return;
       setLoading(false);
@@ -112,7 +133,31 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
       setList({ orders: data.orders || [], source: data.source, unsynced: data.unsynced || 0 });
     });
     return () => { cancelled = true; };
-  }, [api, page, statusFilter, refreshKey, tick]);
+  }, [api, page, statusFilter, customerFilter, sort, refreshKey, tick]);
+
+  // Any filter / sort change starts again at page 1
+  const changeFilter = (setter) => (value) => { setter(value); setPage(0); setLoading(true); };
+  const setStatus = changeFilter(setStatusFilter);
+  const setCustomer = changeFilter(setCustomerFilter);
+  const setSortTo = changeFilter(setSort);
+  // Column header click: same column flips the direction, a new column starts at its natural direction
+  const sortByColumn = (key) => setSortTo(sort.key === key
+    ? { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' }
+    : { key, dir: SORT_DEFAULT_DIR[key] });
+  const filtersActive = statusFilter || customerFilter || sort.key !== DEFAULT_SORT.key || sort.dir !== DEFAULT_SORT.dir;
+  const clearFilters = () => { setStatusFilter(''); setCustomerFilter(''); setSort(DEFAULT_SORT); setPage(0); setLoading(true); };
+
+  // Closes the detail pop-up on Escape (only when no inner dialog is open)
+  useEffect(() => {
+    if (!selectedId) return undefined;
+    const onKey = (e) => {
+      if (e.key === 'Escape' && !busy && !result && !confirmApprove && !pendingAction && !shortageAlert) {
+        setSelectedId(null); setDetail(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedId, busy, result, confirmApprove, pendingAction, shortageAlert]);
 
   // Selected order detail
   useEffect(() => {
@@ -251,15 +296,42 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
           <h2 style={{ fontSize: '1.25rem', margin: 0, color: '#08060d', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <ClipboardList size={20} /> Order Profiles
           </h2>
-          <p style={o.meta}>Every order created in Create Order appears here, newest first. Click an order to see its details.</p>
+          <p style={o.meta}>Every order created in Create Order appears here. Click an order to open its details.</p>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(0); }} style={o.select} aria-label="Filter by status">
+        <button type="button" onClick={reload} style={o.btn} disabled={loading}><RefreshCw size={16} /> {loading ? 'Loading…' : 'Refresh'}</button>
+      </div>
+
+      {/* Filter and sort controls */}
+      <div style={o.toolbar} role="search" aria-label="Filter and sort orders">
+        <label style={o.control}>
+          <span style={o.controlLabel}>Status</span>
+          <select value={statusFilter} onChange={(e) => setStatus(e.target.value)} style={o.select} aria-label="Filter by status">
             <option value="" style={o.option}>All statuses</option>
             {Object.keys(ORDER_STATUS_META).map((st) => <option key={st} value={st} style={o.option}>{st}</option>)}
           </select>
-          <button type="button" onClick={reload} style={o.btn} disabled={loading}><RefreshCw size={16} /> {loading ? 'Loading…' : 'Refresh'}</button>
-        </div>
+        </label>
+        <label style={o.control}>
+          <span style={o.controlLabel}>Customer</span>
+          <select value={customerFilter} onChange={(e) => setCustomer(e.target.value)} style={o.select} aria-label="Filter by customer">
+            <option value="" style={o.option}>All customers</option>
+            {Object.values(customers)
+              .sort((a, b) => a.full_name.localeCompare(b.full_name))
+              .map((c) => <option key={c.customer_id} value={c.customer_id} style={o.option}>{c.full_name}</option>)}
+          </select>
+        </label>
+        <label style={o.control}>
+          <span style={o.controlLabel}>Sort by</span>
+          <select value={`${sort.key}:${sort.dir}`} aria-label="Sort orders" style={o.select}
+            onChange={(e) => { const [key, dir] = e.target.value.split(':'); setSortTo({ key, dir }); }}>
+            {SORT_OPTIONS.map((opt) => <option key={`${opt.key}:${opt.dir}`} value={`${opt.key}:${opt.dir}`} style={o.option}>{opt.label}</option>)}
+            {!SORT_OPTIONS.some((opt) => opt.key === sort.key && opt.dir === sort.dir) && (
+              <option value={`${sort.key}:${sort.dir}`} style={o.option}>Custom (column header)</option>
+            )}
+          </select>
+        </label>
+        {filtersActive && (
+          <button type="button" onClick={clearFilters} style={o.clearBtn}>Clear filters</button>
+        )}
       </div>
 
       {list.source === 'local' && (
@@ -273,17 +345,19 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
         <table style={o.table}>
           <thead>
             <tr>
-              <th style={o.th}>Order</th>
-              <th style={o.th}>Customer</th>
-              <th style={o.th}>Created</th>
-              <th style={o.th}>Deadline</th>
-              <th style={o.th}>Status</th>
-              <th style={o.thNum}>Quote</th>
+              <th style={o.th} scope="col">Order</th>
+              <th style={o.th} scope="col">Customer</th>
+              <SortTh label="Created" k="date_created" sort={sort} onSort={sortByColumn} />
+              <SortTh label="Deadline" k="production_deadline" sort={sort} onSort={sortByColumn} />
+              <SortTh label="Status" k="production_status" sort={sort} onSort={sortByColumn} />
+              <SortTh label="Quote" k="total_quote_amount" sort={sort} onSort={sortByColumn} align="right" />
             </tr>
           </thead>
           <tbody>
             {!loading && list.orders.length === 0 && !listError && (
-              <tr><td colSpan={6} style={o.emptyCell}>No orders yet{statusFilter ? ` with status ${statusFilter}` : ''}. Create one in the Create Order tab.</td></tr>
+              <tr><td colSpan={6} style={o.emptyCell}>
+                {statusFilter || customerFilter ? 'No orders match these filters.' : 'No orders yet. Create one in the Create Order tab.'}
+              </td></tr>
             )}
             {list.orders.map((ord) => {
               const meta = ORDER_STATUS_META[ord.production_status] || ORDER_STATUS_META.Pending;
@@ -316,8 +390,13 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
         <div style={o.overlay} onClick={busy ? undefined : closeOrder}>
           <section role="dialog" aria-modal="true" aria-labelledby="order-detail-title" style={o.modal} onClick={(e) => e.stopPropagation()}>
             <div style={o.modalHead}>
-              <h3 id="order-detail-title" style={{ margin: 0, fontSize: '1.15rem', color: '#0f172a' }}>
+              <h3 id="order-detail-title" style={{ margin: 0, fontSize: '1.15rem', color: '#0f172a', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                 Order <code style={o.code}>#{shortId(selectedId)}</code>
+                {order && (
+                  <span style={{ ...o.badge, background: (ORDER_STATUS_META[order.production_status] || ORDER_STATUS_META.Pending).bg, color: (ORDER_STATUS_META[order.production_status] || ORDER_STATUS_META.Pending).color }}>
+                    {order.production_status}
+                  </span>
+                )}
               </h3>
               <button type="button" onClick={closeOrder} style={o.close} aria-label="Close" disabled={busy}><X size={18} /></button>
             </div>
@@ -329,8 +408,8 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
               <div style={{ overflowY: 'auto' }}>
                 <div style={o.infoGrid}>
                   <Info label="Customer" value={customerName(order.customer_id)} sub={customers[order.customer_id]?.contact_number} />
-                  <Info label="Status" value={<span style={{ ...o.badge, background: (ORDER_STATUS_META[order.production_status] || ORDER_STATUS_META.Pending).bg, color: (ORDER_STATUS_META[order.production_status] || ORDER_STATUS_META.Pending).color }}>{order.production_status}</span>}
-                    sub={order.stock_reserved ? 'Materials reserved' : 'No stock reserved'} />
+                  <Info label="Stock" value={order.stock_reserved ? 'Reserved' : 'Not reserved'}
+                    sub={order.stock_reserved ? 'Materials are held for this order' : 'Reserved on approval / resume'} />
                   <Info label="Created" value={formatDateTime(order.date_created, { utc: true })} />
                   <Info label="Deadline" value={formatDateTime(order.production_deadline, { withTime: false })} />
                   <Info label="Quote" value={peso(order.total_quote_amount)} />
@@ -357,6 +436,12 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                         </tr>
                       ))}
                     </tbody>
+                    <tfoot>
+                      <tr>
+                        <td style={o.tfoot} colSpan={2}>Total quantity</td>
+                        <td style={o.tfootNum}>{detail.totals.total_quantity}</td>
+                      </tr>
+                    </tfoot>
                   </table>
                 )}
 
@@ -367,12 +452,25 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                     <tbody>
                       {detail.payments.map((p) => (
                         <tr key={p.payment_id}>
-                          <td style={o.td}>{formatDateTime(p.payment_date, { utc: true })}</td>
+                          <td style={o.td}>
+                            {formatDateTime(p.payment_date, { utc: true })}
+                            {p.sync_status !== 'synced' && <span style={o.pending}>offline</span>}
+                          </td>
                           <td style={o.td}>{p.payment_type}</td>
                           <td style={o.tdNum}>{peso(p.amount)}</td>
                         </tr>
                       ))}
                     </tbody>
+                    <tfoot>
+                      <tr>
+                        <td style={o.tfoot} colSpan={2}>Total paid</td>
+                        <td style={o.tfootNum}>{peso(detail.totals.total_paid)}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ ...o.tfoot, borderTop: 'none', fontWeight: 'normal' }} colSpan={2}>Balance</td>
+                        <td style={{ ...o.tfootNum, borderTop: 'none', color: detail.totals.balance > 0 ? '#b91c1c' : '#166534' }}>{peso(detail.totals.balance)}</td>
+                      </tr>
+                    </tfoot>
                   </table>
                 )}
                 {canWrite && order.production_status !== 'Cancelled' && (
@@ -412,35 +510,42 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                         {readiness.notes.map((n) => <li key={n}>{n}</li>)}
                       </ul>
                     )}
-                    {isOwner ? (
-                      <button type="button" style={{ ...o.btnApprove, ...(readiness.blocking.length || busy ? o.btnDisabled : {}) }}
-                        disabled={busy || readiness.blocking.length > 0}
-                        title={readiness.blocking[0] || 'Approve this job order'}
-                        onClick={() => setConfirmApprove(true)}>
-                        <ShieldCheck size={16} /> Approve Job Order
-                      </button>
-                    ) : (
+                    {!isOwner && (
                       <p style={{ ...o.meta, marginTop: '0.6rem' }}>Waiting for the Owner to approve this job order before printing can start.</p>
                     )}
                   </section>
                 )}
 
-                {canWrite && (ACTIONS[order.production_status] || []).length > 0 && (
-                  <>
-                    <h4 style={o.h4}>Update status</h4>
-                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                      {ACTIONS[order.production_status].map((action) => (
-                        <button key={action.to} type="button" disabled={busy}
-                          onClick={() => (action.danger ? setPendingAction(action) : changeStatus(action))}
-                          style={action.danger ? o.btnDanger : o.btnPrimary}>
-                          <action.Icon size={16} /> {action.label}
-                        </button>
-                      ))}
-                    </div>
-                  </>
-                )}
                 {order.sync_status !== 'synced' && (
                   <p style={{ ...o.meta, marginTop: '0.75rem' }}>This order was saved offline. Status changes are available once it syncs.</p>
+                )}
+              </div>
+            )}
+
+            {/* Actions stay visible at the bottom of the pop-up while the details scroll */}
+            {order && ((readiness && isOwner) || (canWrite && (ACTIONS[order.production_status] || []).length > 0)) && (
+              <div style={o.modalFoot}>
+                {readiness && isOwner && (
+                  <button type="button" style={{ ...o.btnApprove, ...(readiness.blocking.length || busy ? o.btnDisabled : {}) }}
+                    disabled={busy || readiness.blocking.length > 0}
+                    title={readiness.blocking[0] || 'Approve this job order'}
+                    onClick={() => setConfirmApprove(true)}>
+                    <ShieldCheck size={16} /> Approve Job Order
+                  </button>
+                )}
+                {readiness && isOwner && readiness.blocking.length > 0 && (
+                  <span style={o.footHint}>{readiness.blocking[0]}</span>
+                )}
+                {canWrite && (
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginLeft: 'auto' }}>
+                    {(ACTIONS[order.production_status] || []).map((action) => (
+                      <button key={action.to} type="button" disabled={busy}
+                        onClick={() => (action.danger ? setPendingAction(action) : changeStatus(action))}
+                        style={action.danger ? o.btnDanger : o.btnPrimary}>
+                        <action.Icon size={16} /> {action.label}
+                      </button>
+                    ))}
+                  </div>
                 )}
               </div>
             )}
@@ -514,6 +619,20 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
   );
 }
 
+// Sortable column header: a real <th> with aria-sort, its label is a button
+function SortTh({ label, k, sort, onSort, align = 'left' }) {
+  const active = sort.key === k;
+  const Arrow = active ? (sort.dir === 'asc' ? ArrowUp : ArrowDown) : ArrowUpDown;
+  return (
+    <th scope="col" style={align === 'right' ? o.thNum : o.th}
+      aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+      <button type="button" onClick={() => onSort(k)} style={{ ...o.sortBtn, justifyContent: align === 'right' ? 'flex-end' : 'flex-start', ...(active ? { color: '#4f46e5' } : {}) }}>
+        {label} <Arrow size={12} style={active ? undefined : { opacity: 0.4 }} />
+      </button>
+    </th>
+  );
+}
+
 function Info({ label, value, sub }) {
   return (
     <div style={o.info}>
@@ -531,7 +650,9 @@ const o = {
   topBar: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' },
   meta: { fontSize: '0.8rem', color: '#64748b', margin: '0.25rem 0 0' },
   banner: { display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem', borderRadius: '0.375rem', marginBottom: '1rem', fontSize: '0.875rem' },
-  select: { ...control, padding: '0.5rem', border: '1px solid #cbd5e1', borderRadius: '0.375rem', fontSize: '0.875rem' },
+  select: { ...control, width: '100%', padding: '0.5rem', border: '1px solid #cbd5e1', borderRadius: '0.375rem', fontSize: '0.875rem' },
+  tfoot: { padding: '0.6rem', color: '#0f172a', fontWeight: 'bold', borderTop: '2px solid #e2e8f0' },
+  tfootNum: { padding: '0.6rem', color: '#0f172a', fontWeight: 'bold', borderTop: '2px solid #e2e8f0', textAlign: 'right', whiteSpace: 'nowrap' },
   option: { color: '#0f172a', backgroundColor: '#fff' },
   input: { ...control, padding: '0.55rem 0.7rem', border: '1px solid #cbd5e1', borderRadius: '0.375rem', fontSize: '0.875rem', minWidth: 0 },
   btn: { display: 'flex', alignItems: 'center', gap: '0.25rem', padding: '0.5rem 1rem', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '0.375rem', cursor: 'pointer', color: '#4f46e5', fontWeight: 'bold', fontSize: '0.875rem' },
@@ -559,13 +680,20 @@ const o = {
   infoValue: { fontSize: '0.95rem', color: '#0f172a', fontWeight: 'bold' },
   h4: { fontSize: '0.95rem', margin: '1rem 0 0.5rem', color: '#0f172a' },
   payForm: { display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' },
+  toolbar: { display: 'flex', alignItems: 'flex-end', gap: '0.75rem', flexWrap: 'wrap', padding: '0.75rem', marginBottom: '1rem', background: '#fff', border: '1px solid #e2e8f0', borderRadius: '0.5rem' },
+  control: { display: 'flex', flexDirection: 'column', gap: '0.25rem', flex: '1 1 170px', minWidth: 0 },
+  controlLabel: { fontSize: '0.7rem', fontWeight: 'bold', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.03em' },
+  clearBtn: { padding: '0.5rem 0.75rem', background: 'none', border: 'none', cursor: 'pointer', color: '#4f46e5', fontWeight: 'bold', fontSize: '0.85rem' },
+  sortBtn: { display: 'inline-flex', alignItems: 'center', gap: '0.25rem', width: '100%', padding: 0, background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', font: 'inherit', fontWeight: 'bold' },
   unlinked: { marginLeft: '0.4rem', padding: '0.05rem 0.4rem', background: '#fef3c7', color: '#92400e', borderRadius: '999px', fontSize: '0.65rem', fontWeight: 'bold' },
   approvalBox: { marginTop: '1rem', padding: '0.85rem', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '0.5rem' },
   progressText: { margin: 0, fontSize: '0.9rem', fontWeight: 'bold', color: '#0f172a' },
   progressTrack: { height: '8px', background: '#e2e8f0', borderRadius: '999px', overflow: 'hidden', marginTop: '0.4rem' },
   progressFill: { height: '100%', borderRadius: '999px', transition: 'width 0.3s' },
   problemList: { margin: '0.5rem 0 0', paddingLeft: '1.1rem', fontSize: '0.8rem', color: '#92400e', lineHeight: 1.5 },
-  btnApprove: { display: 'flex', alignItems: 'center', gap: '0.35rem', marginTop: '0.75rem', padding: '0.55rem 1rem', background: '#0f766e', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', color: '#fff', fontWeight: 'bold', fontSize: '0.85rem' },
+  modalFoot: { display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid #e2e8f0' },
+  footHint: { fontSize: '0.78rem', color: '#92400e', flex: '1 1 180px' },
+  btnApprove: { display: 'flex', alignItems: 'center', gap: '0.35rem', padding: '0.55rem 1rem', background: '#0f766e', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', color: '#fff', fontWeight: 'bold', fontSize: '0.85rem' },
   btnDisabled: { background: '#94a3b8', cursor: 'not-allowed' },
   shortageCard: { background: '#fff', borderRadius: '0.5rem', borderTop: '4px solid #f59e0b', padding: '1.25rem', width: '100%', maxWidth: '520px', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.25)', textAlign: 'left' }
 };
