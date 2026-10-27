@@ -11,6 +11,7 @@
 
 const INT_MAX = 2147483647;          // Postgres INTEGER
 const MONEY_MAX = 99999999.99;       // NUMERIC(10,2)
+const MOBILE_PATTERN = /^0\d{10}$/;           // e.g. 09171234567
 const ID_PATTERN = /^[A-Za-z0-9_.:@-]{1,50}$/; // matches VARCHAR(50) IDs (UUIDs, 'CUST-001', ...)
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Asia/Manila';
 
@@ -35,16 +36,16 @@ const DEADLINE_PATTERN =
 // Parses a deadline and normalizes it to 'YYYY-MM-DDTHH:MM:SS' (business-local wall time,
 // matching the TIMESTAMP-without-time-zone columns). Rejects impossible and past dates.
 const parseDeadline = (value, now = new Date()) => {
-  if (typeof value !== 'string') return { error: 'must be a date string (YYYY-MM-DD).' };
+  if (typeof value !== 'string') return { error: 'must be a date. Please pick one from the calendar.' };
   const m = DEADLINE_PATTERN.exec(value.trim());
-  if (!m) return { error: 'must be a date (YYYY-MM-DD) or date-time (YYYY-MM-DDTHH:MM).' };
+  if (!m) return { error: 'must be a date. Please pick one from the calendar.' };
 
   const [, y, mo, d, hh = '00', mi = '00', ss = '00', zone] = m;
   const calendar = new Date(Date.UTC(+y, +mo - 1, +d));
   if (calendar.getUTCFullYear() !== +y || calendar.getUTCMonth() !== +mo - 1 || calendar.getUTCDate() !== +d) {
-    return { error: 'is not a real calendar date.' };
+    return { error: 'is not a real date. Please pick one from the calendar.' };
   }
-  if (+hh > 23 || +mi > 59 || +ss > 59) return { error: 'has an invalid time of day.' };
+  if (+hh > 23 || +mi > 59 || +ss > 59) return { error: 'has a time that does not exist. Please check the time.' };
 
   const normalized = zone
     ? localDateTime(new Date(value.trim()))            // explicit offset: convert to business time
@@ -53,9 +54,32 @@ const parseDeadline = (value, now = new Date()) => {
   const dateOnly = m[4] === undefined;
 
   if (dateOnly ? normalized.slice(0, 10) < nowLocal.slice(0, 10) : normalized < nowLocal) {
-    return { error: `cannot be in the past (today is ${nowLocal.slice(0, 10)} ${BUSINESS_TIMEZONE}).` };
+    return {
+      error: `cannot be a date that has already passed. Please choose today (${friendlyDate(nowLocal.slice(0, 10))}) or a later date.`
+    };
   }
   return { value: normalized };
+};
+
+// Plain-language names for fields, used in error messages shown to users.
+// The technical field name is still returned in details[].field for programs.
+const FIELD_LABELS = {
+  production_deadline: 'Production deadline', customer_id: 'Customer', order_id: 'Order', inventory_id: 'Item',
+  item_name: 'Item name', item_category: 'Category', quantity_available: 'Quantity in stock', quantity: 'Quantity',
+  quantity_lost: 'Quantity lost', minimum_threshold: 'Low-stock alert', unit_cost: 'Unit cost',
+  total_quote_amount: 'Quote amount', amount: 'Amount', payment_type: 'Payment type', financial_cost: 'Cost',
+  full_name: 'Customer name', contact_number: 'Mobile number', platform_source: 'Where the customer came from',
+  loss_reason: 'Reason', reason: 'Reason', resolution: 'Resolution', status: 'Status', action: 'Action',
+  product_type: 'Product type', size: 'Size', custom_name: 'Custom name', custom_number: 'Custom number',
+  category: 'Category', stock_status: 'Stock status', search: 'Search', limit: 'Page size', offset: 'Page'
+};
+const labelOf = (field) =>
+  FIELD_LABELS[field] || String(field).replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+
+// 'October 27, 2026' for a 'YYYY-MM-DD' string
+const friendlyDate = (ymd) => {
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric' });
 };
 
 const isMissing = (v) => v === undefined || v === null || (typeof v === 'string' && v.trim() === '');
@@ -63,30 +87,30 @@ const hasAtMostTwoDecimals = (n) => Math.abs(Math.round(n * 100) - n * 100) < 1e
 
 const createValidator = () => {
   const errors = [];
-  const fail = (field, message) => { errors.push({ field, message: `${field} ${message}` }); return undefined; };
+  const fail = (field, message) => { errors.push({ field, message: `${labelOf(field)} ${message}` }); return undefined; };
 
   const integer = (value, field, { min, required = true, defaultValue }) => {
-    if (isMissing(value)) return required ? fail(field, 'is required.') : defaultValue;
-    if (typeof value !== 'number' || !Number.isInteger(value)) return fail(field, 'must be a whole number (not text or a fraction).');
-    if (value < min) return fail(field, min === 1 ? 'must be greater than 0.' : 'cannot be negative.');
-    if (value > INT_MAX) return fail(field, `must be at most ${INT_MAX}.`);
+    if (isMissing(value)) return required ? fail(field, 'is required. Please fill it in.') : defaultValue;
+    if (typeof value !== 'number' || !Number.isInteger(value)) return fail(field, 'must be a whole number, like 1, 5 or 20.');
+    if (value < min) return fail(field, min === 1 ? 'must be at least 1.' : 'cannot be less than 0.');
+    if (value > INT_MAX) return fail(field, 'is too large. Please enter a smaller number.');
     return value;
   };
 
   const money = (value, field, { allowZero, required = true, defaultValue }) => {
-    if (isMissing(value)) return required ? fail(field, 'is required.') : defaultValue;
-    if (typeof value !== 'number' || !Number.isFinite(value)) return fail(field, 'must be a number (not text).');
-    if (value < 0 || (!allowZero && value === 0)) return fail(field, allowZero ? 'cannot be negative.' : 'must be greater than 0.');
-    if (!hasAtMostTwoDecimals(value)) return fail(field, 'can have at most 2 decimal places (centavos).');
-    if (value > MONEY_MAX) return fail(field, `must be at most ${MONEY_MAX}.`);
+    if (isMissing(value)) return required ? fail(field, 'is required. Please fill it in.') : defaultValue;
+    if (typeof value !== 'number' || !Number.isFinite(value)) return fail(field, 'must be a peso amount, like 150 or 150.50.');
+    if (value < 0 || (!allowZero && value === 0)) return fail(field, allowZero ? 'cannot be less than ₱0.' : 'must be more than ₱0.');
+    if (!hasAtMostTwoDecimals(value)) return fail(field, 'can only have centavos up to 2 digits, like 150.50.');
+    if (value > MONEY_MAX) return fail(field, 'is too large. The highest allowed amount is ₱99,999,999.99.');
     return value;
   };
 
   const string = (value, field, { required = true, max }) => {
-    if (isMissing(value)) return required ? fail(field, 'is required.') : null;
-    if (typeof value !== 'string') return fail(field, 'must be text.');
+    if (isMissing(value)) return required ? fail(field, 'is required. Please fill it in.') : null;
+    if (typeof value !== 'string') return fail(field, 'must be written as text.');
     const trimmed = value.trim();
-    if (trimmed.length > max) return fail(field, `must be at most ${max} characters.`);
+    if (trimmed.length > max) return fail(field, `is too long. Please keep it to ${max} characters or fewer.`);
     return trimmed;
   };
 
@@ -96,8 +120,8 @@ const createValidator = () => {
     send: (res) => res.status(400).json({ error: 'VALIDATION_FAILED', message: errors[0].message, details: errors }),
 
     id: (value, field, { required = true } = {}) => {
-      if (isMissing(value)) return required ? fail(field, 'is required.') : null;
-      if (typeof value !== 'string' || !ID_PATTERN.test(value)) return fail(field, 'is not a valid ID.');
+      if (isMissing(value)) return required ? fail(field, 'is required. Please select one.') : null;
+      if (typeof value !== 'string' || !ID_PATTERN.test(value)) return fail(field, 'was not recognized. Please select it again from the list.');
       return value;
     },
     requiredString: (value, field, max) => string(value, field, { max }),
@@ -108,20 +132,30 @@ const createValidator = () => {
     nonNegativeMoney: (value, field, { required = true, defaultValue } = {}) =>
       money(value, field, { allowZero: true, required, defaultValue }),
     oneOf: (value, field, allowed, { required = true } = {}) => {
-      if (isMissing(value)) return required ? fail(field, 'is required.') : undefined;
-      if (!allowed.includes(value)) return fail(field, `must be one of: ${allowed.join(', ')}.`);
+      if (isMissing(value)) return required ? fail(field, 'is required. Please choose one.') : undefined;
+      if (!allowed.includes(value)) return fail(field, `must be one of these: ${allowed.join(', ')}.`);
       return value;
     },
     deadline: (value, field) => {
-      if (isMissing(value)) return fail(field, 'is required.');
+      if (isMissing(value)) return fail(field, 'is required. Please pick a date.');
       const parsed = parseDeadline(value);
       return parsed.error ? fail(field, parsed.error) : parsed.value;
+    },
+    // Philippine mobile number: exactly 11 digits starting with 0 (spaces/dashes ignored)
+    mobileNumber: (value, field, { required = false } = {}) => {
+      if (isMissing(value)) return required ? fail(field, 'is required. Please fill it in.') : null;
+      if (typeof value !== 'string') return fail(field, 'must be written as numbers, like 09171234567.');
+      const digits = value.replace(/[\s-]/g, '');
+      if (!MOBILE_PATTERN.test(digits)) {
+        return fail(field, 'must be exactly 11 digits and start with 0, like 09171234567.');
+      }
+      return digits;
     },
     pagination: (query) => {
       const toInt = (raw, field, def, min, max) => {
         if (raw === undefined) return def;
         const n = /^\d+$/.test(String(raw)) ? Number(raw) : NaN;
-        if (!Number.isInteger(n) || n < min || n > max) return fail(field, `must be a whole number between ${min} and ${max}.`);
+        if (!Number.isInteger(n) || n < min || n > max) return fail(field, `must be a whole number from ${min} to ${max}.`);
         return n;
       };
       return { limit: toInt(query.limit, 'limit', 50, 1, 200), offset: toInt(query.offset, 'offset', 0, 0, 1000000) };
@@ -136,5 +170,7 @@ module.exports = {
   PAYMENT_TYPES,
   PRODUCTION_STATUSES,
   ID_PATTERN,
+  MOBILE_PATTERN,
+  labelOf,
   BUSINESS_TIMEZONE
 };

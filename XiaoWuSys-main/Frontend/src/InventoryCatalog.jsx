@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { RefreshCw, Search, CloudOff, TriangleAlert, PackagePlus, X, Plus, Minus, Pencil, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { RefreshCw, Search, CloudOff, TriangleAlert, PackagePlus, X, Plus, Minus, Pencil, Trash2, ChevronDown, ChevronRight, ArrowUp, ArrowDown } from 'lucide-react';
 import { createApi, errorText, peso } from './api';
 import { ResultDialog, ConfirmDialog } from './Dialogs';
 import RecycleBin from './RecycleBin';
@@ -53,6 +53,31 @@ const toMoney = (value) => {
   const n = Number(text);
   return Number.isFinite(n) && n >= 0 && Math.abs(Math.round(n * 100) - n * 100) < 1e-6 ? Math.round(n * 100) / 100 : NaN;
 };
+// List view: rows rendered per "page" (more are added with "Show more"), so a catalog with
+// thousands of items stays fast and compact.
+const LIST_PAGE = 50;
+const STATUS_ORDER = { out_of_stock: 0, low_stock: 1, in_stock: 2 };
+const SORTERS = {
+  name: (a, b) => a.item_name.localeCompare(b.item_name),
+  category: (a, b) => a.item_category.localeCompare(b.item_category) || a.item_name.localeCompare(b.item_name),
+  status: (a, b) => STATUS_ORDER[a.stock_status] - STATUS_ORDER[b.stock_status] || a.item_name.localeCompare(b.item_name),
+  available: (a, b) => a.quantity_available - b.quantity_available,
+  free: (a, b) => a.quantity_available_net - b.quantity_available_net
+};
+
+// true when the window is narrower than px (hides less important columns on phones)
+const useNarrow = (px = 640) => {
+  const query = `(max-width: ${px}px)`;
+  const [narrow, setNarrow] = useState(() => typeof window !== 'undefined' && window.matchMedia(query).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const onChange = () => setNarrow(mq.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, [query]);
+  return narrow;
+};
+
 // Same rule as the backend: case and spaces are ignored ("Deli A4" = "deli  a4" = "DeliA4")
 const nameKey = (s) => String(s || '').toLowerCase().replace(/\s+/g, '');
 
@@ -83,14 +108,36 @@ export default function InventoryCatalog({
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [binOpen, setBinOpen] = useState(false);
 
+  // List view state
+  const [expanded, setExpanded] = useState(() => new Set());  // inventory_ids with details open
+  const [sort, setSort] = useState({ key: 'name', dir: 1 });
+  const [shown, setShown] = useState(LIST_PAGE);
+  const narrow = useNarrow();
+
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return items.filter((item) =>
-      (!needle || item.item_name.toLowerCase().includes(needle)) &&
-      (!category || item.item_category === category) &&
-      (!status || item.stock_status === status)
-    );
-  }, [items, search, category, status]);
+    return items
+      .filter((item) =>
+        (!needle || item.item_name.toLowerCase().includes(needle)) &&
+        (!category || item.item_category === category) &&
+        (!status || item.stock_status === status))
+      .sort((a, b) => SORTERS[sort.key](a, b) * sort.dir);
+  }, [items, search, category, status, sort]);
+
+  // Back to the first page whenever the filters or sort change
+  const filterKey = `${search}|${category}|${status}|${sort.key}|${sort.dir}`;
+  const [lastFilterKey, setLastFilterKey] = useState(filterKey);
+  if (filterKey !== lastFilterKey) {
+    setLastFilterKey(filterKey);
+    setShown(LIST_PAGE);
+  }
+
+  const toggleRow = (id) => setExpanded((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const sortBy = (key) => setSort((prev) => (prev.key === key ? { key, dir: -prev.dir } : { key, dir: 1 }));
 
   const totalUnits = useMemo(() => items.reduce((sum, i) => sum + Number(i.quantity_available || 0), 0), [items]);
 
@@ -466,64 +513,107 @@ export default function InventoryCatalog({
       )}
       {items.length > 0 && visible.length === 0 && <p style={s.empty}>No items match these filters.</p>}
 
-      <div style={s.grid}>
-        {visible.map((item) => {
-          const meta = STATUS_META[item.stock_status] || STATUS_META.in_stock;
-          const reservedPct = item.quantity_available > 0
-            ? Math.min(100, (item.quantity_reserved / item.quantity_available) * 100)
-            : 0;
-          const id = item.inventory_id;
-          return (
-            <div key={id} data-inventory-id={id}
-              style={{ ...s.card, borderTop: `4px solid ${meta.bar}`, ...(recentlyChanged.includes(id) ? s.cardChanged : {}) }}>
-              <div style={s.cardHead}>
-                <div style={{ minWidth: 0 }}>
-                  <h3 style={s.itemName} title={item.item_name}>{item.item_name}</h3>
-                  <span style={s.category}>{item.item_category}</span>
-                </div>
-                <span style={{ ...s.badge, background: meta.bg, color: meta.color }}>{meta.label}</span>
-              </div>
+      {visible.length > 0 && (
+        <div style={s.list} role="list" aria-label="Stock items">
+          {/* Column headers (click to sort) */}
+          <div style={{ ...s.row, ...s.headRow, gridTemplateColumns: narrow ? s.colsNarrow : s.cols }} aria-hidden="true">
+            <span />
+            <SortHeader label="Item" k="name" sort={sort} onSort={sortBy} />
+            {!narrow && <SortHeader label="Category" k="category" sort={sort} onSort={sortBy} />}
+            <SortHeader label="Status" k="status" sort={sort} onSort={sortBy} />
+            <SortHeader label="Available" k="available" sort={sort} onSort={sortBy} align="right" />
+            {!narrow && <SortHeader label="Free to use" k="free" sort={sort} onSort={sortBy} align="right" />}
+          </div>
 
-              <div style={s.stats}>
-                <div style={s.stat}>
-                  <span style={s.statLabel}>Available</span>
-                  <span style={s.statValue}>{item.quantity_available}</span>
-                </div>
-                <div style={s.stat}>
-                  <span style={s.statLabel}>Reserved</span>
-                  <span style={s.statValue}>{item.quantity_reserved}</span>
-                </div>
-                <div style={s.stat}>
-                  <span style={s.statLabel}>Min. Threshold</span>
-                  <span style={s.statValue}>{item.minimum_threshold}</span>
-                </div>
-              </div>
+          {visible.slice(0, shown).map((item) => {
+            const meta = STATUS_META[item.stock_status] || STATUS_META.in_stock;
+            const reservedPct = item.quantity_available > 0
+              ? Math.min(100, (item.quantity_reserved / item.quantity_available) * 100)
+              : 0;
+            const id = item.inventory_id;
+            const open = expanded.has(id);
+            const changed = recentlyChanged.includes(id);
+            return (
+              <div key={id} data-inventory-id={id} role="listitem"
+                style={{ ...s.item, borderLeft: `4px solid ${meta.bar}`, ...(changed ? s.itemChanged : {}), ...(open ? s.itemOpen : {}) }}>
+                {/* Summary row: click / Enter / Space to show details */}
+                <button
+                  type="button"
+                  onClick={() => toggleRow(id)}
+                  aria-expanded={open}
+                  aria-controls={`item-details-${id}`}
+                  style={{ ...s.row, ...s.rowBtn, gridTemplateColumns: narrow ? s.colsNarrow : s.cols }}
+                >
+                  <span style={s.chevron} aria-hidden="true">{open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
+                  <span style={{ minWidth: 0 }}>
+                    <span style={s.itemName}>{item.item_name}</span>
+                    {narrow && <span style={s.category}>{item.item_category}</span>}
+                    {item.sync_status !== 'synced' && <span style={s.pending}>Pending sync</span>}
+                  </span>
+                  {!narrow && <span style={s.category}>{item.item_category}</span>}
+                  <span><span style={{ ...s.badge, background: meta.bg, color: meta.color }}>{meta.label}</span></span>
+                  <span style={s.num}>{item.quantity_available.toLocaleString()}</span>
+                  {!narrow && <strong style={{ ...s.num, color: meta.color }}>{item.quantity_available_net.toLocaleString()}</strong>}
+                </button>
 
-              {/* Reserved share of on-hand stock */}
-              <div style={s.barTrack} aria-hidden="true">
-                <div style={{ ...s.barFill, width: `${reservedPct}%`, background: meta.bar }} />
-              </div>
-              <div style={s.cardFoot}>
-                <span>Free to use: <strong style={{ color: meta.color }}>{item.quantity_available_net}</strong></span>
-                <span>Unit cost: <strong>{peso(item.unit_cost)}</strong></span>
-              </div>
+                {/* Details (everything the old card showed, plus stock value) */}
+                {open && (
+                  <div id={`item-details-${id}`} style={s.details}>
+                    <div style={s.stats}>
+                      <Stat label="Available" value={item.quantity_available} />
+                      <Stat label="Reserved" value={item.quantity_reserved} />
+                      <Stat label="Free to use" value={item.quantity_available_net} color={meta.color} />
+                      <Stat label="Min. Threshold" value={item.minimum_threshold} />
+                      <Stat label="Unit cost" value={peso(item.unit_cost)} />
+                      <Stat label="Stock value" value={peso(item.quantity_available * item.unit_cost)} />
+                    </div>
 
-              {canEdit && (
-                <div style={s.cardActions}>
-                  <button type="button" onClick={() => openEdit(item)} style={s.editBtn} aria-label={`Edit ${item.item_name}`}>
-                    <Pencil size={14} /> Edit
-                  </button>
-                  <button type="button" onClick={() => setToDelete(item)} style={s.deleteBtn} aria-label={`Delete ${item.item_name}`}>
-                    <Trash2 size={14} /> Delete
-                  </button>
-                </div>
+                    {/* Reserved share of on-hand stock */}
+                    <div style={s.barLabel}>
+                      <span>Reserved for orders</span>
+                      <span>{item.quantity_reserved} of {item.quantity_available} ({Math.round(reservedPct)}%)</span>
+                    </div>
+                    <div style={s.barTrack} aria-hidden="true">
+                      <div style={{ ...s.barFill, width: `${reservedPct}%`, background: meta.bar }} />
+                    </div>
+
+                    <div style={s.detailsFoot}>
+                      <span style={s.category}>
+                        Category: <strong>{item.item_category}</strong>
+                        {item.sync_status !== 'synced' && ' · Saved offline, waiting to sync'}
+                      </span>
+                      {canEdit && (
+                        <div style={s.cardActions}>
+                          <button type="button" onClick={() => openEdit(item)} style={s.editBtn} aria-label={`Edit ${item.item_name}`}>
+                            <Pencil size={14} /> Edit
+                          </button>
+                          <button type="button" onClick={() => setToDelete(item)} style={s.deleteBtn} aria-label={`Delete ${item.item_name}`}>
+                            <Trash2 size={14} /> Delete
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          <div style={s.listFoot}>
+            <span>Showing {Math.min(shown, visible.length)} of {visible.length}</span>
+            <span style={{ display: 'flex', gap: '0.5rem' }}>
+              {expanded.size > 0 && (
+                <button type="button" onClick={() => setExpanded(new Set())} style={s.linkBtn}>Collapse all</button>
               )}
-
-              {item.sync_status !== 'synced' && <span style={s.pending}>Pending sync</span>}
-            </div>
-          );
-        })}
-      </div>
+              {shown < visible.length && (
+                <button type="button" onClick={() => setShown((n) => n + LIST_PAGE)} style={s.moreBtn}>
+                  Show {Math.min(LIST_PAGE, visible.length - shown)} more
+                </button>
+              )}
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Edit item window */}
       {editing && (
@@ -598,6 +688,26 @@ export default function InventoryCatalog({
   );
 }
 
+function SortHeader({ label, k, sort, onSort, align = 'left' }) {
+  const active = sort.key === k;
+  return (
+    <button type="button" onClick={() => onSort(k)} style={{ ...s.sortBtn, justifyContent: align === 'right' ? 'flex-end' : 'flex-start' }}
+      aria-label={`Sort by ${label}`}>
+      {label}
+      {active && (sort.dir === 1 ? <ArrowUp size={12} /> : <ArrowDown size={12} />)}
+    </button>
+  );
+}
+
+function Stat({ label, value, color }) {
+  return (
+    <div style={s.stat}>
+      <span style={s.statLabel}>{label}</span>
+      <span style={{ ...s.statValue, ...(color ? { color } : {}) }}>{value}</span>
+    </div>
+  );
+}
+
 // Explicit dark text + light color-scheme on form controls: without it, browsers in dark
 // mode render native dropdown options as white text on a white list.
 const control = { color: '#0f172a', backgroundColor: '#fff', colorScheme: 'light' };
@@ -607,7 +717,6 @@ const s = {
   topBar: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '1rem', gap: '1rem', flexWrap: 'wrap' },
   meta: { display: 'flex', alignItems: 'center', gap: '0.35rem', margin: '0.25rem 0 0', fontSize: '0.8rem', color: '#64748b' },
   liveDot: { display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%' },
-  cardChanged: { boxShadow: '0 0 0 3px #a5b4fc', transition: 'box-shadow 0.3s ease' },
   refreshBtn: { display: 'flex', alignItems: 'center', gap: '0.25rem', padding: '0.5rem 1rem', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '0.375rem', cursor: 'pointer', color: '#4f46e5', fontWeight: 'bold', fontSize: '0.875rem' },
   binBadge: { marginLeft: '0.25rem', minWidth: '1.25rem', padding: '0 0.35rem', background: '#ef4444', color: '#fff', borderRadius: '999px', fontSize: '0.7rem', lineHeight: '1.25rem', textAlign: 'center' },
   manageBtn: { display: 'flex', alignItems: 'center', gap: '0.35rem', padding: '0.5rem 1rem', background: '#4f46e5', border: '1px solid #4f46e5', borderRadius: '0.375rem', cursor: 'pointer', color: '#fff', fontWeight: 'bold', fontSize: '0.875rem' },
@@ -645,24 +754,39 @@ const s = {
   sectionTitle: { fontSize: '1.05rem', margin: '0 0 0.75rem', color: '#0f172a' },
   sectionCount: { fontWeight: 'normal', color: '#64748b', fontSize: '0.9rem' },
   empty: { textAlign: 'center', color: '#64748b', padding: '2rem', background: '#fff', borderRadius: '0.5rem', border: '1px dashed #cbd5e1' },
-  grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '1.5rem' },
-  card: { position: 'relative', background: '#fff', borderRadius: '0.5rem', border: '1px solid #e2e8f0', padding: '1rem', transition: 'box-shadow 0.6s ease' },
-  cardHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.5rem', marginBottom: '1rem' },
+  // List view: one compact row per item; details open below the row
+  list: { background: '#fff', border: '1px solid #e2e8f0', borderRadius: '0.5rem', overflow: 'hidden' },
+  cols: '1.5rem minmax(0, 3fr) minmax(0, 1.4fr) 7.5rem 5.5rem 6rem',
+  colsNarrow: '1.25rem minmax(0, 1fr) 6.5rem 4.5rem',
+  row: { display: 'grid', alignItems: 'center', gap: '0.75rem', padding: '0.6rem 0.75rem', width: '100%', boxSizing: 'border-box' },
+  headRow: { background: '#f8fafc', borderBottom: '1px solid #e2e8f0', paddingLeft: 'calc(0.75rem + 4px)' },
+  sortBtn: { display: 'flex', alignItems: 'center', gap: '0.25rem', padding: 0, background: 'none', border: 'none', cursor: 'pointer', color: '#475569', fontSize: '0.7rem', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.03em' },
+  item: { borderBottom: '1px solid #f1f5f9', transition: 'background-color 0.6s ease' },
+  itemOpen: { background: '#fafbff' },
+  itemChanged: { backgroundColor: '#eef2ff' },
+  rowBtn: { background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', font: 'inherit', color: 'inherit' },
+  chevron: { display: 'flex', color: '#64748b' },
   // Full title is shown (wraps) so long product names stay readable
-  itemName: { fontSize: '1.05rem', margin: 0, color: '#0f172a', lineHeight: 1.3, overflowWrap: 'anywhere' },
-  category: { fontSize: '0.8rem', color: '#64748b' },
-  badge: { flexShrink: 0, padding: '0.25rem 0.5rem', borderRadius: '0.25rem', fontSize: '0.7rem', fontWeight: 'bold', textTransform: 'uppercase' },
-  stats: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem', marginBottom: '0.75rem' },
-  stat: { display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '0.5rem 0.25rem', background: '#f8fafc', borderRadius: '0.375rem' },
-  statLabel: { fontSize: '0.7rem', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase', textAlign: 'center' },
-  statValue: { fontSize: '1.25rem', fontWeight: 'bold', color: '#0f172a' },
-  barTrack: { height: '6px', background: '#e2e8f0', borderRadius: '3px', overflow: 'hidden', marginBottom: '0.5rem' },
+  itemName: { display: 'block', fontSize: '0.92rem', fontWeight: 'bold', color: '#0f172a', lineHeight: 1.3, overflowWrap: 'anywhere' },
+  category: { display: 'block', fontSize: '0.8rem', color: '#64748b', overflowWrap: 'anywhere' },
+  badge: { display: 'inline-block', whiteSpace: 'nowrap', padding: '0.2rem 0.45rem', borderRadius: '0.25rem', fontSize: '0.65rem', fontWeight: 'bold', textTransform: 'uppercase' },
+  num: { textAlign: 'right', fontSize: '0.92rem', color: '#0f172a', fontVariantNumeric: 'tabular-nums' },
+  details: { padding: '0.25rem 1rem 1rem calc(0.75rem + 1.5rem + 0.75rem)' },
+  stats: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: '0.5rem', marginBottom: '0.75rem' },
+  stat: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', padding: '0.45rem 0.6rem', background: '#f1f5f9', borderRadius: '0.375rem' },
+  statLabel: { fontSize: '0.65rem', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase' },
+  statValue: { fontSize: '1rem', fontWeight: 'bold', color: '#0f172a' },
+  barLabel: { display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#475569', marginBottom: '0.25rem' },
+  barTrack: { height: '6px', background: '#e2e8f0', borderRadius: '3px', overflow: 'hidden', marginBottom: '0.75rem' },
   barFill: { height: '100%', borderRadius: '3px' },
-  cardFoot: { display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: '#334155' },
-  cardActions: { display: 'flex', gap: '0.5rem', marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px dashed #e2e8f0' },
-  editBtn: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.45rem', background: '#fff', border: '1px solid #c7d2fe', borderRadius: '0.375rem', cursor: 'pointer', color: '#4338ca', fontWeight: 'bold', fontSize: '0.8rem' },
-  deleteBtn: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.45rem', background: '#fff', border: '1px solid #fecaca', borderRadius: '0.375rem', cursor: 'pointer', color: '#b91c1c', fontWeight: 'bold', fontSize: '0.8rem' },
+  detailsFoot: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' },
+  cardActions: { display: 'flex', gap: '0.5rem' },
+  editBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.4rem 0.9rem', background: '#fff', border: '1px solid #c7d2fe', borderRadius: '0.375rem', cursor: 'pointer', color: '#4338ca', fontWeight: 'bold', fontSize: '0.8rem' },
+  deleteBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.4rem 0.9rem', background: '#fff', border: '1px solid #fecaca', borderRadius: '0.375rem', cursor: 'pointer', color: '#b91c1c', fontWeight: 'bold', fontSize: '0.8rem' },
+  listFoot: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 0.75rem', background: '#f8fafc', fontSize: '0.8rem', color: '#64748b', flexWrap: 'wrap' },
+  moreBtn: { padding: '0.35rem 0.9rem', background: '#4f46e5', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.8rem' },
+  linkBtn: { padding: '0.35rem 0.5rem', background: 'none', border: 'none', cursor: 'pointer', color: '#4f46e5', fontWeight: 'bold', fontSize: '0.8rem' },
   overlay: { position: 'fixed', inset: 0, background: 'rgba(15, 23, 42, 0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem', zIndex: 60 },
   modal: { background: '#fff', borderRadius: '0.5rem', borderTop: '4px solid #4f46e5', padding: '1.25rem', width: '100%', maxWidth: '520px', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.25)', textAlign: 'left' },
-  pending: { position: 'absolute', bottom: '-0.6rem', right: '1rem', padding: '0.1rem 0.5rem', background: '#e0e7ff', color: '#4f46e5', borderRadius: '999px', fontSize: '0.7rem', fontWeight: 'bold' }
+  pending: { display: 'inline-block', marginTop: '0.2rem', padding: '0.05rem 0.45rem', background: '#e0e7ff', color: '#4f46e5', borderRadius: '999px', fontSize: '0.65rem', fontWeight: 'bold' }
 };

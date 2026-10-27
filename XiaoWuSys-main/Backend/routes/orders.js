@@ -28,14 +28,14 @@ const pushStockChange = (req, ids, reason) => {
 const shortageRejection = (shortages, source) => new Rejected(409, {
   error: 'INSUFFICIENT_INVENTORY',
   can_fulfill: false,
-  message: 'CAPACITY ALERT: Order exceeds maximum inventory. Order halted. Please delay or cancel.',
+  message: 'There is not enough stock for this order right now.',
   shortages,
   total_shortfall: shortages.reduce((sum, x) => sum + x.shortfall, 0),
   source
 });
 const missingItemsRejection = (ids, source) => new Rejected(404, {
   error: 'INVENTORY_ITEM_NOT_FOUND',
-  message: 'One or more requested inventory items do not exist (or are in the Recycle Bin).',
+  message: 'One or more chosen materials are no longer in the inventory (they may have been deleted). Please choose the materials again.',
   missing_inventory_ids: ids,
   source
 });
@@ -57,8 +57,16 @@ const checkStock = (needs, rowsById) => {
 // Statuses staff can log when an order is halted for insufficient inventory (PB 10)
 const HALT_RESOLUTIONS = ['Delayed', 'Cancelled'];
 
+const NOT_FOUND_TEXT = {
+  Customer: 'We could not find this customer. They may have been removed. Please choose the customer again.',
+  Order: 'We could not find this order. It may have been removed. Please refresh the Orders list.'
+};
 const notFound = (res, what, id) =>
-  res.status(404).json({ error: `${what.toUpperCase().replace(/ /g, '_')}_NOT_FOUND`, message: `${what} ${id} does not exist.` });
+  res.status(404).json({
+    error: `${what.toUpperCase().replace(/ /g, '_')}_NOT_FOUND`,
+    message: NOT_FOUND_TEXT[what] || `${what} ${id} could not be found.`,
+    id
+  });
 
 // H2: blocks writes to an order someone else holds the edit lock for (Owner prevails)
 const requireOrderEditAccess = (req, res, next) => {
