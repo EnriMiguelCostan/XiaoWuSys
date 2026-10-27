@@ -13,6 +13,10 @@ const { createOrderLockManager } = require('./services/orderLocks');
 const { ensureLocalSyncColumns } = require('./utils/localSync');
 const { createInventoryEvents } = require('./services/inventoryEvents');
 const { checkCloudSchema } = require('./services/schemaCheck');
+const { createLocalSchema, createLocalIndexes, upgradeLocalOrderStatusCheck } = require('./services/localSchema');
+const { applyPendingMigrations } = require('./services/migrations');
+const { startRecycleBinJanitor } = require('./services/recycleBin');
+const { isConnectionError } = require('./utils/dbErrors');
 
 // Initialize Express and HTTP Server (HTTP server is required for WebSockets)
 const app = express();
@@ -188,6 +192,7 @@ app.use((req, res, next) => {
 app.use('/api/orders', require('./routes/orders'));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/inventory', require('./routes/inventory'));
+app.use('/api/customers', require('./routes/customers'));
 // app.use('/api/waste', require('./routes/waste'));
 // app.use('/api/financials', require('./routes/financials'));
 
@@ -207,10 +212,31 @@ const syncAndNotify = async () => {
   return summary;
 };
 
-ensureLocalSyncColumns(localDb, SYNC_TABLES.map((t) => t.table))
+// Applies pending migrations/*.sql to Neon (AUTO_MIGRATE=false to manage them by hand)
+const autoMigrate = async () => {
+  if (String(process.env.AUTO_MIGRATE).toLowerCase() === 'false') return;
+  try {
+    await applyPendingMigrations(pgPool);
+  } catch (err) {
+    if (isConnectionError(err)) return console.warn('⚠️ Cloud unreachable; migrations will be applied on the next start.');
+    console.error('❌ Automatic migration failed:', err.message, '\n   Fix it, then run "npm run migrate".');
+  }
+};
+
+// Start-up: local tables (no more "no such table"), local sync columns, cloud migrations,
+// schema check, then the first sync. Each step runs after the previous one finishes.
+createLocalSchema(localDb)
+  .then(() => ensureLocalSyncColumns(localDb, SYNC_TABLES.map((t) => t.table)))
+  .then(() => upgradeLocalOrderStatusCheck(sqliteDbPath))
+  .then(() => createLocalIndexes(localDb))
+  .then(() => console.log('🗄️  Local cache tables ready'))
+  .then(() => autoMigrate())
   .then(() => checkCloudSchema(pgPool))
   .then(() => syncAndNotify())
   .catch((err) => console.error('❌ Startup sync failed:', err.message));
+
+// Recycle Bin: permanently removes items deleted more than RECYCLE_BIN_RETENTION_DAYS ago
+startRecycleBinJanitor({ pgPool, localDb, inventoryEvents });
 
 // Run the sync script every 5 minutes (300,000 milliseconds).
 // H3: overlapping runs are impossible; a call during a run joins the in-flight one.

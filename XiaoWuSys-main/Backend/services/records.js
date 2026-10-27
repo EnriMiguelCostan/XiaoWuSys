@@ -19,7 +19,7 @@ const ENTITIES = {
     fields: {
       order_id: 'text', customer_id: 'text', date_created: 'timestamp', production_deadline: 'timestamp',
       production_status: 'text', design_drive_link: 'text', total_quote_amount: 'money',
-      approved_by: 'text', approved_at: 'timestamp'
+      stock_reserved: 'bool', approved_by: 'text', approved_at: 'timestamp'
     }
   },
   order_items: {
@@ -44,7 +44,8 @@ const ENTITIES = {
     id: 'inventory_id',
     fields: {
       inventory_id: 'text', item_name: 'text', item_category: 'text', quantity_available: 'int',
-      quantity_reserved: 'int', minimum_threshold: 'int', unit_cost: 'money'
+      quantity_reserved: 'int', minimum_threshold: 'int', unit_cost: 'money',
+      deleted_at: 'timestamp', deleted_by: 'text'
     }
   },
   customers: {
@@ -52,6 +53,10 @@ const ENTITIES = {
     fields: { customer_id: 'text', full_name: 'text', contact_number: 'text', platform_source: 'text' }
   }
 };
+
+// Row filters for the catalog vs. the Recycle Bin (same SQL in Postgres and SQLite)
+const ACTIVE_ITEM_SQL = 'deleted_at IS NULL AND purged_at IS NULL';
+const BIN_ITEM_SQL = 'deleted_at IS NOT NULL AND purged_at IS NULL';
 
 // ---------- SELECT lists ----------
 const columnExpr = (dialect, alias, col, type) => {
@@ -84,9 +89,10 @@ const serialize = (table, row) => {
   const out = {};
   for (const [col, type] of Object.entries(ENTITIES[table].fields)) {
     const v = row[col];
-    if (v === undefined || v === null) out[col] = null;
+    if (v === undefined || v === null) out[col] = type === 'bool' ? false : null;
     else if (type === 'money') out[col] = Math.round(Number(v) * 100) / 100;
     else if (type === 'int') out[col] = Number(v);
+    else if (type === 'bool') out[col] = v === true || v === 1 || v === '1' || v === 't' || v === 'true';
     else out[col] = String(v);
   }
   out.version = row.version || null;
@@ -106,7 +112,8 @@ const sqliteRun = (db, sql, params = []) =>
   );
 
 // ---------- Reads with C5-aware fallback ----------
-const buildWhere = (filters, dialect) => {
+// raw: optional SQL condition valid in both dialects (e.g. ACTIVE_ITEM_SQL), never user input
+const buildWhere = (filters, dialect, raw = null) => {
   const params = [];
   const clauses = filters
     .filter(([, value]) => value !== undefined && value !== null)
@@ -114,26 +121,27 @@ const buildWhere = (filters, dialect) => {
       params.push(value);
       return `${col} = ${dialect === 'pg' ? `$${params.length}` : '?'}`;
     });
+  if (raw) clauses.push(`(${raw})`);
   return { sql: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
 };
 
 // Lists rows. Online results also include matching local rows that were created offline and
 // are not in Neon yet, so a record never "disappears" between creation and the next sync.
-const listRecords = async (req, table, { filters = [], orderBy, limit = 1000, offset = 0 } = {}) => {
+const listRecords = async (req, table, { filters = [], where = null, orderBy, limit = 1000, offset = 0 } = {}) => {
   const spec = ENTITIES[table];
   const order = orderBy || spec.id;
   try {
-    const where = buildWhere(filters, 'pg');
+    const cond = buildWhere(filters, 'pg', where);
     const { rows } = await req.pgPool.query(
-      `SELECT ${selectList(table, 'pg')} FROM ${table} ${where.sql}
+      `SELECT ${selectList(table, 'pg')} FROM ${table} ${cond.sql}
         ORDER BY ${order} LIMIT ${Number(limit)} OFFSET ${Number(offset)}`,
-      where.params
+      cond.params
     );
     const records = rows.map((r) => serialize(table, r));
 
     let unsynced = [];
     try {
-      const local = buildWhere([...filters, ['sync_status', 'pending_insert']], 'sqlite');
+      const local = buildWhere([...filters, ['sync_status', 'pending_insert']], 'sqlite', where);
       const seen = new Set(records.map((r) => r[spec.id]));
       unsynced = (await sqliteAll(req.localDb, `SELECT ${selectList(table, 'sqlite')} FROM ${table} ${local.sql} ORDER BY ${order}`, local.params))
         .map((r) => serialize(table, r))
@@ -144,14 +152,28 @@ const listRecords = async (req, table, { filters = [], orderBy, limit = 1000, of
     return { source: 'cloud', records: [...records, ...unsynced], unsynced: unsynced.length };
   } catch (err) {
     if (!isConnectionError(err)) throw err;
-    const where = buildWhere(filters, 'sqlite');
+    const cond = buildWhere(filters, 'sqlite', where);
     const rows = await sqliteAll(
       req.localDb,
-      `SELECT ${selectList(table, 'sqlite')} FROM ${table} ${where.sql}
+      `SELECT ${selectList(table, 'sqlite')} FROM ${table} ${cond.sql}
         ORDER BY ${order} LIMIT ${Number(limit)} OFFSET ${Number(offset)}`,
-      where.params
+      cond.params
     );
     return { source: 'local', records: rows.map((r) => serialize(table, r)), unsynced: 0 };
+  }
+};
+
+// COUNT(*) with the same cloud-first / local-fallback rule -> { source, count }
+const countRecords = async (req, table, { filters = [], where = null } = {}) => {
+  try {
+    const cond = buildWhere(filters, 'pg', where);
+    const { rows } = await req.pgPool.query(`SELECT COUNT(*)::int AS n FROM ${table} ${cond.sql}`, cond.params);
+    return { source: 'cloud', count: rows[0].n };
+  } catch (err) {
+    if (!isConnectionError(err)) throw err;
+    const cond = buildWhere(filters, 'sqlite', where);
+    const row = await sqliteGet(req.localDb, `SELECT COUNT(*) AS n FROM ${table} ${cond.sql}`, cond.params);
+    return { source: 'local', count: Number(row.n) };
   }
 };
 
@@ -241,6 +263,9 @@ const withLocalTransaction = (dbPath, fn) =>
 
 module.exports = {
   ENTITIES,
+  ACTIVE_ITEM_SQL,
+  BIN_ITEM_SQL,
+  countRecords,
   selectList,
   serialize,
   listRecords,

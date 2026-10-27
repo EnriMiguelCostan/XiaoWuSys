@@ -7,15 +7,26 @@
 const { ENTITIES } = require('./records');
 const { isConnectionError } = require('../utils/dbErrors');
 
+// Columns the backend uses that are not part of an API record shape
+const EXTRA_COLUMNS = [
+  'inventory_items.purged_at',
+  ...['audit_id', 'inventory_id', 'action', 'item_name', 'details', 'performed_by', 'performed_role', 'created_at', 'last_modified']
+    .map((c) => `inventory_audit_log.${c}`)
+];
+
 const checkCloudSchema = async (pgPool) => {
-  const expected = Object.entries(ENTITIES).flatMap(([table, spec]) =>
-    [...Object.keys(spec.fields), 'last_modified'].map((column) => `${table}.${column}`));
+  const expected = [
+    ...Object.entries(ENTITIES).flatMap(([table, spec]) =>
+      [...Object.keys(spec.fields), 'last_modified'].map((column) => `${table}.${column}`)),
+    ...EXTRA_COLUMNS
+  ];
+  const tables = [...new Set(expected.map((c) => c.split('.')[0]))];
   try {
     const { rows } = await pgPool.query(
       `SELECT table_name || '.' || column_name AS col
          FROM information_schema.columns
         WHERE table_schema = 'public' AND table_name = ANY($1::text[])`,
-      [Object.keys(ENTITIES)]
+      [tables]
     );
     const present = new Set(rows.map((r) => r.col));
     const missing = expected.filter((c) => !present.has(c));
@@ -30,8 +41,8 @@ const checkCloudSchema = async (pgPool) => {
       return { ok: true, missing, missingTriggers };
     }
     console.error(
-      '❌ CLOUD SCHEMA IS OUT OF DATE. Run "npm run migrate" in Backend/ (or paste ' +
-      'migrations/002_align_legacy_neon_schema.sql and 003_inventory_change_notify.sql into the Neon SQL Editor).\n' +
+      '❌ CLOUD SCHEMA IS OUT OF DATE. Run "npm run migrate" in Backend/ (or paste the files in ' +
+      'migrations/ into the Neon SQL Editor, in order).\n' +
       (missing.length ? `   Missing columns: ${missing.join(', ')}\n` : '') +
       (missingTriggers.length ? `   Missing triggers: ${missingTriggers.join(', ')}` : '')
     );

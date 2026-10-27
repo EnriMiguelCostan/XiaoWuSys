@@ -4,7 +4,7 @@
 // 'inventory_updated' push, so REST and real-time clients always see the same shape.
 // ==========================================
 const { computeAvailable } = require('./capacity');
-const { listRecords } = require('./records');
+const { listRecords, countRecords, ACTIVE_ITEM_SQL, BIN_ITEM_SQL } = require('./records');
 
 // Stock health, computed on the server so every screen uses the same rule:
 //   out_of_stock  nothing free to use (available - reserved <= 0)
@@ -25,7 +25,14 @@ const withAvailability = (item) => {
 // ctx: anything with pgPool + localDb (an Express req, or { pgPool, localDb })
 // -> { source, fetched_at, summary, categories, items }
 const buildInventorySnapshot = async (ctx, { category, stock_status, search } = {}) => {
-  const { source, records } = await listRecords(ctx, 'inventory_items', { orderBy: 'item_name, inventory_id' });
+  // Only active items; Recycle Bin items are listed separately (paginated) and only counted here
+  const { source, records } = await listRecords(ctx, 'inventory_items', { where: ACTIVE_ITEM_SQL, orderBy: 'item_name, inventory_id' });
+  let recycleBin = 0;
+  try {
+    recycleBin = (await countRecords(ctx, 'inventory_items', { where: BIN_ITEM_SQL })).count;
+  } catch (err) {
+    console.error('⚠️ Could not count Recycle Bin items:', err.message);
+  }
   const all = records.map(withAvailability);
 
   const needle = search ? search.toLowerCase() : null;
@@ -46,6 +53,7 @@ const buildInventorySnapshot = async (ctx, { category, stock_status, search } = 
       low_stock: count('low_stock'),
       out_of_stock: count('out_of_stock'),
       unsynced: all.filter((i) => i.sync_status !== 'synced').length,
+      recycle_bin: recycleBin,
       stock_value: Math.round(all.reduce((sum, i) => sum + i.quantity_available * i.unit_cost, 0) * 100) / 100
     },
     categories: [...new Set(all.map((i) => i.item_category))].sort(),

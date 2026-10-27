@@ -52,7 +52,7 @@ const fetchStockRows = async (req, inventoryIds) => {
     const result = await req.pgPool.query(
       `SELECT inventory_id, item_name, quantity_available, quantity_reserved
        FROM inventory_items
-       WHERE inventory_id::text = ANY($1::text[])`,
+       WHERE inventory_id::text = ANY($1::text[]) AND deleted_at IS NULL AND purged_at IS NULL`,
       [inventoryIds]
     );
     return { rows: result.rows, source: 'cloud' };
@@ -67,7 +67,7 @@ const fetchStockRows = async (req, inventoryIds) => {
       req.localDb.all(
         `SELECT inventory_id, item_name, quantity_available, quantity_reserved
          FROM inventory_items
-         WHERE inventory_id IN (${placeholders})`,
+         WHERE inventory_id IN (${placeholders}) AND deleted_at IS NULL AND purged_at IS NULL`,
         inventoryIds,
         (err, data) => (err ? reject(err) : resolve(data))
       );
@@ -114,7 +114,7 @@ const capacityFailureResponse = ({ source, missing, shortages }) => {
       status: 404,
       body: {
         error: 'INVENTORY_ITEM_NOT_FOUND',
-        message: 'One or more requested inventory items do not exist.',
+        message: 'One or more requested inventory items do not exist (or are in the Recycle Bin).',
         missing_inventory_ids: missing,
         source
       }
