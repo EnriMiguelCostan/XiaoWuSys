@@ -16,7 +16,7 @@ const computeAvailable = (row) =>
 // (two lines of the same material must be checked against stock together).
 const normalizeRequiredItems = (required_items) => {
   if (!Array.isArray(required_items) || required_items.length === 0) {
-    return { error: 'Please provide a non-empty array of required_items: [{ inventory_id, quantity_needed }].' };
+    return { error: 'Please add at least one material to the order.' };
   }
 
   const totals = new Map();
@@ -28,14 +28,14 @@ const normalizeRequiredItems = (required_items) => {
     const quantity_needed = item.quantity_needed;
 
     if (!inventory_id) {
-      return { error: `required_items[${i}].inventory_id is required.` };
+      return { error: `Material ${i + 1}: please choose a material from the list.` };
     }
     if (!ID_PATTERN.test(inventory_id)) {
-      return { error: `required_items[${i}].inventory_id is not a valid ID.` };
+      return { error: `Material ${i + 1} was not recognized. Please choose it again from the list.` };
     }
     if (typeof quantity_needed !== 'number' || !Number.isInteger(quantity_needed) || quantity_needed <= 0
         || quantity_needed > 2147483647) {
-      return { error: `required_items[${i}].quantity_needed must be a positive whole number (not text or a fraction).` };
+      return { error: `Material ${i + 1}: the quantity must be a whole number of at least 1.` };
     }
 
     totals.set(inventory_id, (totals.get(inventory_id) || 0) + quantity_needed);
@@ -114,7 +114,7 @@ const capacityFailureResponse = ({ source, missing, shortages }) => {
       status: 404,
       body: {
         error: 'INVENTORY_ITEM_NOT_FOUND',
-        message: 'One or more requested inventory items do not exist (or are in the Recycle Bin).',
+        message: 'One or more chosen materials are no longer in the inventory (they may have been deleted). Please choose the materials again.',
         missing_inventory_ids: missing,
         source
       }
@@ -127,7 +127,7 @@ const capacityFailureResponse = ({ source, missing, shortages }) => {
       body: {
         error: 'INSUFFICIENT_INVENTORY',
         can_fulfill: false,
-        message: 'CAPACITY ALERT: Order exceeds maximum inventory. Order halted. Please delay or cancel.',
+        message: 'There is not enough stock for this order right now.',
         shortages,
         total_shortfall: shortages.reduce((sum, s) => sum + s.shortfall, 0),
         source

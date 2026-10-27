@@ -3,6 +3,7 @@
 // GET  /api/customers            -> { source, customers }
 // POST /api/customers            -> 201 { message, source, customer }
 //      Body: { full_name, contact_number?, platform_source? }
+//      contact_number: 11 digits starting with 0 (e.g. 09171234567); spaces/dashes are removed
 //      409 DUPLICATE_CUSTOMER when the same name + contact number already exists
 // ==========================================
 const express = require('express');
@@ -34,7 +35,7 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
   const body = req.body || {};
   const v = createValidator();
   const full_name = v.requiredString(body.full_name, 'full_name', 255);
-  const contact_number = v.optionalString(body.contact_number, 'contact_number', 50);
+  const contact_number = v.mobileNumber(body.contact_number, 'contact_number');
   const platform_source = v.optionalString(body.platform_source, 'platform_source', 100);
   if (v.failed()) return v.send(res);
 

@@ -4,7 +4,7 @@ import { io } from 'socket.io-client';
 import InventoryCatalog from './InventoryCatalog';
 import OrdersPage from './OrdersPage';
 import { ResultDialog } from './Dialogs';
-import { createApi, errorText } from './api';
+import { createApi, errorText, todayInManila, MOBILE_PATTERN } from './api';
 
 const API_BASE = 'http://localhost:5000/api';
 const SOCKET_URL = API_BASE.replace(/\/api\/?$/, '');
@@ -89,7 +89,7 @@ export default function App() {
   const applyInventoryResult = ({ ok, status, data, networkError }) => {
     setInventoryLoading(false);
     if (networkError) {
-      setInventoryError('Cannot reach the server. Showing the last loaded data.');
+      setInventoryError('The system could not be reached. Showing the last loaded data.');
       return;
     }
     if (status === 401) {
@@ -97,7 +97,7 @@ export default function App() {
       return;
     }
     if (!ok) {
-      setInventoryError(data.message || data.error || 'Could not load inventory.');
+      setInventoryError(errorText(data, 'The inventory could not be loaded. Please press Refresh.'));
       return;
     }
     setInventory(Array.isArray(data.items) ? data.items : []);
@@ -255,7 +255,27 @@ export default function App() {
     }));
     const quote = quoteAmount.trim() === '' ? 0 : Number(quoteAmount);
     if (!Number.isFinite(quote) || quote < 0 || Math.abs(Math.round(quote * 100) - quote * 100) > 1e-6) {
-      setOrderResult({ type: 'error', title: 'Check the quote', message: 'Quote amount must be 0 or more, with at most 2 decimal places.' });
+      setOrderResult({ type: 'error', title: 'Please check the quote amount', message: 'The quote must be a peso amount of 0 or more, like 1500 or 1500.50.' });
+      return;
+    }
+    if (!productionDeadline) {
+      setOrderResult({ type: 'error', title: 'Please choose a deadline', message: 'Pick the date when this order should be finished.' });
+      return;
+    }
+    if (productionDeadline < todayInManila()) {
+      setOrderResult({
+        type: 'error',
+        title: 'Please choose another deadline',
+        message: 'The deadline you picked has already passed. Please choose today or a later date.'
+      });
+      return;
+    }
+    if (newCustomerMode && newCustomer.contact_number && !MOBILE_PATTERN.test(newCustomer.contact_number)) {
+      setOrderResult({
+        type: 'error',
+        title: 'Please check the mobile number',
+        message: 'A mobile number must be exactly 11 digits and start with 0, like 09171234567.\nYou can also leave it blank.'
+      });
       return;
     }
 
@@ -266,12 +286,12 @@ export default function App() {
       if (newCustomerMode) {
         const name = newCustomer.full_name.trim();
         if (!name) {
-          setOrderResult({ type: 'error', title: 'Customer name needed', message: 'Type the customer name, or pick a saved customer.' });
+          setOrderResult({ type: 'error', title: 'Customer name needed', message: "Please type the customer's name, or pick a saved customer from the list." });
           return;
         }
         const created = await api('POST', '/customers', {
           full_name: name,
-          contact_number: newCustomer.contact_number.trim() || undefined,
+          contact_number: newCustomer.contact_number || undefined,
           platform_source: newCustomer.platform_source.trim() || undefined
         });
         if (created.ok) {
@@ -279,7 +299,7 @@ export default function App() {
         } else if (created.status === 409 && created.data.existing) {
           resolvedCustomerId = created.data.existing.customer_id; // same customer already saved: reuse it
         } else {
-          setOrderResult({ type: 'error', title: 'Customer not saved', message: errorText(created.data, 'Could not save the customer.') });
+          setOrderResult({ type: 'error', title: 'The customer could not be saved', message: errorText(created.data, 'The customer could not be saved. Please try again.') });
           return;
         }
         setCustomersTick(t => t + 1);
@@ -287,7 +307,7 @@ export default function App() {
         setNewCustomerMode(false);
       }
       if (!resolvedCustomerId) {
-        setOrderResult({ type: 'error', title: 'Choose a customer', message: 'Select a customer for this order.' });
+        setOrderResult({ type: 'error', title: 'Please choose a customer', message: 'Select who this order is for, or add a new customer.' });
         return;
       }
 
@@ -314,20 +334,29 @@ export default function App() {
       } else if (res.status === 409) {
         // PB 9 halt caught -> PB 10 warning modal
         setCapacityAlert({
-          message: data.message,
+          message: errorText(data, 'There is not enough stock for this order right now.'),
           shortages: data.shortages || [],
           total_shortfall: data.total_shortfall || 0,
           pendingOrder
         });
       } else {
-        const missing = data.missing_inventory_ids ? ` (${data.missing_inventory_ids.join(', ')})` : '';
-        setOrderStatusMsg(`Error: ${data.message || data.error || 'Failed to create order.'}${missing}`);
-        setOrderResult({ type: 'error', title: 'Order not created', message: `${data.message || data.error || 'Failed to create order.'}${missing}` });
+        // Name the missing materials instead of showing their internal IDs
+        const missingNames = (data.missing_inventory_ids || [])
+          .map(id => inventory.find(inv => inv.inventory_id === id)?.item_name)
+          .filter(Boolean);
+        const text = errorText(data, 'The order could not be saved. Please try again.') +
+          (missingNames.length ? `\nMaterials affected: ${missingNames.join(', ')}.` : '');
+        setOrderStatusMsg(`Error: ${text}`);
+        setOrderResult({ type: 'error', title: 'The order was not created', message: text });
       }
     } catch (err) {
       console.error('Error creating order:', err);
-      setOrderStatusMsg('Error: Network connection failure.');
-      setOrderResult({ type: 'error', title: 'Order not created', message: 'Network connection failure. Check that the backend is running.' });
+      setOrderStatusMsg('Error: The system could not be reached.');
+      setOrderResult({
+        type: 'error',
+        title: 'The order was not created',
+        message: 'The system could not be reached, so nothing was saved. Check your internet connection and that the server is running, then try again.'
+      });
     } finally {
       setIsSubmittingOrder(false);
     }
@@ -339,7 +368,7 @@ export default function App() {
     setAlertError('');
 
     if (resolution === 'Delayed' && !delayedDeadline) {
-      setAlertError('Please choose a new production deadline.');
+      setAlertError('Please pick the new date when this order should be finished.');
       return;
     }
 
@@ -361,11 +390,11 @@ export default function App() {
         resetOrderForm();
         closeCapacityAlert();
       } else {
-        setAlertError(data.error || 'Failed to log resolution.');
+        setAlertError(errorText(data, 'This choice could not be saved. Please try again.'));
       }
     } catch (err) {
       console.error('Error logging resolution:', err);
-      setAlertError('Network connection failure.');
+      setAlertError('The system could not be reached, so nothing was saved. Please try again.');
     } finally {
       setIsSubmittingOrder(false);
     }
@@ -501,17 +530,39 @@ export default function App() {
                     style={styles.input}
                   />
                   <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <input
-                      type="text" placeholder="Contact number" maxLength={50}
-                      value={newCustomer.contact_number}
-                      onChange={e => setNewCustomer({ ...newCustomer, contact_number: e.target.value })}
-                      style={{ ...styles.input, marginBottom: 0 }}
-                    />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <input
+                        type="tel" inputMode="numeric" autoComplete="tel" placeholder="Mobile no. (09XXXXXXXXX)"
+                        maxLength={11} pattern="0[0-9]{10}"
+                        title="11 digits starting with 0, like 09171234567"
+                        aria-label="Mobile number, 11 digits starting with 0"
+                        aria-describedby="mobile-hint"
+                        value={newCustomer.contact_number}
+                        // digits only, at most 11
+                        onChange={e => setNewCustomer({ ...newCustomer, contact_number: e.target.value.replace(/\D/g, '').slice(0, 11) })}
+                        style={{
+                          ...styles.input, marginBottom: 0,
+                          ...(newCustomer.contact_number && !MOBILE_PATTERN.test(newCustomer.contact_number) ? { borderColor: '#f59e0b' } : {})
+                        }}
+                      />
+                      <span id="mobile-hint" style={{
+                        ...styles.hint, display: 'block', margin: '0.25rem 0 0',
+                        color: !newCustomer.contact_number ? '#64748b' : MOBILE_PATTERN.test(newCustomer.contact_number) ? '#166534' : '#92400e'
+                      }}>
+                        {!newCustomer.contact_number
+                          ? 'Optional · 11 digits, starts with 0'
+                          : MOBILE_PATTERN.test(newCustomer.contact_number)
+                            ? '✓ Valid mobile number'
+                            : !newCustomer.contact_number.startsWith('0')
+                              ? 'Must start with 0'
+                              : `${newCustomer.contact_number.length} of 11 digits`}
+                      </span>
+                    </div>
                     <input
                       type="text" placeholder="From (Facebook, walk-in…)" maxLength={100}
                       value={newCustomer.platform_source}
                       onChange={e => setNewCustomer({ ...newCustomer, platform_source: e.target.value })}
-                      style={{ ...styles.input, marginBottom: 0 }}
+                      style={{ ...styles.input, marginBottom: 0, flex: 1, minWidth: 0, alignSelf: 'flex-start' }}
                     />
                   </div>
                 </div>
@@ -535,6 +586,7 @@ export default function App() {
               <label style={styles.label}>Production Deadline</label>
               <input 
                 type="date" 
+                min={todayInManila()}
                 value={productionDeadline} 
                 onChange={e => setProductionDeadline(e.target.value)} 
                 style={styles.input} 
@@ -617,20 +669,21 @@ export default function App() {
               <div style={styles.modalHeader}>
                 <TriangleAlert size={28} color="#b45309" />
                 <h2 id="capacity-alert-title" style={{ fontSize: '1.2rem', margin: 0, color: '#92400e' }}>
-                  Order Exceeds Maximum Inventory
+                  Not Enough Stock for This Order
                 </h2>
               </div>
               <p style={{ fontSize: '0.875rem', color: '#334155', margin: '0.75rem 0' }}>
-                {capacityAlert.message || 'This order cannot be approved with current stock.'} Please log how this order will be handled.
+                {capacityAlert.message || 'There is not enough stock for this order right now.'} The table below shows what is missing.
+                {' '}Please choose whether to <strong>delay</strong> the order until stock arrives, or <strong>cancel</strong> it.
               </p>
 
               <table style={styles.table}>
                 <thead>
                   <tr>
                     <th style={styles.th}>Material</th>
-                    <th style={styles.thNum}>Requested</th>
-                    <th style={styles.thNum}>Available</th>
-                    <th style={styles.thNum}>Shortfall</th>
+                    <th style={styles.thNum}>Needed</th>
+                    <th style={styles.thNum}>Free to use</th>
+                    <th style={styles.thNum}>Missing</th>
                   </tr>
                 </thead>
                 <tbody>
