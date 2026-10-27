@@ -6,7 +6,12 @@
 // databases by ensureLocalSyncColumns() in utils/localSync.js.
 // ==========================================
 
+const sqlite3 = require('sqlite3');
+const { PRODUCTION_STATUSES } = require('../utils/validation');
+
 const SYNC_STATUS = `sync_status TEXT DEFAULT 'synced' CHECK (sync_status IN ('synced', 'pending_insert', 'pending_update'))`;
+// Same allow-list as Neon (migration 005) and the API validator
+const ORDER_STATUS_SQL = PRODUCTION_STATUSES.map((s) => `'${s}'`).join(', ');
 
 const LOCAL_TABLES = [
   `CREATE TABLE IF NOT EXISTS inventory_items (
@@ -21,7 +26,8 @@ const LOCAL_TABLES = [
       deleted_by TEXT,
       purged_at TEXT,
       ${SYNC_STATUS},
-      last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
+      last_modified DATETIME DEFAULT CURRENT_TIMESTAMP,
+      CHECK (quantity_reserved >= 0 AND quantity_available >= 0)
   )`,
   `CREATE TABLE IF NOT EXISTS users (
       user_id TEXT PRIMARY KEY,
@@ -45,10 +51,12 @@ const LOCAL_TABLES = [
       customer_id TEXT REFERENCES customers(customer_id) ON DELETE RESTRICT,
       date_created DATETIME DEFAULT CURRENT_TIMESTAMP,
       production_deadline DATETIME NOT NULL,
-      production_status TEXT DEFAULT 'Pending' CHECK (production_status IN ('Pending', 'Printing', 'Completed', 'Delayed', 'Cancelled')),
+      production_status TEXT DEFAULT 'Pending' CHECK (production_status IN (${ORDER_STATUS_SQL})),
       design_drive_link TEXT,
       total_quote_amount REAL DEFAULT 0.00,
       stock_reserved INTEGER NOT NULL DEFAULT 0,
+      approved_by TEXT,
+      approved_at TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -126,4 +134,54 @@ const createLocalIndexes = async (db) => {
 const listLocalTables = async (db) =>
   (await all(db, "SELECT name FROM sqlite_master WHERE type = 'table'")).map((r) => r.name);
 
-module.exports = { createLocalSchema, createLocalIndexes, listLocalTables };
+// Sprint 11 / PB 13: a cache created before 'Approved' existed still has the old
+// production_status CHECK, so copying an approved order from Neon would fail. SQLite cannot
+// ALTER a CHECK, so the table is rebuilt once, keeping every row and column (including
+// unsynced offline rows): the new definition is the stored one with only the status list
+// replaced, and rows are copied with SELECT * (same column order).
+// Runs on its own connection so PRAGMA foreign_keys = OFF (needed so DROP TABLE does not
+// cascade into order_items / payments) never affects the server's shared connection.
+// -> true if the table was rebuilt, false if nothing had to change
+const upgradeLocalOrderStatusCheck = (dbPath) => new Promise((resolve, reject) => {
+  const db = new sqlite3.Database(dbPath, async (openErr) => {
+    if (openErr) return reject(openErr);
+    db.configure('busyTimeout', 5000);
+    const get = (sql) => new Promise((ok, fail) => db.get(sql, (err, row) => (err ? fail(err) : ok(row))));
+    let began = false;
+    try {
+      const table = await get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'order_profiles'");
+      const check = table && /production_status\s+IN\s*\([^)]*\)/i.exec(table.sql);
+      if (!check || check[0].includes("'Approved'")) return resolve(false);
+
+      const newSql = table.sql
+        .replace(/CREATE TABLE\s+(IF NOT EXISTS\s+)?["`]?order_profiles["`]?/i, 'CREATE TABLE order_profiles__upgrade')
+        .replace(check[0], `production_status IN (${ORDER_STATUS_SQL})`);
+      if (!newSql.startsWith('CREATE TABLE order_profiles__upgrade')) {
+        throw new Error('unrecognised order_profiles definition');
+      }
+
+      await run(db, 'PRAGMA foreign_keys = OFF'); // has no effect inside a transaction, so set first
+      await run(db, 'BEGIN IMMEDIATE');
+      began = true;
+      await run(db, 'DROP TABLE IF EXISTS order_profiles__upgrade');
+      await run(db, newSql);
+      await run(db, 'INSERT INTO order_profiles__upgrade SELECT * FROM order_profiles');
+      const [before, after] = await Promise.all([
+        get('SELECT COUNT(*) AS n FROM order_profiles'), get('SELECT COUNT(*) AS n FROM order_profiles__upgrade')
+      ]);
+      if (before.n !== after.n) throw new Error(`row count mismatch (${before.n} vs ${after.n})`);
+      await run(db, 'DROP TABLE order_profiles');
+      await run(db, 'ALTER TABLE order_profiles__upgrade RENAME TO order_profiles');
+      await run(db, 'COMMIT');
+      console.log(`🛠  Local order_profiles upgraded for the 'Approved' status (${after.n} row(s) kept)`);
+      resolve(true);
+    } catch (err) {
+      if (began) await run(db, 'ROLLBACK').catch(() => {});
+      reject(new Error(`Could not upgrade local order_profiles: ${err.message}`));
+    } finally {
+      db.close();
+    }
+  });
+});
+
+module.exports = { createLocalSchema, createLocalIndexes, listLocalTables, upgradeLocalOrderStatusCheck };

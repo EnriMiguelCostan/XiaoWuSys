@@ -13,7 +13,7 @@ const { createOrderLockManager } = require('./services/orderLocks');
 const { ensureLocalSyncColumns } = require('./utils/localSync');
 const { createInventoryEvents } = require('./services/inventoryEvents');
 const { checkCloudSchema } = require('./services/schemaCheck');
-const { createLocalSchema, createLocalIndexes } = require('./services/localSchema');
+const { createLocalSchema, createLocalIndexes, upgradeLocalOrderStatusCheck } = require('./services/localSchema');
 const { applyPendingMigrations } = require('./services/migrations');
 const { startRecycleBinJanitor } = require('./services/recycleBin');
 const { isConnectionError } = require('./utils/dbErrors');
@@ -227,6 +227,7 @@ const autoMigrate = async () => {
 // schema check, then the first sync. Each step runs after the previous one finishes.
 createLocalSchema(localDb)
   .then(() => ensureLocalSyncColumns(localDb, SYNC_TABLES.map((t) => t.table)))
+  .then(() => upgradeLocalOrderStatusCheck(sqliteDbPath))
   .then(() => createLocalIndexes(localDb))
   .then(() => console.log('🗄️  Local cache tables ready'))
   .then(() => autoMigrate())

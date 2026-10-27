@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { RefreshCw, Search, CloudOff, TriangleAlert, PackagePlus, X, Plus, Minus, Pencil, Trash2, ChevronDown, ChevronRight, ArrowUp, ArrowDown } from 'lucide-react';
+import { RefreshCw, Search, CloudOff, TriangleAlert, PackagePlus, X, Plus, Minus, Pencil, Trash2, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react';
 import { createApi, errorText, peso } from './api';
 import { ResultDialog, ConfirmDialog } from './Dialogs';
 import RecycleBin from './RecycleBin';
@@ -57,13 +57,35 @@ const toMoney = (value) => {
 // thousands of items stays fast and compact.
 const LIST_PAGE = 50;
 const STATUS_ORDER = { out_of_stock: 0, low_stock: 1, in_stock: 2 };
+const byName = (a, b) => a.item_name.localeCompare(b.item_name);
+const byNumber = (pick) => (a, b) => pick(a) - pick(b) || byName(a, b);
+const stockValue = (item) => item.quantity_available * item.unit_cost;
 const SORTERS = {
-  name: (a, b) => a.item_name.localeCompare(b.item_name),
-  category: (a, b) => a.item_category.localeCompare(b.item_category) || a.item_name.localeCompare(b.item_name),
-  status: (a, b) => STATUS_ORDER[a.stock_status] - STATUS_ORDER[b.stock_status] || a.item_name.localeCompare(b.item_name),
-  available: (a, b) => a.quantity_available - b.quantity_available,
-  free: (a, b) => a.quantity_available_net - b.quantity_available_net
+  name: byName,
+  category: (a, b) => a.item_category.localeCompare(b.item_category) || byName(a, b),
+  status: (a, b) => STATUS_ORDER[a.stock_status] - STATUS_ORDER[b.stock_status] || byName(a, b),
+  available: byNumber((i) => i.quantity_available),
+  reserved: byNumber((i) => i.quantity_reserved),
+  free: byNumber((i) => i.quantity_available_net),
+  threshold: byNumber((i) => i.minimum_threshold),
+  unit_cost: byNumber((i) => i.unit_cost),
+  value: byNumber(stockValue)
 };
+// Table columns. wide: hidden on narrow screens (phones). num: right-aligned numbers.
+// On phones "On hand" is shown under "Free to use" instead of in its own column.
+const COLUMNS = [
+  { key: 'name', label: 'Item' },
+  { key: 'category', label: 'Category', wide: true },
+  { key: 'status', label: 'Status' },
+  { key: 'available', label: 'On hand', num: true, wide: true },
+  { key: 'reserved', label: 'Reserved', num: true, wide: true },
+  { key: 'free', label: 'Free to use', num: true },
+  { key: 'threshold', label: 'Low-stock alert', num: true, wide: true },
+  { key: 'unit_cost', label: 'Unit cost', num: true, wide: true },
+  { key: 'value', label: 'Stock value', num: true, wide: true }
+];
+// Numbers read best largest-first; text A to Z
+const FIRST_DIR = { available: -1, reserved: -1, free: -1, threshold: -1, unit_cost: -1, value: -1 };
 
 // true when the window is narrower than px (hides less important columns on phones)
 const useNarrow = (px = 640) => {
@@ -108,8 +130,7 @@ export default function InventoryCatalog({
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [binOpen, setBinOpen] = useState(false);
 
-  // List view state
-  const [expanded, setExpanded] = useState(() => new Set());  // inventory_ids with details open
+  // Table state
   const [sort, setSort] = useState({ key: 'name', dir: 1 });
   const [shown, setShown] = useState(LIST_PAGE);
   const narrow = useNarrow();
@@ -132,12 +153,18 @@ export default function InventoryCatalog({
     setShown(LIST_PAGE);
   }
 
-  const toggleRow = (id) => setExpanded((prev) => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
-  const sortBy = (key) => setSort((prev) => (prev.key === key ? { key, dir: -prev.dir } : { key, dir: 1 }));
+  // Same column again flips the direction; a new column starts at its natural direction
+  const sortBy = (key) => setSort((prev) => (prev.key === key ? { key, dir: -prev.dir } : { key, dir: FIRST_DIR[key] || 1 }));
+  const filtersActive = Boolean(search || category || status);
+  const clearFilters = () => { setSearch(''); setCategory(''); setStatus(''); };
+  const columns = COLUMNS.filter((c) => !narrow || !c.wide);
+  // Totals of the rows that match the filters (all of them, not just the rows shown)
+  const totals = useMemo(() => visible.reduce((t, i) => ({
+    available: t.available + i.quantity_available,
+    reserved: t.reserved + i.quantity_reserved,
+    free: t.free + i.quantity_available_net,
+    value: t.value + stockValue(i)
+  }), { available: 0, reserved: 0, free: 0, value: 0 }), [visible]);
 
   const totalUnits = useMemo(() => items.reduce((sum, i) => sum + Number(i.quantity_available || 0), 0), [items]);
 
@@ -499,6 +526,9 @@ export default function InventoryCatalog({
           <option value="" style={s.option}>All statuses</option>
           {Object.entries(STATUS_META).map(([key, meta]) => <option key={key} value={key} style={s.option}>{meta.label}</option>)}
         </select>
+        {filtersActive && (
+          <button type="button" onClick={clearFilters} style={s.linkBtn}>Clear filters</button>
+        )}
       </div>
 
       {/* Items */}
@@ -514,103 +544,92 @@ export default function InventoryCatalog({
       {items.length > 0 && visible.length === 0 && <p style={s.empty}>No items match these filters.</p>}
 
       {visible.length > 0 && (
-        <div style={s.list} role="list" aria-label="Stock items">
-          {/* Column headers (click to sort) */}
-          <div style={{ ...s.row, ...s.headRow, gridTemplateColumns: narrow ? s.colsNarrow : s.cols }} aria-hidden="true">
-            <span />
-            <SortHeader label="Item" k="name" sort={sort} onSort={sortBy} />
-            {!narrow && <SortHeader label="Category" k="category" sort={sort} onSort={sortBy} />}
-            <SortHeader label="Status" k="status" sort={sort} onSort={sortBy} />
-            <SortHeader label="Available" k="available" sort={sort} onSort={sortBy} align="right" />
-            {!narrow && <SortHeader label="Free to use" k="free" sort={sort} onSort={sortBy} align="right" />}
-          </div>
-
-          {visible.slice(0, shown).map((item) => {
-            const meta = STATUS_META[item.stock_status] || STATUS_META.in_stock;
-            const reservedPct = item.quantity_available > 0
-              ? Math.min(100, (item.quantity_reserved / item.quantity_available) * 100)
-              : 0;
-            const id = item.inventory_id;
-            const open = expanded.has(id);
-            const changed = recentlyChanged.includes(id);
-            return (
-              <div key={id} data-inventory-id={id} role="listitem"
-                style={{ ...s.item, borderLeft: `4px solid ${meta.bar}`, ...(changed ? s.itemChanged : {}), ...(open ? s.itemOpen : {}) }}>
-                {/* Summary row: click / Enter / Space to show details */}
-                <button
-                  type="button"
-                  onClick={() => toggleRow(id)}
-                  aria-expanded={open}
-                  aria-controls={`item-details-${id}`}
-                  style={{ ...s.row, ...s.rowBtn, gridTemplateColumns: narrow ? s.colsNarrow : s.cols }}
-                >
-                  <span style={s.chevron} aria-hidden="true">{open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
-                  <span style={{ minWidth: 0 }}>
-                    <span style={s.itemName}>{item.item_name}</span>
-                    {narrow && <span style={s.category}>{item.item_category}</span>}
-                    {item.sync_status !== 'synced' && <span style={s.pending}>Pending sync</span>}
-                  </span>
-                  {!narrow && <span style={s.category}>{item.item_category}</span>}
-                  <span><span style={{ ...s.badge, background: meta.bg, color: meta.color }}>{meta.label}</span></span>
-                  <span style={s.num}>{item.quantity_available.toLocaleString()}</span>
-                  {!narrow && <strong style={{ ...s.num, color: meta.color }}>{item.quantity_available_net.toLocaleString()}</strong>}
-                </button>
-
-                {/* Details (everything the old card showed, plus stock value) */}
-                {open && (
-                  <div id={`item-details-${id}`} style={s.details}>
-                    <div style={s.stats}>
-                      <Stat label="Available" value={item.quantity_available} />
-                      <Stat label="Reserved" value={item.quantity_reserved} />
-                      <Stat label="Free to use" value={item.quantity_available_net} color={meta.color} />
-                      <Stat label="Min. Threshold" value={item.minimum_threshold} />
-                      <Stat label="Unit cost" value={peso(item.unit_cost)} />
-                      <Stat label="Stock value" value={peso(item.quantity_available * item.unit_cost)} />
-                    </div>
-
-                    {/* Reserved share of on-hand stock */}
-                    <div style={s.barLabel}>
-                      <span>Reserved for orders</span>
-                      <span>{item.quantity_reserved} of {item.quantity_available} ({Math.round(reservedPct)}%)</span>
-                    </div>
-                    <div style={s.barTrack} aria-hidden="true">
-                      <div style={{ ...s.barFill, width: `${reservedPct}%`, background: meta.bar }} />
-                    </div>
-
-                    <div style={s.detailsFoot}>
-                      <span style={s.category}>
-                        Category: <strong>{item.item_category}</strong>
-                        {item.sync_status !== 'synced' && ' · Saved offline, waiting to sync'}
-                      </span>
-                      {canEdit && (
+        <div style={s.tableWrap}>
+          <table style={s.table} aria-label="Stock items" aria-rowcount={visible.length + 1}>
+            <thead>
+              <tr>
+                {columns.map((c) => (
+                  <SortTh key={c.key} label={c.label} k={c.key} sort={sort} onSort={sortBy} num={c.num} />
+                ))}
+                {canEdit && <th scope="col" style={{ ...s.th, ...s.thActions }}>Actions</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {visible.slice(0, shown).map((item) => {
+                const meta = STATUS_META[item.stock_status] || STATUS_META.in_stock;
+                const id = item.inventory_id;
+                const changed = recentlyChanged.includes(id);
+                const cell = {
+                  name: (
+                    <>
+                      <span style={s.itemName}>{item.item_name}</span>
+                      {narrow && <span style={s.category}>{item.item_category}</span>}
+                      {item.sync_status !== 'synced' && <span style={s.pending}>Pending sync</span>}
+                    </>
+                  ),
+                  category: <span style={s.category}>{item.item_category}</span>,
+                  status: <span style={{ ...s.badge, background: meta.bg, color: meta.color }}>{meta.label}</span>,
+                  available: item.quantity_available.toLocaleString(),
+                  reserved: item.quantity_reserved.toLocaleString(),
+                  free: (
+                    <>
+                      <strong style={{ color: meta.color }}>{item.quantity_available_net.toLocaleString()}</strong>
+                      {narrow && <span style={s.tdSub}>of {item.quantity_available.toLocaleString()} on hand</span>}
+                    </>
+                  ),
+                  threshold: item.minimum_threshold.toLocaleString(),
+                  unit_cost: peso(item.unit_cost),
+                  value: peso(stockValue(item))
+                };
+                return (
+                  <tr key={id} data-inventory-id={id}
+                    style={{ ...s.tr, ...(changed ? s.trChanged : {}) }}>
+                    {columns.map((c, idx) => (
+                      <td key={c.key}
+                        style={{ ...(c.num ? s.tdNum : s.td), ...(idx === 0 ? { borderLeft: `4px solid ${meta.bar}` } : {}) }}>
+                        {cell[c.key]}
+                      </td>
+                    ))}
+                    {canEdit && (
+                      <td style={{ ...s.td, ...s.tdActions }}>
                         <div style={s.cardActions}>
-                          <button type="button" onClick={() => openEdit(item)} style={s.editBtn} aria-label={`Edit ${item.item_name}`}>
-                            <Pencil size={14} /> Edit
+                          <button type="button" onClick={() => openEdit(item)} style={s.iconBtn} aria-label={`Edit ${item.item_name}`} title="Edit">
+                            <Pencil size={14} />
                           </button>
-                          <button type="button" onClick={() => setToDelete(item)} style={s.deleteBtn} aria-label={`Delete ${item.item_name}`}>
-                            <Trash2 size={14} /> Delete
+                          <button type="button" onClick={() => setToDelete(item)} style={{ ...s.iconBtn, ...s.iconBtnDanger }} aria-label={`Delete ${item.item_name}`} title="Move to Recycle Bin">
+                            <Trash2 size={14} />
                           </button>
                         </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr>
+                {columns.map((c) => {
+                  const foot = {
+                    name: `Total (${visible.length} item${visible.length === 1 ? '' : 's'})`,
+                    available: totals.available.toLocaleString(),
+                    reserved: totals.reserved.toLocaleString(),
+                    free: totals.free.toLocaleString(),
+                    value: peso(totals.value)
+                  };
+                  return <td key={c.key} style={c.num ? s.tfootNum : s.tfoot}>{foot[c.key] ?? ''}</td>;
+                })}
+                {canEdit && <td style={s.tfoot} />}
+              </tr>
+            </tfoot>
+          </table>
 
           <div style={s.listFoot}>
             <span>Showing {Math.min(shown, visible.length)} of {visible.length}</span>
-            <span style={{ display: 'flex', gap: '0.5rem' }}>
-              {expanded.size > 0 && (
-                <button type="button" onClick={() => setExpanded(new Set())} style={s.linkBtn}>Collapse all</button>
-              )}
-              {shown < visible.length && (
-                <button type="button" onClick={() => setShown((n) => n + LIST_PAGE)} style={s.moreBtn}>
-                  Show {Math.min(LIST_PAGE, visible.length - shown)} more
-                </button>
-              )}
-            </span>
+            {shown < visible.length && (
+              <button type="button" onClick={() => setShown((n) => n + LIST_PAGE)} style={s.moreBtn}>
+                Show {Math.min(LIST_PAGE, visible.length - shown)} more
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -688,23 +707,18 @@ export default function InventoryCatalog({
   );
 }
 
-function SortHeader({ label, k, sort, onSort, align = 'left' }) {
+// Sortable column header: a real <th> with aria-sort; the label is a button
+function SortTh({ label, k, sort, onSort, num = false }) {
   const active = sort.key === k;
+  const Arrow = active ? (sort.dir === 1 ? ArrowUp : ArrowDown) : ArrowUpDown;
   return (
-    <button type="button" onClick={() => onSort(k)} style={{ ...s.sortBtn, justifyContent: align === 'right' ? 'flex-end' : 'flex-start' }}
-      aria-label={`Sort by ${label}`}>
-      {label}
-      {active && (sort.dir === 1 ? <ArrowUp size={12} /> : <ArrowDown size={12} />)}
-    </button>
-  );
-}
-
-function Stat({ label, value, color }) {
-  return (
-    <div style={s.stat}>
-      <span style={s.statLabel}>{label}</span>
-      <span style={{ ...s.statValue, ...(color ? { color } : {}) }}>{value}</span>
-    </div>
+    <th scope="col" style={num ? s.thNum : s.th}
+      aria-sort={active ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none'}>
+      <button type="button" onClick={() => onSort(k)}
+        style={{ ...s.sortBtn, justifyContent: num ? 'flex-end' : 'flex-start', ...(active ? { color: '#4f46e5' } : {}) }}>
+        {label} <Arrow size={12} style={active ? undefined : { opacity: 0.4 }} />
+      </button>
+    </th>
   );
 }
 
@@ -754,35 +768,31 @@ const s = {
   sectionTitle: { fontSize: '1.05rem', margin: '0 0 0.75rem', color: '#0f172a' },
   sectionCount: { fontWeight: 'normal', color: '#64748b', fontSize: '0.9rem' },
   empty: { textAlign: 'center', color: '#64748b', padding: '2rem', background: '#fff', borderRadius: '0.5rem', border: '1px dashed #cbd5e1' },
-  // List view: one compact row per item; details open below the row
-  list: { background: '#fff', border: '1px solid #e2e8f0', borderRadius: '0.5rem', overflow: 'hidden' },
-  cols: '1.5rem minmax(0, 3fr) minmax(0, 1.4fr) 7.5rem 5.5rem 6rem',
-  colsNarrow: '1.25rem minmax(0, 1fr) 6.5rem 4.5rem',
-  row: { display: 'grid', alignItems: 'center', gap: '0.75rem', padding: '0.6rem 0.75rem', width: '100%', boxSizing: 'border-box' },
-  headRow: { background: '#f8fafc', borderBottom: '1px solid #e2e8f0', paddingLeft: 'calc(0.75rem + 4px)' },
-  sortBtn: { display: 'flex', alignItems: 'center', gap: '0.25rem', padding: 0, background: 'none', border: 'none', cursor: 'pointer', color: '#475569', fontSize: '0.7rem', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.03em' },
-  item: { borderBottom: '1px solid #f1f5f9', transition: 'background-color 0.6s ease' },
-  itemOpen: { background: '#fafbff' },
-  itemChanged: { backgroundColor: '#eef2ff' },
-  rowBtn: { background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', font: 'inherit', color: 'inherit' },
-  chevron: { display: 'flex', color: '#64748b' },
+  // Data table (professor's requirement: stock shown as a table)
+  // overflowX: the table scrolls sideways instead of being clipped when the screen is too narrow
+  tableWrap: { background: '#fff', border: '1px solid #e2e8f0', borderRadius: '0.5rem', overflowX: 'auto' },
+  table: { width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' },
+  // Header labels may wrap onto two lines so all columns fit on a laptop screen
+  th: { textAlign: 'left', padding: '0.55rem 0.6rem', background: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#475569', verticalAlign: 'bottom' },
+  thNum: { textAlign: 'right', padding: '0.55rem 0.6rem', background: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#475569', verticalAlign: 'bottom' },
+  thActions: { textAlign: 'right', fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.03em', width: '1%' },
+  sortBtn: { display: 'inline-flex', alignItems: 'center', gap: '0.25rem', width: '100%', padding: 0, background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', fontSize: '0.7rem', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.03em' },
+  tr: { transition: 'background-color 0.6s ease' },
+  trChanged: { backgroundColor: '#eef2ff' },
+  td: { padding: '0.5rem 0.6rem', borderBottom: '1px solid #f1f5f9', color: '#0f172a', verticalAlign: 'middle' },
+  tdNum: { padding: '0.5rem 0.6rem', borderBottom: '1px solid #f1f5f9', color: '#0f172a', textAlign: 'right', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', verticalAlign: 'middle' },
+  tdActions: { textAlign: 'right', whiteSpace: 'nowrap' },
+  tdSub: { display: 'block', fontSize: '0.72rem', fontWeight: 'normal', color: '#64748b' },
+  tfoot: { padding: '0.55rem 0.6rem', background: '#f8fafc', borderTop: '2px solid #e2e8f0', fontWeight: 'bold', color: '#0f172a', whiteSpace: 'nowrap' },
+  tfootNum: { padding: '0.55rem 0.6rem', background: '#f8fafc', borderTop: '2px solid #e2e8f0', fontWeight: 'bold', color: '#0f172a', textAlign: 'right', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' },
+  iconBtn: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '2rem', height: '2rem', background: '#fff', border: '1px solid #c7d2fe', borderRadius: '0.375rem', cursor: 'pointer', color: '#4338ca' },
+  iconBtnDanger: { border: '1px solid #fecaca', color: '#b91c1c' },
   // Full title is shown (wraps) so long product names stay readable
   itemName: { display: 'block', fontSize: '0.92rem', fontWeight: 'bold', color: '#0f172a', lineHeight: 1.3, overflowWrap: 'anywhere' },
   category: { display: 'block', fontSize: '0.8rem', color: '#64748b', overflowWrap: 'anywhere' },
   badge: { display: 'inline-block', whiteSpace: 'nowrap', padding: '0.2rem 0.45rem', borderRadius: '0.25rem', fontSize: '0.65rem', fontWeight: 'bold', textTransform: 'uppercase' },
   num: { textAlign: 'right', fontSize: '0.92rem', color: '#0f172a', fontVariantNumeric: 'tabular-nums' },
-  details: { padding: '0.25rem 1rem 1rem calc(0.75rem + 1.5rem + 0.75rem)' },
-  stats: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: '0.5rem', marginBottom: '0.75rem' },
-  stat: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', padding: '0.45rem 0.6rem', background: '#f1f5f9', borderRadius: '0.375rem' },
-  statLabel: { fontSize: '0.65rem', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase' },
-  statValue: { fontSize: '1rem', fontWeight: 'bold', color: '#0f172a' },
-  barLabel: { display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#475569', marginBottom: '0.25rem' },
-  barTrack: { height: '6px', background: '#e2e8f0', borderRadius: '3px', overflow: 'hidden', marginBottom: '0.75rem' },
-  barFill: { height: '100%', borderRadius: '3px' },
-  detailsFoot: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' },
   cardActions: { display: 'flex', gap: '0.5rem' },
-  editBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.4rem 0.9rem', background: '#fff', border: '1px solid #c7d2fe', borderRadius: '0.375rem', cursor: 'pointer', color: '#4338ca', fontWeight: 'bold', fontSize: '0.8rem' },
-  deleteBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.4rem 0.9rem', background: '#fff', border: '1px solid #fecaca', borderRadius: '0.375rem', cursor: 'pointer', color: '#b91c1c', fontWeight: 'bold', fontSize: '0.8rem' },
   listFoot: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 0.75rem', background: '#f8fafc', fontSize: '0.8rem', color: '#64748b', flexWrap: 'wrap' },
   moreBtn: { padding: '0.35rem 0.9rem', background: '#4f46e5', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.8rem' },
   linkBtn: { padding: '0.35rem 0.5rem', background: 'none', border: 'none', cursor: 'pointer', color: '#4f46e5', fontWeight: 'bold', fontSize: '0.8rem' },

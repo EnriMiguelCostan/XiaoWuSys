@@ -30,8 +30,10 @@ const SYNC_TABLES = [
   {
     table: 'order_profiles',
     id: 'order_id',
+    // approved_by/approved_at are only ever set in Neon (approval is online-only). They are
+    // listed so the refresh copies them into the cache; offline rows never have them set.
     columns: ['order_id', 'customer_id', 'date_created', 'production_deadline', 'production_status', 'design_drive_link', 'total_quote_amount',
-              'stock_reserved']
+              'stock_reserved', 'approved_by', 'approved_at']
   },
   {
     table: 'order_items',

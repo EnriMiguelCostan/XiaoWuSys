@@ -199,6 +199,13 @@ Read this before §4: some of it is already built.
   - The server creates the SQLite tables itself (`services/localSchema.js`). `initLocalDb.js` is optional.
   - It applies pending migrations (`AUTO_MIGRATE=false` turns this off), so your next migration is `005_...sql`.
 
+## 3c. PB 13 as built (reconciled with §3b)
+- **Migration `005_job_order_approval.sql`**: `approved_by` / `approved_at`, `'Approved'` in the status CHECK, and the non-negative stock CHECK. Next migration is `006_...sql`.
+- **SQLite**: `services/localSchema.js` has the new columns and statuses. `upgradeLocalOrderStatusCheck()` rebuilds an old cache's `order_profiles` once at start-up, because SQLite cannot alter a CHECK. All rows are kept.
+- **`POST /api/orders/:order_id/approve`** (Owner only, online only) reserves stock **only if `stock_reserved` is false** (Delayed orders, orders created before PR #10). It never reserves twice. An approved order always has `stock_reserved = true`.
+- **`STATUS_TRANSITIONS`**: `Pending → Cancelled` only. `Approved → Printing | Cancelled`. Production cannot start without approval. `PATCH /status` with `Approved` is rejected.
+- **`POST /api/orders/:order_id/items`** with an `inventory_id` on an order that holds stock reserves that item in the same transaction. Offline, this returns 503 `ITEM_RESERVATION_REQUIRES_CLOUD`.
+
 ## 4. Sprint 11 objectives: PB 13 "Approve Job Order & Reserve Blank Stock"
 
 ### 4.1 Prerequisites (do these first, in the same PR)
