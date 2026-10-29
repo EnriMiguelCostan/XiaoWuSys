@@ -768,6 +768,98 @@ router.patch('/:order_id/design', requireRole(WRITE_ROLES), requireOrderEditAcce
 });
 
 // ==========================================
+// EDIT ORDER DETAILS (Orders tab "Edit details")
+// PATCH /api/orders/:order_id/details   Body (any of): { production_deadline, total_quote_amount, expected_version? }
+//  - Completed / Cancelled orders cannot be edited.
+//  - The quote is frozen once an order is Approved (its downpayment was checked against it).
+//  - Optimistic concurrency: if the order changed since it was loaded -> 409 EDIT_CONFLICT.
+// Works offline (synced later, pushing only the changed fields).
+// -> 200 { message, source, order, changed }
+// ==========================================
+const CLOSED_STATUSES = ['Completed', 'Cancelled'];
+const QUOTE_FROZEN_STATUSES = ['Approved', 'Printing', 'Completed', 'Cancelled'];
+
+router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAccess, async (req, res) => {
+  const { order_id } = req.params;
+  const body = req.body || {};
+  const v = createValidator();
+  const updates = {};
+  if (body.production_deadline !== undefined) updates.production_deadline = v.deadline(body.production_deadline, 'production_deadline');
+  if (body.total_quote_amount !== undefined) updates.total_quote_amount = v.nonNegativeMoney(body.total_quote_amount, 'total_quote_amount');
+  if (body.expected_version !== undefined && body.expected_version !== null && typeof body.expected_version !== 'string') {
+    v.errors.push({ field: 'expected_version', message: 'expected_version must be the string returned as "version".' });
+  }
+  if (Object.keys(updates).length === 0 && !v.failed()) {
+    v.errors.push({ field: 'body', message: 'Nothing to change: send a new deadline or quote amount.' });
+  }
+  if (v.failed()) return v.send(res);
+
+  try {
+    const { record: current } = await getRecord(req, 'order_profiles', order_id);
+    if (!current) return notFound(res, 'Order', order_id);
+    if (CLOSED_STATUSES.includes(current.production_status)) {
+      return res.status(409).json({ error: 'ORDER_CLOSED', message: `This order is ${current.production_status}, so its details can no longer be changed.` });
+    }
+    if (updates.total_quote_amount !== undefined && updates.total_quote_amount !== current.total_quote_amount
+        && QUOTE_FROZEN_STATUSES.includes(current.production_status)) {
+      return res.status(409).json({
+        error: 'QUOTE_LOCKED',
+        message: 'The quote cannot be changed after the job order was approved, because the downpayment was based on it.'
+      });
+    }
+    const expected = body.expected_version || current.version || null;
+    const fields = Object.keys(updates).filter((f) => updates[f] !== current[f]
+      && !(f === 'production_deadline' && String(current[f]).slice(0, 10) === String(updates[f]).slice(0, 10)));
+    if (fields.length === 0) return res.status(200).json({ message: 'Nothing changed.', source: 'cloud', order: current, changed: [] });
+
+    let conflict = null;
+    const result = await writeCloudFirst(
+      current.sync_status === 'pending_insert' ? 'local' : 'cloud',
+      async () => {
+        const { rows, rowCount } = await req.pgPool.query(
+          `UPDATE order_profiles SET ${fields.map((f, i) => `${f} = $${i + 1}`).join(', ')}
+            WHERE order_id = $${fields.length + 1}
+              AND production_status <> ALL($${fields.length + 2}::text[])
+              AND ($${fields.length + 3}::text IS NULL OR ${VERSION_SQL} = $${fields.length + 3}::text)
+            RETURNING ${selectList('order_profiles', 'pg')}`,
+          [...fields.map((f) => updates[f]), order_id, CLOSED_STATUSES, expected]
+        );
+        if (rowCount === 0) {
+          conflict = (await getRecord(req, 'order_profiles', order_id)).record;
+          return null;
+        }
+        return { source: 'cloud', record: serialize('order_profiles', rows[0]) };
+      },
+      async () => {
+        const { changes } = await sqliteRun(req.localDb,
+          `UPDATE order_profiles SET ${fields.map((f) => `${f} = ?`).join(', ')},
+             ${offlineUpdateBookkeeping('order_profiles', fields)}
+           WHERE order_id = ? AND production_status NOT IN ('Completed', 'Cancelled')`,
+          [...fields.map((f) => updates[f]), order_id]);
+        return changes === 0 ? null : { source: 'local', record: await readLocal(req.localDb, 'order_profiles', order_id) };
+      }
+    );
+
+    if (conflict || !result) {
+      return res.status(409).json({
+        error: 'EDIT_CONFLICT',
+        message: 'This order was changed by someone else while you were editing. Reload it and try again.',
+        current: conflict
+      });
+    }
+    console.log(`✏️  Order ${order_id}: ${fields.join(', ')} changed by ${req.user.user_id} [${result.source}]`);
+    res.status(200).json({
+      message: result.source === 'cloud' ? 'Order details saved.' : 'Order details saved offline. They will sync when the internet is back.',
+      source: result.source,
+      order: result.record,
+      changed: fields
+    });
+  } catch (err) {
+    sendDbError(res, err, 'editing order details');
+  }
+});
+
+// ==========================================
 // APPROVE JOB ORDER & RESERVE BLANK STOCK (Sprint 11 / PB 13)
 // POST /api/orders/:order_id/approve   Body: { expected_version }   (required)
 //

@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Package, PlusCircle, TrendingUp, LogOut, TriangleAlert, Clock, XCircle, Trash2, Plus, X, ClipboardList } from 'lucide-react';
+import { Package, PlusCircle, LogOut, TriangleAlert, Clock, XCircle, Trash2, Plus, X, ClipboardList, LayoutDashboard, Users, KeyRound } from 'lucide-react';
 import { io } from 'socket.io-client';
 import InventoryCatalog from './InventoryCatalog';
 import OrdersPage from './OrdersPage';
+import Dashboard from './Dashboard';
+import UsersPage, { ChangePasswordDialog } from './UsersPage';
+import { API_BASE, SOCKET_URL } from './config';
 import { ResultDialog } from './Dialogs';
 import { createApi, errorText, todayInManila, MOBILE_PATTERN } from './api';
 
-const API_BASE = 'http://localhost:5000/api';
-const SOCKET_URL = API_BASE.replace(/\/api\/?$/, '');
 
 const emptyOrderLine = () => ({ inventory_id: '', quantity_needed: '' });
 
@@ -40,6 +41,7 @@ export default function App() {
   const [token, setToken] = useState(localStorage.getItem('xiaomei_token') || '');
   const [user, setUser] = useState(JSON.parse(localStorage.getItem('xiaomei_user')) || null);
   const [activeTab, setActiveTab] = useState('catalog');
+  const [changingPassword, setChangingPassword] = useState(false);
 
   // Auth Form State for XiaoMei Printing
   // Public sign-up was removed (audit C1): accounts are created by an Admin.
@@ -58,7 +60,6 @@ export default function App() {
   const [orderResult, setOrderResult] = useState(null); // ResultDialog after creating an order
   const [ordersRefreshKey, setOrdersRefreshKey] = useState(0);
   const [productionDeadline, setProductionDeadline] = useState('');
-  const [orderStatusMsg, setOrderStatusMsg] = useState('');
 
   // Inventory snapshot from GET /api/inventory, shared by Catalog, Create Order and Analytics
   const [inventory, setInventory] = useState([]);
@@ -197,14 +198,16 @@ export default function App() {
       const data = await res.json().catch(() => ({}));
 
       if (res.ok && data.token) {
-        const activeUser = { username: username.trim(), role: data.role };
+        const activeUser = data.user
+          ? { user_id: data.user.user_id, username: data.user.username, role: data.user.role }
+          : { username: username.trim(), role: data.role };
         setToken(data.token);
         localStorage.setItem('xiaomei_token', data.token);
         setUser(activeUser);
         localStorage.setItem('xiaomei_user', JSON.stringify(activeUser));
         setPassword('');
       } else {
-        setAuthError(data.error || 'Authentication failed');
+        setAuthError(errorText(data, 'Login failed. Please try again.'));
       }
     } catch (err) {
       console.error('Server connection error:', err);
@@ -247,7 +250,6 @@ export default function App() {
 
   const handleCreateOrder = async (e) => {
     e.preventDefault();
-    setOrderStatusMsg('');
 
     const required_items = orderLines.map(line => ({
       inventory_id: line.inventory_id,
@@ -321,7 +323,6 @@ export default function App() {
 
       if (res.ok) {
         const shortId = String(data.order_id || '').slice(0, 8).toUpperCase();
-        setOrderStatusMsg(`Order Created Successfully! ID: #${shortId}`);
         setOrderResult({
           type: 'success',
           title: 'Order created',
@@ -346,12 +347,10 @@ export default function App() {
           .filter(Boolean);
         const text = errorText(data, 'The order could not be saved. Please try again.') +
           (missingNames.length ? `\nMaterials affected: ${missingNames.join(', ')}.` : '');
-        setOrderStatusMsg(`Error: ${text}`);
         setOrderResult({ type: 'error', title: 'The order was not created', message: text });
       }
     } catch (err) {
       console.error('Error creating order:', err);
-      setOrderStatusMsg('Error: The system could not be reached.');
       setOrderResult({
         type: 'error',
         title: 'The order was not created',
@@ -384,7 +383,6 @@ export default function App() {
         const notice = resolution === 'Delayed'
           ? `Order #${id} logged as DELAYED. New deadline: ${production_deadline}. Resume it from the Orders tab when stock arrives.`
           : `Order #${id} logged as CANCELLED (lost sale recorded).`;
-        setOrderStatusMsg(`Notice: ${notice}`);
         setOrderResult({ type: 'warning', title: resolution === 'Delayed' ? 'Order delayed' : 'Order cancelled', message: notice });
         setOrdersRefreshKey(k => k + 1);
         resetOrderForm();
@@ -400,7 +398,7 @@ export default function App() {
     }
   };
 
-  const lowStockItems = inventory.filter(item => item.stock_status !== 'in_stock');
+  const canManageUsers = ['Owner', 'Admin'].includes(user?.role);
 
   if (!token) {
     return (
@@ -450,6 +448,7 @@ export default function App() {
       <header style={styles.header}>
         <h1 style={{ fontSize: '1.45rem', fontWeight: 'bold', color: '#08060d', userSelect: 'none' }}>
           Hello, {user?.username || 'Dashboard'}
+          {user?.role && <span style={styles.roleTag}>{user.role}</span>}
         </h1>
         <nav style={styles.nav}>
           <button style={activeTab === 'catalog' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('catalog')}>
@@ -461,8 +460,16 @@ export default function App() {
           <button style={activeTab === 'orders' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('orders')}>
             <ClipboardList size={18} /> Orders
           </button>
-          <button style={activeTab === 'metrics' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('metrics')}>
-            <TrendingUp size={18} /> Analytics
+          <button style={activeTab === 'dashboard' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('dashboard')}>
+            <LayoutDashboard size={18} /> Dashboard
+          </button>
+          {canManageUsers && (
+            <button style={activeTab === 'users' ? styles.navActive : styles.navBtn} onClick={() => setActiveTab('users')}>
+              <Users size={18} /> Accounts
+            </button>
+          )}
+          <button style={styles.navBtn} onClick={() => setChangingPassword(true)} title="Change my password">
+            <KeyRound size={18} /> Password
           </button>
           <button style={styles.navBtn} onClick={handleLogout}>
             <LogOut size={18} /> Logout
@@ -495,18 +502,6 @@ export default function App() {
           <div style={styles.formCard}>
             <h2 style={{ textAlign: 'center', marginBottom: '1rem' }}>Create Order Profile</h2>
             
-            {orderStatusMsg && (
-              <p style={{
-                padding: '0.75rem',
-                borderRadius: '0.375rem',
-                marginBottom: '1rem',
-                fontSize: '0.875rem',
-                backgroundColor: orderStatusMsg.startsWith('Error') ? '#fee2e2' : orderStatusMsg.startsWith('Notice') ? '#fef3c7' : '#dcfce7',
-                color: orderStatusMsg.startsWith('Error') ? '#991b1b' : orderStatusMsg.startsWith('Notice') ? '#92400e' : '#166534'
-              }}>
-                {orderStatusMsg}
-              </p>
-            )}
 
             <form onSubmit={handleCreateOrder}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
@@ -776,57 +771,31 @@ export default function App() {
           onAction={() => { setOrderResult(null); setActiveTab('orders'); }}
         />
 
-        {activeTab === 'metrics' && (
-          <div>
-            <div style={styles.metricsGrid}>
-              <div style={styles.metricCard}>
-                <h4>Total Items</h4>
-                <p>{inventoryMeta.summary.total_items}</p>
-              </div>
-              <div style={styles.metricCard}>
-                <h4>Stock Value</h4>
-                <p>₱{inventoryMeta.summary.stock_value.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-              </div>
-              <div style={styles.metricCard}>
-                <h4>Low Stock</h4>
-                <p style={{ color: '#92400e' }}>{inventoryMeta.summary.low_stock}</p>
-              </div>
-              <div style={styles.metricCard}>
-                <h4>Out of Stock</h4>
-                <p style={{ color: '#991b1b' }}>{inventoryMeta.summary.out_of_stock}</p>
-              </div>
-            </div>
+        {activeTab === 'dashboard' && (
+          <Dashboard
+            apiBase={API_BASE}
+            token={token}
+            userRole={user?.role}
+            onUnauthorized={handleLogout}
+            refreshKey={`${inventoryMeta.fetchedAt}:${ordersRefreshKey}`}
+            onOpenOrders={() => setActiveTab('orders')}
+          />
+        )}
 
-            <div style={{ ...styles.formCard, maxWidth: 'none', marginTop: '1.5rem', padding: '1.5rem' }}>
-              <h3 style={{ marginTop: 0, fontSize: '1.05rem' }}>Needs Restocking</h3>
-              {lowStockItems.length === 0 ? (
-                <p style={styles.hint}>All materials are above their minimum threshold.</p>
-              ) : (
-                <table style={styles.table}>
-                  <thead>
-                    <tr>
-                      <th style={styles.th}>Material</th>
-                      <th style={styles.thNum}>Available</th>
-                      <th style={styles.thNum}>Reserved</th>
-                      <th style={styles.thNum}>Min. Threshold</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {lowStockItems.map(item => (
-                      <tr key={item.inventory_id}>
-                        <td style={styles.td}>{item.item_name}</td>
-                        <td style={styles.tdNum}>{item.quantity_available}</td>
-                        <td style={styles.tdNum}>{item.quantity_reserved}</td>
-                        <td style={{ ...styles.tdNum, fontWeight: 'bold' }}>{item.minimum_threshold}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </div>
+        {activeTab === 'users' && canManageUsers && (
+          <UsersPage apiBase={API_BASE} token={token} currentUser={user} onUnauthorized={handleLogout} />
         )}
       </main>
+
+      {changingPassword && (
+        <ChangePasswordDialog
+          apiBase={API_BASE}
+          token={token}
+          onUnauthorized={handleLogout}
+          onClose={() => setChangingPassword(false)}
+          onChanged={(newToken) => { setToken(newToken); localStorage.setItem('xiaomei_token', newToken); }}
+        />
+      )}
     </div>
   );
 }
@@ -838,14 +807,13 @@ const styles = {
   input: { width: '100%', padding: '0.75rem', marginBottom: '1rem', border: '1px solid #cbd5e1', borderRadius: '0.375rem', boxSizing: 'border-box' },
   btnPrimary: { width: '100%', padding: '0.75rem', background: '#4f46e5', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold' },
   authHint: { marginTop: '1rem', color: '#64748b', textAlign: 'center', fontSize: '0.875rem' },
-  header: { background: '#fff', padding: '1rem 2rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0' },
-  nav: { display: 'flex', gap: '0.5rem' },
+  header: { background: '#fff', padding: '1rem 2rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', borderBottom: '1px solid #e2e8f0' },
+  nav: { display: 'flex', gap: '0.25rem', flexWrap: 'wrap', justifyContent: 'flex-end' },
+  roleTag: { marginLeft: '0.5rem', padding: '0.1rem 0.5rem', background: '#e0e7ff', color: '#4f46e5', borderRadius: '999px', fontSize: '0.75rem', verticalAlign: 'middle' },
   navBtn: { display: 'flex', alignItems: 'center', gap: '0.25rem', padding: '0.5rem 1rem', background: 'none', border: 'none', cursor: 'pointer', color: '#64748b' },
   navActive: { display: 'flex', alignItems: 'center', gap: '0.25rem', padding: '0.5rem 1rem', background: '#e0e7ff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', color: '#4f46e5', fontWeight: 'bold' },
   btnSecondary: { width: '100%', padding: '0.5rem', marginTop: '1rem', background: '#94a3b8', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer' },
   formCard: { background: '#fff', padding: '2rem', borderRadius: '0.5rem', maxWidth: '500px', margin: '0 auto', border: '1px solid #e2e8f0' },
-  metricsGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' },
-  metricCard: { background: '#fff', padding: '1.5rem', borderRadius: '0.5rem', border: '1px solid #e2e8f0', textAlign: 'center' },
 
   // Sprint 9: Order materials + Capacity Alert modal
   hint: { fontSize: '0.8rem', color: '#64748b', marginBottom: '0.5rem' },

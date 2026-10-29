@@ -13,10 +13,18 @@ const { PG_VERSION_FORMAT } = require('../utils/localSync');
 //   inventory_items, customers -> order_profiles -> order_items, payments, material_loss
 const SYNC_TABLES = [
   {
+    // Accounts are only created/changed online; they are copied DOWN so users can log in
+    // while the internet is down (password hashes only, never plain passwords).
+    table: 'users',
+    id: 'user_id',
+    columns: ['user_id', 'username', 'password_hash', 'role', 'is_active', 'tokens_valid_after'],
+    pullOnly: true
+  },
+  {
     table: 'inventory_items',
     id: 'inventory_id',
     columns: ['inventory_id', 'item_name', 'item_category', 'quantity_available', 'quantity_reserved', 'minimum_threshold', 'unit_cost',
-              'deleted_at', 'deleted_by', 'purged_at'],
+              'unit', 'supplier', 'deleted_at', 'deleted_by', 'purged_at'],
     // M9: keep the locally reduced stock while an offline loss for this item is still unsynced
     refreshGuard: ` AND NOT EXISTS (SELECT 1 FROM material_loss ml
                       WHERE ml.inventory_id = excluded.inventory_id
@@ -60,7 +68,7 @@ const SYNC_TABLES = [
 
 // Tables copied Neon -> SQLite (parents first) so offline writes satisfy foreign keys
 // M10: children are refreshed too, so offline reads show the same items/payments/losses.
-const REFRESH_TABLES = ['customers', 'inventory_items', 'order_profiles', 'order_items', 'payments', 'material_loss'];
+const REFRESH_TABLES = ['users', 'customers', 'inventory_items', 'order_profiles', 'order_items', 'payments', 'material_loss'];
 
 const specFor = (table) => SYNC_TABLES.find((t) => t.table === table);
 const updatableColumns = (spec) => spec.columns.filter((c) => c !== spec.id);
@@ -295,6 +303,7 @@ const runSync = async (pgPool, localDb) => {
   console.log('🔄 Checking for offline data to sync...');
 
   for (const spec of SYNC_TABLES) {
+    if (spec.pullOnly) continue;
     const pending = await sqliteAll(
       localDb,
       `SELECT * FROM ${spec.table}

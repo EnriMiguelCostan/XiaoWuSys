@@ -22,10 +22,13 @@ const LOCAL_SYNC_COLUMNS = ['dirty_fields', 'cloud_last_modified', 'sync_conflic
 //                                    0 when the reduction is already baked into an offline-created item
 //   inventory_items.deleted_at/deleted_by/purged_at  Recycle Bin (mirrors Neon, migration 004)
 //   order_profiles.stock_reserved                    whether the order holds a stock reservation
+//   inventory_items.unit/supplier, users.is_active/tokens_valid_after   mirror migration 005
 //   order_profiles.approved_by/approved_at           job order approval (mirrors Neon, migration 005)
 const TABLE_EXTRA_COLUMNS = {
   material_loss: [['cloud_stock_delta', 'INTEGER']],
-  inventory_items: [['deleted_at', 'TEXT'], ['deleted_by', 'TEXT'], ['purged_at', 'TEXT']],
+  inventory_items: [['deleted_at', 'TEXT'], ['deleted_by', 'TEXT'], ['purged_at', 'TEXT'],
+                    ['unit', "TEXT NOT NULL DEFAULT 'pcs'"], ['supplier', 'TEXT']],
+  users: [['is_active', 'INTEGER NOT NULL DEFAULT 1'], ['tokens_valid_after', 'TEXT']],
   order_profiles: [['stock_reserved', 'INTEGER NOT NULL DEFAULT 0'], ['approved_by', 'TEXT'], ['approved_at', 'TEXT']]
 };
 
@@ -35,7 +38,7 @@ const run = (db, sql, params = []) =>
   new Promise((resolve, reject) => db.run(sql, params, (err) => (err ? reject(err) : resolve())));
 
 // Adds any missing bookkeeping columns. Safe to run on every start-up.
-const ensureLocalSyncColumns = async (db, tables) => {
+const ensureLocalSyncColumns = async (db, tables, { log = console.log } = {}) => {
   for (const table of tables) {
     const existing = new Set((await all(db, `PRAGMA table_info(${table})`)).map((c) => c.name));
     if (existing.size === 0) {
@@ -46,7 +49,7 @@ const ensureLocalSyncColumns = async (db, tables) => {
     for (const [column, type] of columns) {
       if (!existing.has(column)) {
         await run(db, `ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-        console.log(`🛠️  Added local sync column ${table}.${column}`);
+        log(`🛠️  Added local sync column ${table}.${column}`);
       }
     }
   }

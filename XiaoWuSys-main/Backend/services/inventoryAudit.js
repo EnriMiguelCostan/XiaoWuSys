@@ -11,7 +11,7 @@ const { LOCAL_NOW } = require('../utils/localSync');
 const { sqliteRun } = require('./records');
 
 const SNAPSHOT_FIELDS = ['inventory_id', 'item_name', 'item_category', 'quantity_available', 'quantity_reserved',
-  'minimum_threshold', 'unit_cost', 'deleted_at', 'deleted_by', 'version'];
+  'minimum_threshold', 'unit_cost', 'unit', 'supplier', 'deleted_at', 'deleted_by', 'version'];
 
 const snapshotOf = (item) =>
   Object.fromEntries(SNAPSHOT_FIELDS.filter((f) => item && item[f] !== undefined).map((f) => [f, item[f]]));

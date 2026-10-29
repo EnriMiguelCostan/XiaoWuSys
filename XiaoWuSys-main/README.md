@@ -1,2 +1,139 @@
 # XiaoWuSys
-XiaoWuSys is a inventory management website dedicated towards digitalizing and improving the workplace environment and the progression and tasks of XiaoMei Printshop, located in Agdao, Davao City, as a Capstone Project in Software Engineering 2.
+
+Inventory and order management for **XiaoMei Printshop** (Agdao, Davao City). It replaces the stock whiteboard, the order notes kept in Messenger, and the Excel / Google Sheets logs. Capstone project, Software Engineering 2.
+
+## What it does
+
+| Area | Features |
+|---|---|
+| **Catalog** | Sortable stock table with live updates. Each item has a unit (pcs, pack, ream…), a supplier and a low-stock alert. **Add / Subtract Stock** with a reason; lost or damaged stock is recorded with its cost. Duplicate names are blocked, ignoring case and spaces. Edit items, delete them to the **Recycle Bin** (restorable), **import from Excel** (CSV) and **export to Excel**. |
+| **Orders** | Create an order for a saved or new customer (11-digit mobile number). Stock is checked and **reserved** automatically; a halted order can be delayed or cancelled. The order detail shows materials, print details (size / name / number), the Google Drive design link and payments with the balance. You can edit the deadline and quote. Status runs Pending → Approved (Owner only, needs a 50% downpayment) → Printing → Completed. **Copy for Messenger** and **Print job order** buttons. |
+| **Dashboard** | Overdue orders, orders due this week, unpaid balances, payments per month, most-used materials, and a **restock list** with suggested quantities (copyable). Inventory, order and payment exports. |
+| **Accounts** | The Owner / Admin create accounts, change roles, reset forgotten passwords and deactivate staff who left. Everyone can change their own password. |
+| **Offline** | If the internet drops, the system keeps working on a local copy and syncs when the connection returns. Accounts that have logged in on that computer can log in offline. |
+| **Traceability** | Every catalog change is written to a hidden, append-only audit trail (`npm run audit-log`). |
+
+### Roles
+
+| Role | Can do |
+|---|---|
+| Owner | Everything, including approving job orders and managing Owner accounts |
+| Admin | Everything except approving job orders; manages non-Owner accounts |
+| Production | Catalog, stock and orders |
+| Staff | View the catalog, orders and dashboard |
+
+## Quick start
+
+You need **Node.js 22 or newer**.
+
+### Option A: demo mode (no Neon account needed)
+
+```bash
+cd Backend
+npm install
+npm run demo          # creates demo_cache.db with sample data and starts the API
+```
+
+In a second terminal:
+
+```bash
+cd Frontend
+npm install
+npm run dev           # open the address it prints (usually http://localhost:5173)
+```
+
+Log in as `owner`, `admin`, `production` or `staff`. The password for all of them is **`XiaoMei2026`**.
+
+Demo mode runs fully offline, on its own database file that is never synced. Actions that must reach every branch (approving, status changes, permanent delete, account changes) show the "needs the internet" message.
+
+### Option B: with the cloud database (Neon PostgreSQL)
+
+1. Create a free project at [neon.tech](https://neon.tech) and run `Backend/schema.sql` in its SQL Editor.
+2. `cd Backend`, then copy `.env.example` to `.env` and fill in `DATABASE_URL`, `PG_LISTEN_URL` and a long random `JWT_SECRET`.
+3. Run `npm install`.
+4. Create the first account:
+   ```bash
+   ADMIN_USERNAME=owner ADMIN_PASSWORD='YourPassw0rd' ADMIN_ROLE=Owner npm run create-admin
+   ```
+   On Windows PowerShell, set the variables first:
+   ```powershell
+   $env:ADMIN_USERNAME="owner"; $env:ADMIN_PASSWORD="YourPassw0rd"; $env:ADMIN_ROLE="Owner"; npm run create-admin
+   ```
+5. `npm start`. Pending database migrations are applied automatically on start.
+6. Optional: run `npm run seed-inventory` to add the October 8, 2026 delivery.
+7. Start the frontend as in Option A. If the API isn't on `localhost:5000`, copy `Frontend/.env.example` to `Frontend/.env` and set `VITE_API_URL`.
+
+## Tests
+
+```bash
+cd Backend
+npm test
+```
+
+There are 55 automated tests in `Backend/tests/`. They start the real API on a throw-away SQLite database filled with the shop's own data (`tests/fixtures/data.js`), with the cloud switched off, and call it over HTTP like the browser does.
+
+They cover:
+- login security: lockout after 5 wrong passwords, forged and expired tokens, deactivated accounts;
+- account rules;
+- duplicate items;
+- stock never going negative;
+- the Recycle Bin;
+- SQL-injection attempts;
+- the audit trail;
+- mobile number rules;
+- stock reservation by orders and the capacity halt;
+- payments and balances;
+- order editing;
+- the dashboard and exports (including spreadsheet formula injection);
+- security headers and CORS.
+
+## Useful commands (in `Backend/`)
+
+| Command | What it does |
+|---|---|
+| `npm start` | Start the API |
+| `npm test` | Run the automated tests |
+| `npm run demo` / `npm run demo:seed` | Start demo mode / rebuild the demo data |
+| `npm run migrate` (`-- --list`) | Apply database migrations (or list them) |
+| `npm run create-admin` | Create the first account (see above) |
+| `npm run audit-log -- --action deleted` | View the hidden audit trail (`--item "Custom Shirt"`, `--details`) |
+| `npm run seed-inventory` | Add the October 8, 2026 delivery |
+
+## How it is built
+
+```
+Backend/   Node.js + Express 5 API, PostgreSQL (Neon) + SQLite offline cache, Socket.io
+  app.js           the HTTP API (used by server.js and by the tests)
+  server.js        start-up: databases, real-time updates, sync, migrations
+  routes/          auth, inventory, orders, customers, reports
+  services/        sync engine, stock rules, Recycle Bin, audit trail, sessions
+  migrations/      numbered, idempotent SQL changes (applied automatically)
+  tests/           automated tests + fixture data
+Frontend/  React 19 + Vite (inline styles)
+docs/      sprint and audit notes
+```
+
+- **Source of truth:** Neon PostgreSQL. Writes go to the cloud first. If the cloud is unreachable they are saved to SQLite and synced later, pushing only the changed fields, with conflict detection.
+- **Stock:** "Free to use" = on hand − reserved. Orders reserve stock in the same transaction that creates them. Cancelling releases the stock; completing uses it up.
+- **Money:** stored as `NUMERIC(10,2)` and compared in whole centavos.
+
+## Security and privacy
+
+- Passwords are stored as bcrypt hashes and must have at least 8 characters, a letter and a number.
+- Login locks for 15 minutes after 5 wrong passwords. It gives the same answer for an unknown username and a wrong password.
+- Sessions last 8 hours. Deactivating an account, changing its role or resetting its password signs it out everywhere at once.
+- Roles are always taken from the signed login token and checked on the server.
+- All database queries use parameters (no SQL injection). Inputs are validated and errors are shown in plain language.
+- Security headers are set, CORS is limited to `CORS_ORIGINS`, and exports are protected against spreadsheet formula injection.
+- **Data Privacy Act (RA 10173):** customer names and mobile numbers are only visible to logged-in staff and are used only to process orders. Money exports are limited to the Owner and Admin. Deactivate accounts when staff leave.
+
+## Troubleshooting
+
+| Message | Fix |
+|---|---|
+| `JWT_SECRET is not set` | Copy `.env.example` to `.env` and set `JWT_SECRET`. |
+| `CLOUD SCHEMA IS OUT OF DATE` | Run `npm run migrate`. |
+| `Neon closed the idle real-time connection` | Normal: Neon sleeps when idle and the app reconnects by itself. |
+| Forgot a password | An Owner/Admin uses **Accounts → Reset password**. If nobody can log in, run `npm run create-admin` with a new username. |
+| "Too many wrong passwords" | Wait 15 minutes, or restart the backend. |
+| The browser can't reach the API | Check that the backend is running, `VITE_API_URL` in `Frontend/.env`, and `CORS_ORIGINS` in `Backend/.env`. |
