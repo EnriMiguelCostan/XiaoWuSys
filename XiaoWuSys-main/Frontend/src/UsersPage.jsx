@@ -17,7 +17,7 @@ const ROLE_HELP = {
 const EMPTY_NEW = { username: '', password: '', role: 'Staff' };
 
 // Same rule as the server: 8+ characters with a letter and a number
-export const passwordHint = (pw) => {
+const passwordHint = (pw) => {
   if (!pw) return '';
   if (pw.length < 8) return `${pw.length} of 8 characters`;
   if (!/[A-Za-z]/.test(pw) || !/\d/.test(pw)) return 'Add at least one letter and one number';
