@@ -33,9 +33,10 @@ const migrationFiles = () => fs.readdirSync(MIGRATIONS).filter((f) => f.endsWith
 
 describe('Database migrations on real PostgreSQL', { skip }, () => {
   let pool;
-  const insertOrder = (client, id, created) => client.query(
+  // legacy: before migration 007 there is no tracking_no column to return
+  const insertOrder = (client, id, created, { legacy = false } = {}) => client.query(
     `INSERT INTO order_profiles (order_id, customer_id, date_created, production_deadline, production_status)
-     VALUES ($1, 'c-1', $2, '2027-12-31 00:00:00', 'Pending') RETURNING tracking_no`, [id, created]);
+     VALUES ($1, 'c-1', $2, '2027-12-31 00:00:00', 'Pending')${legacy ? '' : ' RETURNING tracking_no'}`, [id, created]);
   const numbers = async () => Object.fromEntries((await pool.query(
     'SELECT order_id, tracking_no FROM order_profiles ORDER BY order_id')).rows.map((r) => [r.order_id, r.tracking_no]));
 
@@ -49,10 +50,10 @@ describe('Database migrations on real PostgreSQL', { skip }, () => {
     await pool.query("INSERT INTO users (user_id, username, password_hash, role) VALUES ('u-owner', 'owner', 'x', 'Owner')");
     await pool.query("INSERT INTO customers (customer_id, full_name) VALUES ('c-1', 'Agdao NHS')");
     // date_created is UTC; the shop (Asia/Manila) is 8 hours ahead
-    await insertOrder(pool, 'old-mar', '2026-03-01 00:00:00');
-    await insertOrder(pool, 'old-jan', '2026-01-15 00:00:00');
-    await insertOrder(pool, 'old-dec31', '2025-12-31 15:59:59'); // 23:59:59 in Manila: still 2025
-    await insertOrder(pool, 'old-newyear', '2025-12-31 16:00:00'); // 00:00 Jan 1 in Manila: 2026
+    await insertOrder(pool, 'old-mar', '2026-03-01 00:00:00', { legacy: true });
+    await insertOrder(pool, 'old-jan', '2026-01-15 00:00:00', { legacy: true });
+    await insertOrder(pool, 'old-dec31', '2025-12-31 15:59:59', { legacy: true }); // 23:59:59 in Manila: still 2025
+    await insertOrder(pool, 'old-newyear', '2025-12-31 16:00:00', { legacy: true }); // 00:00 Jan 1 in Manila: 2026
   });
   after(async () => { if (pool) await pool.end(); });
 
