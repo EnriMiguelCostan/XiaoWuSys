@@ -1,0 +1,13 @@
+# Dependencies (install with npm install inside Backend/ and Frontend/)
+node_modules/
+
+# Secrets and local databases
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+
+# OS / editor
+.DS_Store
+Thumbs.db

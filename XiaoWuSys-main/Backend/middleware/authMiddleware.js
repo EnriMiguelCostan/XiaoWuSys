@@ -1,53 +1,44 @@
 const jwt = require('jsonwebtoken');
+const { isTokenRevoked } = require('../services/sessions');
 
+// Verifies the "Authorization: Bearer <token>" header and attaches { user_id, role } as req.user.
+// Tokens issued before an account was deactivated / had its password reset are rejected.
 const verifyToken = (req, res, next) => {
-  // 1. Look for the token in the headers
   const authHeader = req.header('Authorization');
-  
-  // 2. Check if the header exists and is formatted correctly ("Bearer <token>")
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Access denied. No token provided.' });
+    return res.status(401).json({ error: 'NOT_LOGGED_IN', message: 'Please log in to continue.' });
   }
 
-  // 3. Extract just the token string
-  const token = authHeader.split(' ')[1];
-
+  const token = authHeader.slice(7);
   try {
-    // 4. Verify the token using your secret key from the .env file
-    const verified = jwt.verify(token, process.env.JWT_SECRET);
-    
-    // 5. Attach the decoded user data (user_id, role) to the request object
+    const verified = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+    if (isTokenRevoked(verified)) {
+      return res.status(401).json({ error: 'SESSION_ENDED', message: 'Your session has ended. Please log in again.' });
+    }
     req.user = verified;
-    
-    // 6. Grant access to the route
     next();
   } catch (error) {
-    console.error('❌ Token Verification Error:', error.message);
-    res.status(401).json({ error: 'Invalid or expired token.' });
+    const expired = error && error.name === 'TokenExpiredError';
+    res.status(401).json({
+      error: expired ? 'SESSION_EXPIRED' : 'INVALID_SESSION',
+      message: expired ? 'Your session has expired. Please log in again.' : 'Your session is not valid. Please log in again.'
+    });
   }
 };
 
-// ==========================================
-// THE ROLE GUARD
-// ==========================================
-const requireRole = (allowedRoles) => {
-  return (req, res, next) => {
-    // 1. Check if a user exists (verifyToken must run first!)
-    if (!req.user) {
-      return res.status(401).json({ error: 'Access denied. Please log in.' });
-    }
-
-    // 2. Check if the user's role is inside the allowed list
-    if (!allowedRoles.includes(req.user.role)) {
-      return res.status(403).json({ 
-        error: `Forbidden. Your role (${req.user.role}) does not have permission for this action.` 
-      });
-    }
-
-    // 3. Role is approved, grant access!
-    next();
-  };
+// Role guard: verifyToken must run first. The role always comes from the verified token.
+const requireRole = (allowedRoles) => (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ error: 'NOT_LOGGED_IN', message: 'Please log in to continue.' });
+  }
+  if (!allowedRoles.includes(req.user.role)) {
+    return res.status(403).json({
+      error: 'FORBIDDEN',
+      message: 'Your account does not have permission to do this. Please ask an Owner or Admin.',
+      role: req.user.role
+    });
+  }
+  next();
 };
 
-// Export BOTH functions in an object
 module.exports = { verifyToken, requireRole };

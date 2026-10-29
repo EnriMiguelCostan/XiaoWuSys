@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { RefreshCw, Search, CloudOff, TriangleAlert, PackagePlus, X, Plus, Minus, Pencil, Trash2, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react';
-import { createApi, errorText, peso } from './api';
+import { RefreshCw, Search, CloudOff, TriangleAlert, PackagePlus, X, Plus, Minus, Pencil, Trash2, ArrowUp, ArrowDown, ArrowUpDown, Download } from 'lucide-react';
+import { createApi, errorText, peso, downloadFile } from './api';
+import InventoryImport from './InventoryImport';
 import { ResultDialog, ConfirmDialog } from './Dialogs';
 import RecycleBin from './RecycleBin';
 
@@ -37,7 +38,9 @@ const LIVE_META = {
   disconnected: { dot: '#94a3b8', text: 'Not live · refreshing every 30s' }
 };
 
-const EMPTY_NEW_ITEM = { item_name: '', item_category: '', quantity_available: '', minimum_threshold: '', unit_cost: '' };
+const EMPTY_NEW_ITEM = { item_name: '', item_category: '', unit: 'pcs', supplier: '', quantity_available: '', minimum_threshold: '', unit_cost: '' };
+// Suggestions only: any unit can be typed
+const COMMON_UNITS = ['pcs', 'pack', 'ream', 'box', 'roll', 'meter', 'yard', 'bottle', 'pad', 'set', 'sheet'];
 const EMPTY_ADJUST = { inventory_id: '', action: 'add', quantity: '', reason: 'taken' };
 
 // '5' -> 5, '' -> null, '2.5' / '-1' / 'abc' -> NaN
@@ -201,7 +204,8 @@ export default function InventoryCatalog({
 
     setPanelBusy(true);
     const { ok, status: code, data } = await api('POST', '/inventory', {
-      item_name: name, item_category: cat, quantity_available: qty ?? 0, minimum_threshold: min ?? 0, unit_cost: cost
+      item_name: name, item_category: cat, quantity_available: qty ?? 0, minimum_threshold: min ?? 0, unit_cost: cost,
+      unit: newItem.unit.trim() || 'pcs', supplier: newItem.supplier.trim() || undefined
     });
     setPanelBusy(false);
 
@@ -215,9 +219,9 @@ export default function InventoryCatalog({
     setResult({
       type: 'success',
       title: 'Item added',
-      message: `"${data.item?.item_name || name}" was added with ${data.item?.quantity_available ?? qty ?? 0} in stock.${offlineSuffix(data)}`
+      message: `"${data.item?.item_name || name}" was added with ${data.item?.quantity_available ?? qty ?? 0} ${data.item?.unit || ''} in stock.${offlineSuffix(data)}`
     });
-    setNewItem((prev) => ({ ...EMPTY_NEW_ITEM, item_category: prev.item_category })); // keep category for the next entry
+    setNewItem((prev) => ({ ...EMPTY_NEW_ITEM, item_category: prev.item_category, unit: prev.unit })); // keep category/unit for the next entry
     onRefresh();
   };
 
@@ -261,7 +265,9 @@ export default function InventoryCatalog({
       item_name: item.item_name,
       item_category: item.item_category,
       minimum_threshold: String(item.minimum_threshold),
-      unit_cost: String(item.unit_cost)
+      unit_cost: String(item.unit_cost),
+      unit: item.unit || 'pcs',
+      supplier: item.supplier || ''
     }
   });
 
@@ -285,6 +291,10 @@ export default function InventoryCatalog({
     if (cat !== item.item_category) body.item_category = cat;
     if (min !== item.minimum_threshold) body.minimum_threshold = min;
     if (cost !== item.unit_cost) body.unit_cost = cost;
+    const unit = form.unit.trim() || 'pcs';
+    const supplier = form.supplier.trim();
+    if (unit !== (item.unit || 'pcs')) body.unit = unit;
+    if (supplier !== (item.supplier || '')) body.supplier = supplier || null;
     if (Object.keys(body).length === 0) {
       setEditing(null);
       return setResult({ type: 'warning', title: 'No changes', message: 'Nothing was changed, so nothing was saved.' });
@@ -318,6 +328,13 @@ export default function InventoryCatalog({
     onRefresh();
   };
 
+  const exportExcel = async () => {
+    const r = await downloadFile({ apiBase, token, path: '/reports/export/inventory.csv', onUnauthorized });
+    setResult(r.ok
+      ? { type: 'success', title: 'Download ready', message: `${r.name} was downloaded. Open it with Excel or Google Sheets.` }
+      : { type: 'error', title: 'Download failed', message: r.message });
+  };
+
   const selectedAdjustItem = items.find((i) => i.inventory_id === adjust.inventory_id);
   const binCount = summary.recycle_bin || 0;
 
@@ -326,6 +343,9 @@ export default function InventoryCatalog({
       {/* Category suggestions for the Add and Edit forms */}
       <datalist id="inventory-category-options">
         {categories.map((c) => <option key={c} value={c} />)}
+      </datalist>
+      <datalist id="inventory-unit-options">
+        {COMMON_UNITS.map((u) => <option key={u} value={u} />)}
       </datalist>
 
       {/* Header: title, freshness, actions */}
@@ -356,6 +376,9 @@ export default function InventoryCatalog({
               {binCount > 0 && <span style={s.binBadge}>{binCount}</span>}
             </button>
           )}
+          <button type="button" onClick={exportExcel} style={s.refreshBtn} title="Download the inventory as a spreadsheet (CSV)">
+            <Download size={16} /> Export to Excel
+          </button>
           <button type="button" onClick={onRefresh} style={s.refreshBtn} disabled={loading} aria-label="Refresh inventory">
             <RefreshCw size={16} /> {loading ? 'Refreshing…' : 'Refresh'}
           </button>
@@ -392,9 +415,16 @@ export default function InventoryCatalog({
               style={panelTab === 'adjust' ? s.tabActive : s.tab}>
               Add / Subtract Stock
             </button>
+            <button type="button" role="tab" aria-selected={panelTab === 'import'} onClick={() => setPanelTab('import')}
+              style={panelTab === 'import' ? s.tabActive : s.tab}>
+              Import from Excel
+            </button>
           </div>
 
-          {panelTab === 'new' ? (
+          {panelTab === 'import' ? (
+            <InventoryImport apiBase={apiBase} token={token} onUnauthorized={onUnauthorized} items={items} styles={s}
+              onDone={(r) => { setResult(r); onRefresh(); }} />
+          ) : panelTab === 'new' ? (
             <form onSubmit={handleAddItem} style={s.formGrid}>
               <label style={{ ...s.field, gridColumn: '1 / -1' }}>
                 <span style={s.fieldLabel}>Item name *</span>
@@ -413,6 +443,16 @@ export default function InventoryCatalog({
                   onChange={(e) => setNewItem({ ...newItem, item_category: e.target.value })}
                   style={s.input}
                 />
+              </label>
+              <label style={s.field}>
+                <span style={s.fieldLabel}>Unit (what 1 means)</span>
+                <input type="text" value={newItem.unit} maxLength={30} list="inventory-unit-options" placeholder="pcs, pack, ream…"
+                  onChange={(e) => setNewItem({ ...newItem, unit: e.target.value })} style={s.input} />
+              </label>
+              <label style={s.field}>
+                <span style={s.fieldLabel}>Supplier (optional)</span>
+                <input type="text" value={newItem.supplier} maxLength={255} placeholder="e.g. Quaff PH"
+                  onChange={(e) => setNewItem({ ...newItem, supplier: e.target.value })} style={s.input} />
               </label>
               <label style={s.field}>
                 <span style={s.fieldLabel}>Quantity in stock</span>
@@ -567,13 +607,19 @@ export default function InventoryCatalog({
                       {item.sync_status !== 'synced' && <span style={s.pending}>Pending sync</span>}
                     </>
                   ),
-                  category: <span style={s.category}>{item.item_category}</span>,
+                  category: (
+                    <>
+                      <span style={s.category}>{item.item_category}</span>
+                      {item.supplier && <span style={s.tdSub}>{item.supplier}</span>}
+                    </>
+                  ),
                   status: <span style={{ ...s.badge, background: meta.bg, color: meta.color }}>{meta.label}</span>,
-                  available: item.quantity_available.toLocaleString(),
+                  available: <>{item.quantity_available.toLocaleString()} <span style={s.unit}>{item.unit || 'pcs'}</span></>,
                   reserved: item.quantity_reserved.toLocaleString(),
                   free: (
                     <>
                       <strong style={{ color: meta.color }}>{item.quantity_available_net.toLocaleString()}</strong>
+                      {narrow && <span style={s.unit}> {item.unit || 'pcs'}</span>}
                       {narrow && <span style={s.tdSub}>of {item.quantity_available.toLocaleString()} on hand</span>}
                     </>
                   ),
@@ -655,6 +701,16 @@ export default function InventoryCatalog({
                 <span style={s.fieldLabel}>Category *</span>
                 <input type="text" maxLength={100} required list="inventory-category-options" value={editing.form.item_category} style={s.input}
                   onChange={(e) => setEditing({ ...editing, form: { ...editing.form, item_category: e.target.value } })} />
+              </label>
+              <label style={s.field}>
+                <span style={s.fieldLabel}>Unit</span>
+                <input type="text" maxLength={30} required list="inventory-unit-options" value={editing.form.unit} style={s.input}
+                  onChange={(e) => setEditing({ ...editing, form: { ...editing.form, unit: e.target.value } })} />
+              </label>
+              <label style={s.field}>
+                <span style={s.fieldLabel}>Supplier</span>
+                <input type="text" maxLength={255} value={editing.form.supplier} style={s.input} placeholder="(none)"
+                  onChange={(e) => setEditing({ ...editing, form: { ...editing.form, supplier: e.target.value } })} />
               </label>
               <label style={s.field}>
                 <span style={s.fieldLabel}>Low-stock alert at</span>
@@ -788,6 +844,7 @@ const s = {
   iconBtn: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '2rem', height: '2rem', background: '#fff', border: '1px solid #c7d2fe', borderRadius: '0.375rem', cursor: 'pointer', color: '#4338ca' },
   iconBtnDanger: { border: '1px solid #fecaca', color: '#b91c1c' },
   // Full title is shown (wraps) so long product names stay readable
+  unit: { fontSize: '0.75rem', color: '#64748b', fontWeight: 'normal' },
   itemName: { display: 'block', fontSize: '0.92rem', fontWeight: 'bold', color: '#0f172a', lineHeight: 1.3, overflowWrap: 'anywhere' },
   category: { display: 'block', fontSize: '0.8rem', color: '#64748b', overflowWrap: 'anywhere' },
   badge: { display: 'inline-block', whiteSpace: 'nowrap', padding: '0.2rem 0.45rem', borderRadius: '0.25rem', fontSize: '0.65rem', fontWeight: 'bold', textTransform: 'uppercase' },

@@ -162,11 +162,14 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
   const quantity_available = v.nonNegativeInt(body.quantity_available, 'quantity_available', 0);
   const minimum_threshold = v.nonNegativeInt(body.minimum_threshold, 'minimum_threshold', 0);
   const unit_cost = v.nonNegativeMoney(body.unit_cost, 'unit_cost', { required: false, defaultValue: 0 });
+  const unit = v.optionalString(body.unit, 'unit', 30) || 'pcs';
+  const supplier = v.optionalString(body.supplier, 'supplier', 255);
   if (v.failed()) return v.send(res);
 
   const item_name = cleanName(rawName);
   const inventory_id = crypto.randomUUID();
-  const values = [inventory_id, item_name, cleanName(item_category), quantity_available, minimum_threshold, unit_cost];
+  const values = [inventory_id, item_name, cleanName(item_category), quantity_available, minimum_threshold, unit_cost,
+    cleanName(unit), supplier ? cleanName(supplier) : null];
 
   try {
     const result = await cloudFirst('cloud',
@@ -175,8 +178,8 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
           || (await findDuplicateLocal(req.localDb, item_name, { pendingOnly: true }).catch(() => null));
         if (dup) throw duplicateError(dup);
         const { rows } = await client.query(
-          `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${selectList('inventory_items', 'pg')}`,
+          `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, unit, supplier)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING ${selectList('inventory_items', 'pg')}`,
           values
         );
         const record = serialize('inventory_items', rows[0]);
@@ -187,8 +190,8 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
         const dup = await findDuplicateLocal(tx, item_name);
         if (dup) throw duplicateError(dup);
         await sqliteRun(tx,
-          `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, sync_status, last_modified)
-           VALUES (?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+          `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, unit, supplier, sync_status, last_modified)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
           values);
         const record = await readLocal(tx, 'inventory_items', inventory_id);
         await auditLocal(tx, req.user, inventory_id, 'created', item_name, { item: snapshotOf(record) });
@@ -213,12 +216,12 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
 // ==========================================
 // 1b. EDIT ITEM DETAILS (Catalog card "Edit")
 // PATCH /api/inventory/:inventory_id
-// Body (any of): { item_name, item_category, minimum_threshold, unit_cost, expected_version? }
+// Body (any of): { item_name, item_category, minimum_threshold, unit_cost, unit, supplier, expected_version? }
 // Quantities are changed through /adjust and /loss so every stock movement is traceable.
 // -> 200 { message, source, changed, item }
 //    404 not found / in bin | 409 DUPLICATE_ITEM | 409 EDIT_CONFLICT (someone else edited it first)
 // ==========================================
-const EDITABLE_FIELDS = ['item_name', 'item_category', 'minimum_threshold', 'unit_cost'];
+const EDITABLE_FIELDS = ['item_name', 'item_category', 'minimum_threshold', 'unit_cost', 'unit', 'supplier'];
 
 router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
   const { inventory_id } = req.params;
@@ -236,6 +239,9 @@ router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
     }
   }
   if (body.unit_cost !== undefined) updates.unit_cost = v.nonNegativeMoney(body.unit_cost, 'unit_cost');
+  if (body.unit !== undefined) updates.unit = v.requiredString(body.unit, 'unit', 30);
+  // supplier may be cleared with null or ''
+  if (body.supplier !== undefined) updates.supplier = body.supplier === null ? null : v.optionalString(body.supplier, 'supplier', 255);
   if (body.expected_version !== undefined && body.expected_version !== null && typeof body.expected_version !== 'string') {
     v.errors.push({ field: 'expected_version', message: 'expected_version must be the string returned as "version".' });
   }
@@ -245,6 +251,8 @@ router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
   if (v.failed()) return v.send(res);
   if (updates.item_name) updates.item_name = cleanName(updates.item_name);
   if (updates.item_category) updates.item_category = cleanName(updates.item_category);
+  if (updates.unit) updates.unit = cleanName(updates.unit);
+  if (updates.supplier) updates.supplier = cleanName(updates.supplier);
   const expected_version = body.expected_version || null;
 
   const diff = (current) => Object.keys(updates).filter((f) => updates[f] !== current[f]);
@@ -574,7 +582,11 @@ router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => 
        RETURNING ${selectList('material_loss', 'pg')}`,
       [loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost, item.rows[0].raw_unit_cost]
     );
-    return { source: 'cloud', loss: serialize('material_loss', loss.rows[0]), item: serialize('inventory_items', item.rows[0]) };
+    const record = serialize('inventory_items', item.rows[0]);
+    await auditCloud(client, req.user, inventory_id, 'stock_subtracted', record.item_name, {
+      kind: 'loss', quantity: quantity_lost, previous_quantity: stock.rows[0].quantity_available, new_quantity: record.quantity_available, reason: loss_reason
+    });
+    return { source: 'cloud', loss: serialize('material_loss', loss.rows[0]), item: record };
   });
 
   // ---- Offline: same transaction on a dedicated SQLite connection ----
@@ -605,11 +617,11 @@ router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => 
        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
       [loss_id, order_id, inventory_id, quantity_lost, loss_reason, cost, itemIsLocalOnly ? 0 : quantity_lost]);
 
-    return {
-      source: 'local',
-      loss: await readLocal(tx, 'material_loss', loss_id),
-      item: await readLocal(tx, 'inventory_items', inventory_id)
-    };
+    const record = await readLocal(tx, 'inventory_items', inventory_id);
+    await auditLocal(tx, req.user, inventory_id, 'stock_subtracted', record.item_name, {
+      kind: 'loss', quantity: quantity_lost, previous_quantity: stock.quantity_available, new_quantity: record.quantity_available, reason: loss_reason
+    });
+    return { source: 'local', loss: await readLocal(tx, 'material_loss', loss_id), item: record };
   });
 
   try {

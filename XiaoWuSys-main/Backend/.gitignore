@@ -4,6 +4,7 @@ node_modules/
 # Environment variables (CRITICAL: Keeps your database password safe)
 .env
 .env.*
+!.env.example
 
 # Local SQLite Offline Cache
 *.db

@@ -45,7 +45,7 @@ const ENTITIES = {
     fields: {
       inventory_id: 'text', item_name: 'text', item_category: 'text', quantity_available: 'int',
       quantity_reserved: 'int', minimum_threshold: 'int', unit_cost: 'money',
-      deleted_at: 'timestamp', deleted_by: 'text'
+      unit: 'text', supplier: 'text', deleted_at: 'timestamp', deleted_by: 'text'
     }
   },
   customers: {
