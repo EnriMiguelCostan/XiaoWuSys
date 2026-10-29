@@ -22,7 +22,7 @@ const LOCAL_SYNC_COLUMNS = ['dirty_fields', 'cloud_last_modified', 'sync_conflic
 //                                    0 when the reduction is already baked into an offline-created item
 //   inventory_items.deleted_at/deleted_by/purged_at  Recycle Bin (mirrors Neon, migration 004)
 //   order_profiles.stock_reserved                    whether the order holds a stock reservation
-//   inventory_items.unit/supplier, users.is_active/tokens_valid_after   mirror migration 005
+//   inventory_items.unit/supplier, users.is_active/tokens_valid_after   mirror migration 006
 //   order_profiles.approved_by/approved_at           job order approval (mirrors Neon, migration 005)
 const TABLE_EXTRA_COLUMNS = {
   material_loss: [['cloud_stock_delta', 'INTEGER']],

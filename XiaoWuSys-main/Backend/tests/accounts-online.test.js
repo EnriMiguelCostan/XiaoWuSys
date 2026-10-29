@@ -18,7 +18,7 @@ const PASSWORD = 'XiaoMei2026';
 const createUsersCloud = (users) => {
   const cutoffText = (ms) => new Date(Number(ms)).toISOString().replace('T', ' ').replace('Z', '');
   const copy = (u) => ({ ...u });
-  return {
+  const pool = {
     query: async (sql, p = []) => {
       const q = sql.replace(/\s+/g, ' ').trim();
       if (/^SELECT .* FROM users WHERE username = \$1/.test(q)) return { rows: [...users.values()].filter((u) => u.username === p[0]).map(copy) };
@@ -33,18 +33,34 @@ const createUsersCloud = (users) => {
         users.set(p[0], u);
         return { rows: [copy(u)] };
       }
-      if (q.startsWith('UPDATE users SET role = $2, is_active = $3')) {
-        Object.assign(users.get(p[0]), { role: p[1], is_active: p[2], tokens_valid_after: cutoffText(p[3]) });
-        return { rows: [copy(users.get(p[0]))] };
+      // PATCH /users/:id locks the target + every active manager (FOR UPDATE)
+      if (/^SELECT .* FROM users WHERE user_id = \$1 OR \(is_active = TRUE AND role = ANY\(\$2::text\[\]\)\) ORDER BY user_id FOR UPDATE$/.test(q)) {
+        return {
+          rows: [...users.values()].filter((u) => u.user_id === p[0] || (u.is_active && p[1].includes(u.role)))
+            .sort((a, b) => a.user_id.localeCompare(b.user_id)).map(copy)
+        };
       }
+      if (q.startsWith('UPDATE users SET role = $2, is_active = $3')) {
+        // Same SQL guard as the route: removing a manager needs another active manager
+        const [id, role, isActive, at, managerRoles] = p;
+        const staysManager = isActive === true && (managerRoles || []).includes(role);
+        const other = [...users.values()].some((u) => u.user_id !== id && u.is_active && (managerRoles || []).includes(u.role));
+        if (!users.has(id) || (managerRoles && !staysManager && !other)) return { rows: [], rowCount: 0 };
+        Object.assign(users.get(id), { role, is_active: isActive, tokens_valid_after: cutoffText(at) });
+        return { rows: [copy(users.get(id))], rowCount: 1 };
+      }
+      if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(q)) return { rows: [] };
       if (q.startsWith('UPDATE users SET password_hash = $2')) {
         Object.assign(users.get(p[0]), { password_hash: p[1], tokens_valid_after: cutoffText(p[2]) });
         return { rows: [copy(users.get(p[0]))] };
       }
       throw new Error(`unexpected SQL in test: ${q.slice(0, 80)}`);
     },
-    connect: async () => { throw new Error('transactions are not used by account routes'); }
+    // withPgTransaction: one "client" that runs on the same in-memory table. Calls are
+    // already sequential in this single-process test; the real lock is tested on Postgres.
+    connect: async () => ({ query: (sql, p) => pool.query(sql, p), release: () => {} })
   };
+  return pool;
 };
 
 describe('Account management (online)', () => {

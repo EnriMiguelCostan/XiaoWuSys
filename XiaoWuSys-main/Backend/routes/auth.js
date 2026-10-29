@@ -26,7 +26,7 @@ const { verifyToken, requireRole } = require('../middleware/authMiddleware');
 const { isConnectionError } = require('../utils/dbErrors');
 const { createLoginLimiter } = require('../utils/rateLimit');
 const { createValidator } = require('../utils/validation');
-const { sqliteGet, sqliteAll, sqliteRun } = require('../services/records');
+const { sqliteGet, sqliteAll, sqliteRun, withPgTransaction } = require('../services/records');
 const { revokeUser, reactivateUser, isActiveValue, CUTOFF_SQL } = require('../services/sessions');
 
 const ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
@@ -270,16 +270,11 @@ const loadManageable = async (req, res) => {
   return target;
 };
 
-// Would this change leave nobody able to manage accounts?
-const leavesNoManager = async (pgPool, target, { role, is_active }) => {
-  const wasManager = MANAGER_ROLES.includes(target.role) && isActiveValue(target.is_active);
-  const staysManager = MANAGER_ROLES.includes(role) && is_active;
-  if (!wasManager || staysManager) return false;
-  const { rows } = await pgPool.query(
-    'SELECT COUNT(*)::int AS n FROM users WHERE is_active = TRUE AND role = ANY($1::text[]) AND user_id <> $2',
-    [MANAGER_ROLES, target.user_id]);
-  return rows[0].n === 0;
-};
+// Business-rule failure inside an account transaction: rolled back, then sent as-is
+class AccountRejected extends Error {
+  constructor(status, body) { super(body.error); this.status = status; this.body = body; }
+}
+const reject = (status, error, message) => new AccountRejected(status, { error, message });
 
 // ==========================================
 // CHANGE ROLE / ACTIVATE / DEACTIVATE
@@ -299,34 +294,78 @@ router.patch('/users/:user_id', requireRole(MANAGER_ROLES), async (req, res) => 
     return fail(res, 400, 'CANNOT_CHANGE_SELF', 'You cannot change your own role or deactivate your own account. Ask another Owner or Admin.');
   }
 
-  try {
-    const target = await loadManageable(req, res);
-    if (!target) return;
-    const role = body.role ?? target.role;
-    const is_active = body.is_active ?? isActiveValue(target.is_active);
-    if (role === target.role && is_active === isActiveValue(target.is_active)) {
-      return res.status(200).json({ message: 'Nothing changed.', user: publicUser(target) });
-    }
-    if (await leavesNoManager(req.pgPool, target, { role, is_active })) {
-      return fail(res, 409, 'LAST_MANAGER', 'This is the last active Owner/Admin account. Create or activate another one first.');
-    }
+  const v = createValidator();
+  v.id(req.params.user_id, 'user_id');
+  if (v.failed()) return v.send(res);
+  const targetId = req.params.user_id;
 
-    const at = Date.now();
-    const { rows } = await req.pgPool.query(
-      `UPDATE users SET role = $2, is_active = $3, tokens_valid_after = ${CUTOFF_SQL('$4')} WHERE user_id = $1 RETURNING ${USER_COLUMNS}`,
-      [target.user_id, role, is_active, at]);
+  try {
+    // One transaction: lock, check, update. Two managers removing each other at the same time
+    // are serialized by the row locks, so the second one sees the first change and is refused.
+    const result = await withPgTransaction(req.pgPool, async (client) => {
+      // Lock every active Owner/Admin AND the target, in a fixed order (no deadlocks).
+      // The caller's own row is included: its count must reflect concurrent deactivations.
+      const locked = await client.query(
+        `SELECT ${USER_COLUMNS} FROM users
+          WHERE user_id = $1 OR (is_active = TRUE AND role = ANY($2::text[]))
+          ORDER BY user_id FOR UPDATE`,
+        [targetId, MANAGER_ROLES]);
+      const target = locked.rows.find((u) => u.user_id === targetId);
+      if (!target) throw reject(404, 'USER_NOT_FOUND', 'This account no longer exists. Please refresh the list.');
+      if (target.role === 'Owner' && req.user.role !== 'Owner') {
+        throw reject(403, 'FORBIDDEN', 'Only an Owner can change an Owner account.');
+      }
+      const role = body.role ?? target.role;
+      const is_active = body.is_active ?? isActiveValue(target.is_active);
+      if (role === target.role && is_active === isActiveValue(target.is_active)) {
+        return { unchanged: true, target };
+      }
+
+      // At least one active Owner/Admin must remain, counted on the LOCKED rows
+      const wasManager = MANAGER_ROLES.includes(target.role) && isActiveValue(target.is_active);
+      const staysManager = MANAGER_ROLES.includes(role) && is_active;
+      const otherManagers = locked.rows.filter((u) => u.user_id !== targetId
+        && isActiveValue(u.is_active) && MANAGER_ROLES.includes(u.role)).length;
+      if (wasManager && !staysManager && otherManagers === 0) {
+        throw reject(409, 'LAST_MANAGER', 'This is the last active Owner/Admin account. Create or activate another one first.');
+      }
+
+      const at = Date.now();
+      // Guarded in SQL too: the update only applies if another active manager still exists
+      // when it would remove one (defence in depth, never only in JS).
+      const updated = await client.query(
+        `UPDATE users SET role = $2, is_active = $3, tokens_valid_after = ${CUTOFF_SQL('$4')}
+          WHERE user_id = $1
+            AND ($3 = TRUE AND $2 = ANY($5::text[])
+                 OR EXISTS (SELECT 1 FROM users m WHERE m.user_id <> $1 AND m.is_active = TRUE AND m.role = ANY($5::text[])))
+          RETURNING ${USER_COLUMNS}`,
+        [targetId, role, is_active, at, MANAGER_ROLES]);
+      if (updated.rowCount !== 1) {
+        throw reject(409, 'LAST_MANAGER', 'This is the last active Owner/Admin account. Create or activate another one first.');
+      }
+      return { target, row: updated.rows[0], role, is_active, at };
+    });
+
+    if (result.unchanged) return res.status(200).json({ message: 'Nothing changed.', user: publicUser(result.target) });
+
+    // In-memory sign-out list and offline copy: only after the transaction committed
+    const { target, row, role, is_active, at } = result;
     if (!is_active) revokeUser(target.user_id, { deactivated: true });
     else if (!isActiveValue(target.is_active)) reactivateUser(target.user_id, at);
     else revokeUser(target.user_id, { at });
-    await cacheUserLocally(req.localDb, rows[0]);
+    await cacheUserLocally(req.localDb, row);
 
     const what = !is_active ? 'deactivated' : !isActiveValue(target.is_active) ? 'reactivated' : `changed to ${role}`;
     console.log(`👤 ${req.user.role} ${req.user.user_id}: account ${target.username} ${what}`);
     res.status(200).json({
       message: `"${target.username}" was ${what}.${is_active ? ' They need to log in again.' : ' They have been signed out.'}`,
-      user: publicUser(rows[0])
+      user: publicUser(row)
     });
   } catch (err) {
+    if (err instanceof AccountRejected) return res.status(err.status).json(err.body);
+    if (err.commitUnknown) {
+      return fail(res, 503, 'COMMIT_UNKNOWN', 'The connection dropped while saving. Refresh the list to see whether the change was applied.');
+    }
     if (isConnectionError(err)) return needsCloud(res);
     console.error('✗ Update user error:', err.message);
     fail(res, 500, 'INTERNAL_ERROR', 'Something went wrong. The account was not changed.');
