@@ -24,12 +24,14 @@ const LOCAL_SYNC_COLUMNS = ['dirty_fields', 'cloud_last_modified', 'sync_conflic
 //   order_profiles.stock_reserved                    whether the order holds a stock reservation
 //   inventory_items.unit/supplier, users.is_active/tokens_valid_after   mirror migration 006
 //   order_profiles.approved_by/approved_at           job order approval (mirrors Neon, migration 005)
+//   order_profiles.tracking_no                       order number from the cloud (migration 007)
 const TABLE_EXTRA_COLUMNS = {
   material_loss: [['cloud_stock_delta', 'INTEGER']],
   inventory_items: [['deleted_at', 'TEXT'], ['deleted_by', 'TEXT'], ['purged_at', 'TEXT'],
                     ['unit', "TEXT NOT NULL DEFAULT 'pcs'"], ['supplier', 'TEXT']],
   users: [['is_active', 'INTEGER NOT NULL DEFAULT 1'], ['tokens_valid_after', 'TEXT']],
-  order_profiles: [['stock_reserved', 'INTEGER NOT NULL DEFAULT 0'], ['approved_by', 'TEXT'], ['approved_at', 'TEXT']]
+  order_profiles: [['stock_reserved', 'INTEGER NOT NULL DEFAULT 0'], ['approved_by', 'TEXT'], ['approved_at', 'TEXT'],
+                   ['tracking_no', 'TEXT']]
 };
 
 const all = (db, sql, params = []) =>

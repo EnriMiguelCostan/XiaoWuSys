@@ -2,6 +2,8 @@
 // ACCOUNTS
 //   POST  /api/auth/login                          everyone (rate limited; works offline for
 //                                                   accounts that synced to this computer)
+//   GET   /api/auth/me                             any logged-in user: role + capabilities
+//   POST  /api/auth/logout                         any logged-in user: ends THIS device's session
 //   POST  /api/auth/change-password                any logged-in user (own password)
 //   GET   /api/auth/users                          Owner, Admin
 //   POST  /api/auth/register                       Owner, Admin (create an account)
@@ -27,10 +29,12 @@ const { isConnectionError } = require('../utils/dbErrors');
 const { createLoginLimiter } = require('../utils/rateLimit');
 const { createValidator } = require('../utils/validation');
 const { sqliteGet, sqliteAll, sqliteRun, withPgTransaction } = require('../services/records');
-const { revokeUser, reactivateUser, isActiveValue, CUTOFF_SQL } = require('../services/sessions');
+const { revokeUser, reactivateUser, revokeSession, isActiveValue, CUTOFF_SQL } = require('../services/sessions');
+const { capabilitiesFor, ALL_ROLES, rolesWith } = require('../services/domain/permissions');
+const { LOCAL_NOW } = require('../utils/localSync');
 
-const ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
-const MANAGER_ROLES = ['Owner', 'Admin'];
+const ROLES = ALL_ROLES;
+const MANAGER_ROLES = rolesWith('manage_accounts');
 // Sprint 11 / PB 13: an Owner may additionally create other Owners; an Admin cannot.
 const allowedRolesFor = (callerRole) => (callerRole === 'Owner' ? ROLES : ROLES.filter((r) => r !== 'Owner'));
 const MAX_USERNAME_LENGTH = 100; // users.username VARCHAR(100)
@@ -65,7 +69,11 @@ const needsCloud = (res) => fail(res, 503, 'ACCOUNTS_REQUIRE_CLOUD',
   'Accounts can only be created or changed while the system is online. Please try again when the internet is back.');
 
 // ims = issue time in milliseconds, so a sign-out cuts off exactly (iat only has 1-second precision)
-const signToken = (user) => jwt.sign({ user_id: user.user_id, role: user.role, ims: Date.now() }, process.env.JWT_SECRET, { expiresIn: TOKEN_TTL });
+// sid = this device's session id, so "Log out" ends only this session (PB 1)
+const signToken = (user) => jwt.sign(
+  { user_id: user.user_id, role: user.role, ims: Date.now(), sid: crypto.randomUUID() },
+  process.env.JWT_SECRET, { expiresIn: TOKEN_TTL }
+);
 
 const publicUser = (u) => ({
   user_id: u.user_id,
@@ -153,6 +161,7 @@ router.post('/login', async (req, res) => {
       token,
       role: user.role,
       user: publicUser(user),
+      capabilities: capabilitiesFor(user.role), // what the screens may offer this account
       offline
     });
   } catch (error) {
@@ -163,6 +172,68 @@ router.post('/login', async (req, res) => {
 
 // Everything below needs a valid session
 router.use(verifyToken);
+
+// ==========================================
+// WHO AM I -> { user: { user_id, role }, capabilities }
+// The role is the one in the verified token. Screens use the capabilities list to decide
+// which buttons to show; the server still checks every action.
+// ==========================================
+router.get('/me', (req, res) => {
+  res.status(200).json({
+    user: { user_id: req.user.user_id, role: req.user.role },
+    capabilities: capabilitiesFor(req.user.role)
+  });
+});
+
+// ==========================================
+// LOG OUT THIS DEVICE (PB 1) -> { message, revoked, source }
+// Ends the session of the token that sent this request, on the server: the same token is
+// refused from now on (REST and live connection). Other devices of the account stay logged in.
+// Works offline: the sign-out is saved on this computer and pushed to the cloud by the sync.
+// ==========================================
+const utcText = (epochSeconds) => new Date(epochSeconds * 1000).toISOString().slice(0, 19).replace('T', ' ');
+
+router.post('/logout', async (req, res) => {
+  const { sid, user_id, exp } = req.user;
+  // Tokens issued before this feature carry no session id; they simply expire (8 hours at most)
+  if (!sid) return res.status(200).json({ message: 'You have been logged out.', revoked: false });
+
+  const expiresSeconds = Number.isFinite(exp) ? exp : Math.floor(Date.now() / 1000) + 8 * 3600;
+  const expiresAt = utcText(expiresSeconds);
+  let source = 'cloud';
+  try {
+    await req.pgPool.query(
+      `INSERT INTO revoked_sessions (session_id, user_id, expires_at) VALUES ($1, $2, $3)
+       ON CONFLICT (session_id) DO NOTHING`,
+      [sid, user_id, expiresAt]);
+  } catch (err) {
+    // C5: only a real outage is saved for later; anything else is reported
+    if (!isConnectionError(err)) {
+      console.error('✗ Logout error:', err.message);
+      return fail(res, 500, 'INTERNAL_ERROR', 'Something went wrong while logging out. Please try again.');
+    }
+    source = 'local';
+  }
+
+  try {
+    await sqliteRun(req.localDb,
+      `INSERT INTO revoked_sessions (session_id, user_id, expires_at, revoked_at, sync_status, last_modified)
+       VALUES (?, ?, ?, strftime('%Y-%m-%d %H:%M:%S', 'now'), ?, ${LOCAL_NOW})
+       ON CONFLICT (session_id) DO NOTHING`,
+      [sid, user_id, expiresAt, source === 'cloud' ? 'synced' : 'pending_insert']);
+  } catch (err) {
+    // Saved in the cloud already: the local copy only helps after an offline restart
+    if (source === 'local') {
+      console.error('✗ Offline logout could not be saved:', err.message);
+      return fail(res, 500, 'LOCAL_CACHE_ERROR', 'The system is offline and could not save the logout on this computer. Please try again.');
+    }
+    console.error('⚠️ Could not keep a local copy of the logout:', err.message);
+  }
+
+  revokeSession(sid, expiresSeconds * 1000);
+  console.log(`👋 ${user_id} (${req.user.role}) logged out on one device [${source}]`);
+  res.status(200).json({ message: 'You have been logged out on this device.', revoked: true, source });
+});
 
 // ==========================================
 // CHANGE OWN PASSWORD -> { message, token } (a fresh token, so this device stays logged in)

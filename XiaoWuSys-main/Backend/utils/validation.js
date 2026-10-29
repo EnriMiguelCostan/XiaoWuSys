@@ -13,6 +13,7 @@ const INT_MAX = 2147483647;          // Postgres INTEGER
 const MONEY_MAX = 99999999.99;       // NUMERIC(10,2)
 const MOBILE_PATTERN = /^0\d{10}$/;           // e.g. 09171234567
 const ID_PATTERN = /^[A-Za-z0-9_.:@-]{1,50}$/; // matches VARCHAR(50) IDs (UUIDs, 'CUST-001', ...)
+const TRACKING_NO_PATTERN = /^XM-\d{4}-\d{4,9}$/; // order number, e.g. XM-2026-0123 (migration 007)
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Asia/Manila';
 
 const PAYMENT_TYPES = ['Cash', 'GCash', 'Bank Transfer'];
@@ -72,7 +73,7 @@ const FIELD_LABELS = {
   loss_reason: 'Reason', reason: 'Reason', resolution: 'Resolution', status: 'Status', action: 'Action',
   product_type: 'Product type', size: 'Size', custom_name: 'Custom name', custom_number: 'Custom number',
   category: 'Category', stock_status: 'Stock status', search: 'Search', limit: 'Page size', offset: 'Page',
-  sort: 'Sort by', dir: 'Sort direction'
+  sort: 'Sort by', dir: 'Sort direction', tracking_no: 'Order number'
 };
 const labelOf = (field) =>
   FIELD_LABELS[field] || String(field).replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
@@ -132,6 +133,13 @@ const createValidator = () => {
     positiveMoney: (value, field) => money(value, field, { allowZero: false }),
     nonNegativeMoney: (value, field, { required = true, defaultValue } = {}) =>
       money(value, field, { allowZero: true, required, defaultValue }),
+    // Order number like XM-2026-0123 (case and surrounding spaces ignored) -> 'XM-2026-0123'
+    trackingNo: (value, field, { required = true } = {}) => {
+      if (isMissing(value)) return required ? fail(field, 'is required. Please type it in.') : null;
+      const text = typeof value === 'string' ? value.trim().toUpperCase() : '';
+      if (!TRACKING_NO_PATTERN.test(text)) return fail(field, 'must look like XM-2026-0123.');
+      return text;
+    },
     oneOf: (value, field, allowed, { required = true } = {}) => {
       if (isMissing(value)) return required ? fail(field, 'is required. Please choose one.') : undefined;
       if (!allowed.includes(value)) return fail(field, `must be one of these: ${allowed.join(', ')}.`);
@@ -171,6 +179,7 @@ module.exports = {
   PAYMENT_TYPES,
   PRODUCTION_STATUSES,
   ID_PATTERN,
+  TRACKING_NO_PATTERN,
   MOBILE_PATTERN,
   labelOf,
   BUSINESS_TIMEZONE

@@ -76,7 +76,8 @@ const shopDate = (days) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ma
   };
 
   try {
-    token = (await call('POST', '/auth/login', { username: 'admin', password: PASSWORD })).token;
+    // The Owner, because only the Owner may put a price on an order (PB 2)
+    token = (await call('POST', '/auth/login', { username: 'owner', password: PASSWORD })).token;
     const item = {};
     for (const it of ITEMS) item[it.item_name] = (await call('POST', '/inventory', it)).item.inventory_id;
     const cust = {};
@@ -108,6 +109,14 @@ const shopDate = (days) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ma
     // Demo only: make this order overdue so the dashboard shows the "Overdue" list
     await sqliteRun(db, 'UPDATE order_profiles SET production_deadline = ? WHERE order_id = ?', [`${shopDate(-2)}T00:00:00`, late.order_id]);
     await call('POST', `/inventory/${item['Deli A4 Paper']}/loss`, { quantity_lost: 1, loss_reason: 'Paper got wet' });
+    // Demo only: in real use the cloud gives each order its XM-YYYY-NNNN number when it syncs.
+    // The demo never syncs, so number the sample orders here to show what staff will see.
+    const year = shopDate(0).slice(0, 4);
+    const orders = await new Promise((resolve, reject) => db.all(
+      'SELECT order_id FROM order_profiles ORDER BY date_created, rowid', (err, rows) => (err ? reject(err) : resolve(rows))));
+    for (let i = 0; i < orders.length; i++) {
+      await sqliteRun(db, 'UPDATE order_profiles SET tracking_no = ? WHERE order_id = ?', [`XM-${year}-${String(i + 1).padStart(4, '0')}`, orders[i].order_id]);
+    }
   } finally {
     await new Promise((r) => server.close(r));
     await new Promise((r) => db.close(r));

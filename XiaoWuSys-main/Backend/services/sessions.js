@@ -3,6 +3,7 @@
 // A login token (JWT) is valid for 8 hours. When an account is deactivated, its role is
 // changed, or its password is reset/changed, users.tokens_valid_after is set to NOW() and
 // every token issued BEFORE that moment is rejected, so the person is signed out at once.
+// "Log out" ends only that device's session: its token's sid goes into revoked_sessions.
 //
 // verifyToken must stay fast and synchronous, so the cut-off times are kept in memory:
 //   - loaded from the database at start-up and refreshed every minute (other servers' changes)
@@ -12,6 +13,10 @@ const { isConnectionError } = require('../utils/dbErrors');
 const { sqliteAll } = require('./records');
 
 const cutoffs = new Map(); // user_id -> epoch ms (Infinity = account deactivated)
+// PB 1: sessions ended with "Log out" on ONE device (token "sid" -> token expiry, epoch ms).
+// Other devices of the same account keep working. Loaded from revoked_sessions (migration 007).
+const revokedSessions = new Map();
+const sessionListeners = new Set();
 const REFRESH_MS = 60 * 1000;
 
 const isActiveValue = (v) => !(v === false || v === 0 || v === '0' || v === 'false' || v === 'f');
@@ -35,8 +40,53 @@ const applyRows = (rows) => {
   for (const [k, v] of next) cutoffs.set(k, v);
 };
 
+// ---------- Per-device sign-out (PB 1) ----------
+// listener(sid) runs once for every newly ended session, e.g. to close its live connection
+const onSessionRevoked = (listener) => {
+  sessionListeners.add(listener);
+  return () => sessionListeners.delete(listener);
+};
+
+const revokeSession = (sid, expiresAtMs) => {
+  if (!sid) return;
+  const isNew = !revokedSessions.has(sid);
+  revokedSessions.set(sid, Number.isFinite(expiresAtMs) ? expiresAtMs : Date.now() + 24 * 3600 * 1000);
+  if (!isNew) return;
+  for (const listener of sessionListeners) {
+    try { listener(sid); } catch (err) { console.error('⚠️ Session sign-out listener failed:', err.message); }
+  }
+};
+
+// Rows: [{ session_id, expires_at }]. Expired sessions are dropped: their tokens are refused anyway.
+const applySessionRows = (rows) => {
+  const now = Date.now();
+  for (const r of rows) {
+    const exp = toEpochMs(r.expires_at);
+    if (exp > now) revokeSession(r.session_id, exp);
+  }
+  for (const [sid, exp] of revokedSessions) if (exp <= now) revokedSessions.delete(sid);
+};
+
+// Cloud rows (every branch) plus local rows (logouts made here while offline, not synced yet)
+const loadSessionRevocations = async ({ pgPool, localDb }) => {
+  try {
+    const { rows } = await pgPool.query(
+      `SELECT session_id, expires_at::text AS expires_at FROM revoked_sessions WHERE expires_at > (NOW() AT TIME ZONE 'UTC')`
+    );
+    applySessionRows(rows);
+  } catch (err) {
+    if (!isConnectionError(err) && !/(relation|column) .* does not exist/i.test(err.message)) {
+      console.error('⚠️ Could not load the list of logged-out sessions:', err.message);
+    }
+  }
+  try {
+    applySessionRows(await sqliteAll(localDb, 'SELECT session_id, expires_at FROM revoked_sessions'));
+  } catch { /* local table may not exist yet on first start */ }
+};
+
 // Cloud first, local cache when offline. Never throws.
 const loadRevocations = async ({ pgPool, localDb }) => {
+  await loadSessionRevocations({ pgPool, localDb });
   try {
     const { rows } = await pgPool.query(
       'SELECT user_id, is_active, tokens_valid_after::text AS tokens_valid_after FROM users WHERE is_active = FALSE OR tokens_valid_after IS NOT NULL'
@@ -75,6 +125,7 @@ const CUTOFF_SQL = (param) => `(to_timestamp(${param}::double precision / 1000.0
 // its ims claim (milliseconds); for older tokens without it, by iat (seconds), when the whole
 // issue second is before the cut-off.
 const isTokenRevoked = (payload) => {
+  if (payload && payload.sid && revokedSessions.has(payload.sid)) return true;
   const cutoff = cutoffs.get(payload && payload.user_id);
   if (!cutoff) return false;
   if (cutoff === Infinity) return true;
@@ -82,4 +133,7 @@ const isTokenRevoked = (payload) => {
   return ((Number(payload.iat) || 0) + 1) * 1000 <= cutoff;
 };
 
-module.exports = { loadRevocations, startRevocationRefresh, revokeUser, reactivateUser, isTokenRevoked, isActiveValue, toEpochMs, CUTOFF_SQL };
+module.exports = {
+  loadRevocations, startRevocationRefresh, revokeUser, reactivateUser, isTokenRevoked, isActiveValue, toEpochMs, CUTOFF_SQL,
+  revokeSession, onSessionRevoked
+};

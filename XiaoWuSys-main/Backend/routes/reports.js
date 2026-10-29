@@ -20,6 +20,8 @@ const FINANCE_ROLES = ['Owner', 'Admin'];
 const OPEN = (o) => !['Completed', 'Cancelled'].includes(o.production_status);
 const MAX_ROWS = 10000;
 const round2 = (n) => Math.round(n * 100) / 100;
+// Order number for people (PB 6): XM-2026-0123, or the old short id until an offline order syncs
+const orderLabel = (o) => (o && o.tracking_no) || (o ? `#${String(o.order_id).slice(0, 8).toUpperCase()}` : '');
 
 router.use(verifyToken);
 
@@ -66,6 +68,8 @@ router.get('/dashboard', requireRole(READ_ROLES), async (req, res) => {
       const paid = data.paidByOrder.get(o.order_id) || 0;
       return {
         order_id: o.order_id,
+        tracking_no: o.tracking_no, // null until an offline order syncs
+        sync_status: o.sync_status,
         customer_name: name(o.customer_id),
         production_status: o.production_status,
         production_deadline: o.production_deadline,
@@ -207,7 +211,7 @@ router.get('/export/orders.csv', requireRole(FINANCE_ROLES), async (req, res) =>
         const lines = (data.itemsByOrder.get(o.order_id) || [])
           .map((i) => `${i.product_type} x${i.quantity}${[i.size, i.custom_name, i.custom_number].filter(Boolean).length ? ` (${[i.size, i.custom_name, i.custom_number].filter(Boolean).join(' ')})` : ''}`)
           .join('; ');
-        return [o.order_id.slice(0, 8).toUpperCase(), toShopTime(o.date_created).replace('T', ' '), c.full_name || o.customer_id,
+        return [orderLabel(o), toShopTime(o.date_created).replace('T', ' '), c.full_name || o.customer_id,
           c.contact_number || '', c.platform_source || '', String(o.production_deadline || '').slice(0, 10), o.production_status,
           o.total_quote_amount || 0, paid, round2((o.total_quote_amount || 0) - paid), lines];
       }),
@@ -223,7 +227,7 @@ router.get('/export/payments.csv', requireRole(FINANCE_ROLES), async (req, res) 
     const orders = new Map(data.orders.map((o) => [o.order_id, o]));
     sendCsv(res, 'payments',
       ['Date', 'Order', 'Customer', 'Payment type', 'Amount (PHP)'],
-      data.payments.map((p) => [toShopTime(p.payment_date).replace('T', ' '), p.order_id.slice(0, 8).toUpperCase(),
+      data.payments.map((p) => [toShopTime(p.payment_date).replace('T', ' '), orderLabel(orders.get(p.order_id) || { order_id: p.order_id }),
         data.customers.get(orders.get(p.order_id)?.customer_id)?.full_name || '', p.payment_type, p.amount]),
       data.source);
   } catch (err) {

@@ -2,7 +2,7 @@ const express = require('express');
 const crypto = require('crypto'); // Built-in Node module for generating UUIDs
 const router = express.Router();
 const { verifyToken, requireRole } = require('../middleware/authMiddleware');
-const { normalizeRequiredItems, computeAvailable } = require('../services/capacity');
+const { normalizeRequiredItems, computeAvailable, evaluateCapacity } = require('../services/capacity');
 const { isConnectionError, sendDbError } = require('../utils/dbErrors');
 const { validateDriveLink } = require('../utils/validateDriveLink');
 const { LOCAL_NOW, PG_VERSION_FORMAT, offlineUpdateBookkeeping } = require('../utils/localSync');
@@ -12,11 +12,26 @@ const {
   withPgTransaction, withLocalTransaction, ACTIVE_ITEM_SQL
 } = require('../services/records');
 const { withAvailability } = require('../services/inventorySnapshot');
+const { rolesWith, can, capabilitiesFor } = require('../services/domain/permissions');
+const {
+  STATUS_TRANSITIONS, CLOSED_STATUSES, QUOTE_FROZEN_STATUSES, APPROVABLE_STATUSES, capabilityForTransition, allowedActions
+} = require('../services/domain/orderLifecycle');
+const { needsReservation, stockNeeds, buildStockCheck } = require('../services/domain/stockCheck');
 
 const VERSION_SQL = `to_char(last_modified, '${PG_VERSION_FORMAT}')`;
-const READ_ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
-const WRITE_ROLES = ['Owner', 'Admin', 'Production'];
-const APPROVE_ROLES = ['Owner']; // PB 13: only an Owner may approve a job order (§4.3)
+const READ_ROLES = rolesWith('view_orders');
+const WRITE_ROLES = rolesWith('edit_order');
+const APPROVE_ROLES = rolesWith('approve_order'); // PB 13: only an Owner may approve a job order (§4.3)
+
+// PB 2: only the Owner sets or changes a quote, and only the Owner voids (cancels) an order
+const quoteOwnerOnly = (res) => res.status(403).json({
+  error: 'QUOTE_OWNER_ONLY',
+  message: 'Only the Owner can set or change the quote. Ask the Owner to enter the price.'
+});
+const voidOwnerOnly = (res) => res.status(403).json({
+  error: 'VOID_OWNER_ONLY',
+  message: 'Only the Owner can cancel an order. Ask the Owner to cancel it.'
+});
 
 // Business-rule failure inside a transaction: rolled back, then sent as-is
 class Rejected extends Error {
@@ -122,6 +137,7 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
   const v = createValidator();
   const status = v.oneOf(req.query.status, 'status', PRODUCTION_STATUSES, { required: false });
   const customer_id = v.id(req.query.customer_id, 'customer_id', { required: false });
+  const tracking_no = v.trackingNo(req.query.tracking_no, 'tracking_no', { required: false }); // PB 6: find by order number
   const sort = v.oneOf(req.query.sort, 'sort', Object.keys(ORDER_SORTS), { required: false }) || 'date_created';
   const dir = v.oneOf(req.query.dir, 'dir', ['asc', 'desc'], { required: false }) || 'desc';
   const { limit, offset } = v.pagination(req.query);
@@ -129,13 +145,16 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
 
   try {
     const result = await listRecords(req, 'order_profiles', {
-      filters: [['production_status', status], ['customer_id', customer_id]],
+      filters: [['production_status', status], ['customer_id', customer_id], ['tracking_no', tracking_no]],
       // Ties broken by newest first, then order_id, so paging is stable
       orderBy: `${ORDER_SORTS[sort]} ${dir.toUpperCase()}, order_profiles.date_created DESC, order_profiles.order_id`,
       limit,
       offset
     });
-    res.status(200).json({ source: result.source, orders: result.records, limit, offset, sort, dir, unsynced: result.unsynced });
+    res.status(200).json({
+      source: result.source, orders: result.records, limit, offset, sort, dir, unsynced: result.unsynced,
+      capabilities: capabilitiesFor(req.user.role)
+    });
   } catch (err) {
     sendDbError(res, err, 'listing orders');
   }
@@ -143,7 +162,12 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
 
 // ==========================================
 // ORDER DETAIL (M10)
-// GET /api/orders/:order_id -> { source, order, items, payments, totals }
+// GET /api/orders/:order_id -> { source, order, items, payments, totals, allowed_actions, stock_check }
+//   allowed_actions: which buttons this account may use on this order (role + status rules),
+//                    e.g. { approve, statuses: ['Printing', 'Cancelled'], edit_quote, ... }
+//   stock_check (PB 9): for an order that still has to reserve its stock (Pending / Delayed,
+//                    not reserved yet), whether the free stock covers it, with the shortfalls.
+//                    Approve and Resume re-check on locked rows; this is advice for the screen.
 // ==========================================
 router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
   const { order_id } = req.params;
@@ -154,7 +178,9 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
     const items = await listRecords(req, 'order_items', { filters: [['order_id', order_id]], orderBy: 'line_item_id' });
     const payments = await listRecords(req, 'payments', { filters: [['order_id', order_id]], orderBy: 'payment_date, payment_id' });
     const totalPaid = Math.round(payments.records.reduce((sum, p) => sum + p.amount, 0) * 100) / 100;
-    const sources = [source, items.source, payments.source];
+    const needs = needsReservation(order) ? stockNeeds(items.records) : [];
+    const evaluation = needs.length > 0 ? await evaluateCapacity(req, needs) : null;
+    const sources = [source, items.source, payments.source, evaluation && evaluation.source];
 
     res.status(200).json({
       source: sources.includes('local') ? 'local' : 'cloud',
@@ -166,7 +192,9 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
         total_quantity: items.records.reduce((sum, i) => sum + i.quantity, 0),
         total_paid: totalPaid,
         balance: Math.round(((order.total_quote_amount || 0) - totalPaid) * 100) / 100
-      }
+      },
+      allowed_actions: allowedActions(order, req.user.role),
+      stock_check: buildStockCheck(order, items.records, evaluation)
     });
   } catch (err) {
     sendDbError(res, err, 'reading order');
@@ -196,6 +224,8 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
   const resolution = v.oneOf(body.resolution, 'resolution', HALT_RESOLUTIONS, { required: false });
   const total_quote_amount = v.nonNegativeMoney(body.total_quote_amount, 'total_quote_amount', { required: false, defaultValue: 0 });
   if (v.failed()) return v.send(res);
+  // PB 2: staff create the order; the Owner prices it (0 = "no quote yet")
+  if (total_quote_amount !== 0 && !can(req.user.role, 'set_quote')) return quoteOwnerOnly(res);
 
   const production_status = resolution || 'Pending';
   const normalized = (resolution && body.required_items === undefined) ? { items: [] } : normalizeRequiredItems(body.required_items);
@@ -327,11 +357,13 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 // ==========================================
 // CHANGE ORDER STATUS (Orders tab)
 // PATCH /api/orders/:order_id/status   Body: { status, expected_version? }
+//   The allowed moves are STATUS_TRANSITIONS in services/domain/orderLifecycle.js:
 //   Pending  -> Cancelled             (Pending -> Approved only via POST /:order_id/approve, Owner)
 //   Approved -> Printing | Cancelled
 //   Printing -> Completed | Cancelled
 //   Delayed  -> Pending (reserves stock now; 409 INSUFFICIENT_INVENTORY if short) | Cancelled
 //   Completed / Cancelled are final.
+// PB 2: Cancelled is a void, so only the Owner may send it (403 VOID_OWNER_ONLY otherwise).
 // PB 13: Printing is only reachable through Approved, so production can never start without
 // the Owner's approval and the 50% downpayment check.
 // Stock effects (same transaction): Cancelled releases the reservation; Completed consumes it
@@ -339,15 +371,6 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 // branches must not be released or consumed from a stale offline copy.
 // -> 200 { message, order, stock_changes }
 // ==========================================
-const STATUS_TRANSITIONS = {
-  Pending: ['Cancelled'],
-  Approved: ['Printing', 'Cancelled'],
-  Printing: ['Completed', 'Cancelled'],
-  Delayed: ['Pending', 'Cancelled'],
-  Completed: [],
-  Cancelled: []
-};
-
 router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAccess, async (req, res) => {
   const { order_id } = req.params;
   const body = req.body || {};
@@ -357,6 +380,7 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
     v.errors.push({ field: 'expected_version', message: 'expected_version must be the string returned as "version".' });
   }
   if (v.failed()) return v.send(res);
+  if (status === 'Cancelled' && !can(req.user.role, capabilityForTransition(status))) return voidOwnerOnly(res);
   const expected_version = body.expected_version || null;
 
   try {
@@ -771,14 +795,12 @@ router.patch('/:order_id/design', requireRole(WRITE_ROLES), requireOrderEditAcce
 // EDIT ORDER DETAILS (Orders tab "Edit details")
 // PATCH /api/orders/:order_id/details   Body (any of): { production_deadline, total_quote_amount, expected_version? }
 //  - Completed / Cancelled orders cannot be edited.
+//  - PB 2: only the Owner may send total_quote_amount (403 QUOTE_OWNER_ONLY).
 //  - The quote is frozen once an order is Approved (its downpayment was checked against it).
 //  - Optimistic concurrency: if the order changed since it was loaded -> 409 EDIT_CONFLICT.
 // Works offline (synced later, pushing only the changed fields).
 // -> 200 { message, source, order, changed }
 // ==========================================
-const CLOSED_STATUSES = ['Completed', 'Cancelled'];
-const QUOTE_FROZEN_STATUSES = ['Approved', 'Printing', 'Completed', 'Cancelled'];
-
 router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAccess, async (req, res) => {
   const { order_id } = req.params;
   const body = req.body || {};
@@ -793,6 +815,7 @@ router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAcc
     v.errors.push({ field: 'body', message: 'Nothing to change: send a new deadline or quote amount.' });
   }
   if (v.failed()) return v.send(res);
+  if (body.total_quote_amount !== undefined && !can(req.user.role, 'set_quote')) return quoteOwnerOnly(res);
 
   try {
     const { record: current } = await getRecord(req, 'order_profiles', order_id);
@@ -888,8 +911,6 @@ router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAcc
 // -> 200 { message, source:'cloud', order, reserved:[{inventory_id,item_name,quantity}],
 //          newly_reserved, inventory:[InventoryItem...] }
 // ==========================================
-const APPROVABLE_STATUSES = ['Pending', 'Delayed'];
-
 router.post('/:order_id/approve', requireRole(APPROVE_ROLES), requireOrderEditAccess, async (req, res) => {
   const { order_id } = req.params;
   const { expected_version } = req.body || {};

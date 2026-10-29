@@ -61,6 +61,7 @@ const LOCAL_TABLES = [
       stock_reserved INTEGER NOT NULL DEFAULT 0,
       approved_by TEXT,
       approved_at TEXT,
+      tracking_no TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -111,8 +112,19 @@ const LOCAL_TABLES = [
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
+  // Sessions ended with "Log out" on one device (migration 007). Rows written while offline
+  // are pending_insert and pushed by the sync; no foreign key, like the audit trail.
+  `CREATE TABLE IF NOT EXISTS revoked_sessions (
+      session_id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      revoked_at TEXT,
+      ${SYNC_STATUS},
+      last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
   'CREATE INDEX IF NOT EXISTS idx_local_inventory_bin ON inventory_items (deleted_at)',
-  'CREATE INDEX IF NOT EXISTS idx_local_audit_item ON inventory_audit_log (inventory_id, created_at)'
+  'CREATE INDEX IF NOT EXISTS idx_local_audit_item ON inventory_audit_log (inventory_id, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_local_order_tracking ON order_profiles (tracking_no)'
 ];
 
 const run = (db, sql) => new Promise((resolve, reject) => db.run(sql, (err) => (err ? reject(err) : resolve())));

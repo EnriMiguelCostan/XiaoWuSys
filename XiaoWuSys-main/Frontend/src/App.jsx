@@ -8,6 +8,8 @@ import UsersPage, { ChangePasswordDialog } from './UsersPage';
 import { API_BASE, SOCKET_URL } from './config';
 import { ResultDialog } from './Dialogs';
 import { createApi, errorText, todayInManila, MOBILE_PATTERN } from './api';
+import { can } from './lib/permissions';
+import { orderNumber, NUMBER_AFTER_SYNC } from './lib/orders';
 
 
 const emptyOrderLine = () => ({ inventory_id: '', quantity_needed: '' });
@@ -79,6 +81,7 @@ export default function App() {
   const [delayedDeadline, setDelayedDeadline] = useState('');
   const [alertError, setAlertError] = useState('');
 
+  // Clears this browser's session (also used when the server says the session has ended)
   const handleLogout = useCallback(() => {
     setToken('');
     setUser(null);
@@ -173,6 +176,29 @@ export default function App() {
 
   const api = useMemo(() => createApi({ apiBase: API_BASE, token, onUnauthorized: handleLogout }), [token, handleLogout]);
 
+  // PB 1: "Logout" ends this device's session on the server too (other devices stay logged in).
+  // If the server cannot be reached, the browser still forgets the session.
+  const handleSignOut = async () => {
+    await api('POST', '/auth/logout');
+    handleLogout();
+  };
+
+  // What this account may do (role and capabilities from the server, never from the browser)
+  useEffect(() => {
+    if (!token) return undefined;
+    let cancelled = false;
+    api('GET', '/auth/me').then(({ ok, data }) => {
+      if (cancelled || !ok || !data.user) return;
+      setUser((prev) => {
+        const next = { ...(prev || {}), user_id: data.user.user_id, role: data.user.role, capabilities: data.capabilities || [] };
+        localStorage.setItem('xiaomei_user', JSON.stringify(next));
+        return next;
+      });
+    });
+    return () => { cancelled = true; };
+  }, [api, token]);
+  const canSetQuote = can(user, 'set_quote'); // PB 2: only the Owner prices an order
+
   useEffect(() => {
     if (!token || activeTab !== 'add') return undefined;
     let cancelled = false;
@@ -198,9 +224,12 @@ export default function App() {
       const data = await res.json().catch(() => ({}));
 
       if (res.ok && data.token) {
-        const activeUser = data.user
-          ? { user_id: data.user.user_id, username: data.user.username, role: data.user.role }
-          : { username: username.trim(), role: data.role };
+        const activeUser = {
+          ...(data.user
+            ? { user_id: data.user.user_id, username: data.user.username, role: data.user.role }
+            : { username: username.trim(), role: data.role }),
+          capabilities: data.capabilities || []
+        };
         setToken(data.token);
         localStorage.setItem('xiaomei_token', data.token);
         setUser(activeUser);
@@ -255,7 +284,7 @@ export default function App() {
       inventory_id: line.inventory_id,
       quantity_needed: Number(line.quantity_needed)
     }));
-    const quote = quoteAmount.trim() === '' ? 0 : Number(quoteAmount);
+    const quote = !canSetQuote || quoteAmount.trim() === '' ? 0 : Number(quoteAmount);
     if (!Number.isFinite(quote) || quote < 0 || Math.abs(Math.round(quote * 100) - quote * 100) > 1e-6) {
       setOrderResult({ type: 'error', title: 'Please check the quote amount', message: 'The quote must be a peso amount of 0 or more, like 1500 or 1500.50.' });
       return;
@@ -317,17 +346,19 @@ export default function App() {
         customer_id: resolvedCustomerId,
         production_deadline: productionDeadline,
         required_items,
-        total_quote_amount: Math.round(quote * 100) / 100
+        ...(canSetQuote ? { total_quote_amount: Math.round(quote * 100) / 100 } : {})
       };
       const { res, data } = await postOrder(pendingOrder);
 
       if (res.ok) {
-        const shortId = String(data.order_id || '').slice(0, 8).toUpperCase();
         setOrderResult({
           type: 'success',
           title: 'Order created',
-          message: `Order #${shortId} was saved${data.source === 'local' ? ' offline (it will sync later)' : ''}.\n` +
-                   `${(data.items || []).length} material(s) reserved in the Catalog. You can follow it in the Orders tab.`
+          message: (data.order && data.order.tracking_no
+            ? `Order ${data.order.tracking_no} was saved.\n`
+            : `The order was saved offline. ${NUMBER_AFTER_SYNC}\n`) +
+            `${(data.items || []).length} material(s) reserved in the Catalog. You can follow it in the Orders tab.` +
+            (canSetQuote ? '' : '\nThe Owner will set the price.')
         });
         setOrdersRefreshKey(k => k + 1);
         resetOrderForm();
@@ -379,10 +410,10 @@ export default function App() {
       const { res, data } = await postOrder({ ...pendingOrder, production_deadline, resolution });
 
       if (res.ok) {
-        const id = String(data.order_id || data.id || '').slice(0, 8).toUpperCase();
+        const label = data.order ? orderNumber(data.order) : 'The order';
         const notice = resolution === 'Delayed'
-          ? `Order #${id} logged as DELAYED. New deadline: ${production_deadline}. Resume it from the Orders tab when stock arrives.`
-          : `Order #${id} logged as CANCELLED (lost sale recorded).`;
+          ? `${label} logged as DELAYED. New deadline: ${production_deadline}. Resume it from the Orders tab when stock arrives.`
+          : `${label} logged as CANCELLED (lost sale recorded).`;
         setOrderResult({ type: 'warning', title: resolution === 'Delayed' ? 'Order delayed' : 'Order cancelled', message: notice });
         setOrdersRefreshKey(k => k + 1);
         resetOrderForm();
@@ -471,7 +502,7 @@ export default function App() {
           <button style={styles.navBtn} onClick={() => setChangingPassword(true)} title="Change my password">
             <KeyRound size={18} /> Password
           </button>
-          <button style={styles.navBtn} onClick={handleLogout}>
+          <button style={styles.navBtn} onClick={handleSignOut} aria-label="Log out on this device">
             <LogOut size={18} /> Logout
           </button>
         </nav>
@@ -588,14 +619,20 @@ export default function App() {
                 required 
               />
 
-              <label style={styles.label} htmlFor="order-quote">Quote Amount (₱, optional)</label>
-              <input
-                id="order-quote"
-                type="number" min="0" step="0.01" inputMode="decimal" placeholder="0.00"
-                value={quoteAmount}
-                onChange={e => setQuoteAmount(e.target.value)}
-                style={styles.input}
-              />
+              {canSetQuote ? (
+                <>
+                  <label style={styles.label} htmlFor="order-quote">Quote Amount (₱, optional)</label>
+                  <input
+                    id="order-quote"
+                    type="number" min="0" step="0.01" inputMode="decimal" placeholder="0.00"
+                    value={quoteAmount}
+                    onChange={e => setQuoteAmount(e.target.value)}
+                    style={styles.input}
+                  />
+                </>
+              ) : (
+                <p style={styles.hint}>The Owner sets the price of the order after it is created.</p>
+              )}
 
               <label style={styles.label}>Required Materials</label>
               {inventory.length === 0 && (
@@ -757,10 +794,10 @@ export default function App() {
           <OrdersPage
             apiBase={API_BASE}
             token={token}
-            userRole={user?.role}
             onUnauthorized={handleLogout}
             refreshKey={ordersRefreshKey}
             onStockChanged={refreshInventory}
+            inventoryKey={inventoryMeta.fetchedAt}
           />
         )}
 
