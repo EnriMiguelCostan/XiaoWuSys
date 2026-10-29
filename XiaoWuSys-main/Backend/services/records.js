@@ -19,7 +19,8 @@ const ENTITIES = {
     fields: {
       order_id: 'text', customer_id: 'text', date_created: 'timestamp', production_deadline: 'timestamp',
       production_status: 'text', design_drive_link: 'text', total_quote_amount: 'money',
-      stock_reserved: 'bool', approved_by: 'text', approved_at: 'timestamp'
+      stock_reserved: 'bool', approved_by: 'text', approved_at: 'timestamp',
+      tracking_no: 'text' // XM-YYYY-NNNN, given by the cloud database (null until an offline order syncs)
     }
   },
   order_items: {

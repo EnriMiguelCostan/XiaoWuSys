@@ -13,7 +13,7 @@ const { checkCloudSchema } = require('./services/schemaCheck');
 const { createLocalSchema, createLocalIndexes, upgradeLocalOrderStatusCheck } = require('./services/localSchema');
 const { applyPendingMigrations } = require('./services/migrations');
 const { startRecycleBinJanitor } = require('./services/recycleBin');
-const { startRevocationRefresh, isTokenRevoked } = require('./services/sessions');
+const { startRevocationRefresh, isTokenRevoked, onSessionRevoked } = require('./services/sessions');
 const { createCloudDisabledPool } = require('./services/cloudDisabledPool');
 const { isConnectionError } = require('./utils/dbErrors');
 const { syncOfflineData, listConflicts, SYNC_TABLES } = require('./services/sync');
@@ -105,10 +105,18 @@ io.use((socket, next) => {
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
     if (isTokenRevoked(payload)) return next(new Error('Unauthorized: session ended'));
-    socket.data.user = { user_id: payload.user_id, role: payload.role };
+    socket.data.user = { user_id: payload.user_id, role: payload.role, sid: payload.sid || null };
     next();
   } catch (err) {
     next(new Error('Unauthorized: invalid or expired token'));
+  }
+});
+
+// PB 1: "Log out" on a device also closes that device's live connection (its edit locks are
+// released by the normal disconnect handler). Other devices of the account stay connected.
+onSessionRevoked((sid) => {
+  for (const socket of io.sockets.sockets.values()) {
+    if (socket.data.user && socket.data.user.sid === sid) socket.disconnect(true);
   }
 });
 

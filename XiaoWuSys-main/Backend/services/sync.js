@@ -21,6 +21,13 @@ const SYNC_TABLES = [
     pullOnly: true
   },
   {
+    // "Log out" on this computer while offline (migration 007): pushed insert-only, so the
+    // other servers stop accepting that session too. Never refreshed back into the cache.
+    table: 'revoked_sessions',
+    id: 'session_id',
+    columns: ['session_id', 'user_id', 'expires_at', 'revoked_at']
+  },
+  {
     table: 'inventory_items',
     id: 'inventory_id',
     columns: ['inventory_id', 'item_name', 'item_category', 'quantity_available', 'quantity_reserved', 'minimum_threshold', 'unit_cost',
@@ -41,7 +48,9 @@ const SYNC_TABLES = [
     // approved_by/approved_at are only ever set in Neon (approval is online-only). They are
     // listed so the refresh copies them into the cache; offline rows never have them set.
     columns: ['order_id', 'customer_id', 'date_created', 'production_deadline', 'production_status', 'design_drive_link', 'total_quote_amount',
-              'stock_reserved', 'approved_by', 'approved_at']
+              'stock_reserved', 'approved_by', 'approved_at', 'tracking_no'],
+    // Given by the cloud database (migration 007 trigger): never pushed, copied back after a push
+    cloudOwned: ['tracking_no']
   },
   {
     table: 'order_items',
@@ -72,6 +81,13 @@ const REFRESH_TABLES = ['users', 'customers', 'inventory_items', 'order_profiles
 
 const specFor = (table) => SYNC_TABLES.find((t) => t.table === table);
 const updatableColumns = (spec) => spec.columns.filter((c) => c !== spec.id);
+const cloudOwnedColumns = (spec) => spec.cloudOwned || [];
+// Columns this computer may send to Neon (cloud-owned values only ever travel down)
+const pushColumns = (spec) => spec.columns.filter((c) => !cloudOwnedColumns(spec).includes(c));
+const pushUpdatableColumns = (spec) => pushColumns(spec).filter((c) => c !== spec.id);
+// Extra SELECT / RETURNING list for the cloud-owned values, e.g. ", tracking_no::text AS tracking_no"
+const cloudOwnedSelect = (spec) => cloudOwnedColumns(spec).map((c) => `, ${c}::text AS ${c}`).join('');
+const cloudValuesOf = (spec, row) => Object.fromEntries(cloudOwnedColumns(spec).map((c) => [c, row ? row[c] ?? null : null]));
 const versionExpr = `to_char(last_modified, '${PG_VERSION_FORMAT}')`;
 
 // ---------- SQLite promise helpers ----------
@@ -87,27 +103,38 @@ const sqliteRun = (db, sql, params = []) =>
 
 // H3: only mark synced if nobody edited the row while it was being pushed.
 // Every local write bumps last_modified (ms precision), so an equal value proves no concurrent edit.
-const markAsSynced = (localDb, spec, row, cloudVersion) =>
-  sqliteRun(
+// Cloud-owned values (e.g. the tracking number Neon just gave an offline order) are copied
+// into the local row in the same statement, so the order shows its number straight away.
+const cloudOwnedSet = (spec, cloud) => {
+  const cols = cloudOwnedColumns(spec);
+  return { sql: cols.map((c) => `, ${c} = ?`).join(''), params: cols.map((c) => (cloud ? cloud[c] ?? null : null)) };
+};
+
+const markAsSynced = (localDb, spec, row, cloudVersion, cloud = null) => {
+  const extra = cloudOwnedSet(spec, cloud);
+  return sqliteRun(
     localDb,
     `UPDATE ${spec.table}
-        SET sync_status = 'synced', dirty_fields = NULL, sync_error = NULL, cloud_last_modified = ?
+        SET sync_status = 'synced', dirty_fields = NULL, sync_error = NULL, cloud_last_modified = ?${extra.sql}
       WHERE ${spec.id} = ? AND last_modified IS ?`,
-    [cloudVersion, row[spec.id], row.last_modified]
+    [cloudVersion, ...extra.params, row[spec.id], row.last_modified]
   );
+};
 
 // The row changed mid-push. Keep it pending, but record the cloud version we just produced
 // so the next cycle's optimistic check compares against OUR write, not a stale baseline.
 // A pending_insert that now exists in Neon becomes a pending_update of its dirty fields.
-const keepPendingAfterPush = (localDb, spec, row, cloudVersion) =>
-  sqliteRun(
+const keepPendingAfterPush = (localDb, spec, row, cloudVersion, cloud = null) => {
+  const extra = cloudOwnedSet(spec, cloud);
+  return sqliteRun(
     localDb,
     `UPDATE ${spec.table}
-        SET cloud_last_modified = ?,
+        SET cloud_last_modified = ?${extra.sql},
             sync_status = CASE WHEN sync_status = 'pending_insert' THEN 'pending_update' ELSE sync_status END
       WHERE ${spec.id} = ?`,
-    [cloudVersion, row[spec.id]]
+    [cloudVersion, ...extra.params, row[spec.id]]
   );
+};
 
 const markAsConflict = (localDb, spec, row, reason) =>
   sqliteRun(
@@ -118,7 +145,7 @@ const markAsConflict = (localDb, spec, row, reason) =>
 
 // JSON list of fields edited offline; falls back to every updatable column
 const dirtyFieldsFor = (spec, row) => {
-  const allowed = updatableColumns(spec);
+  const allowed = pushUpdatableColumns(spec);
   try {
     const parsed = JSON.parse(row.dirty_fields || '[]');
     const fields = allowed.filter((c) => parsed.includes(c));
@@ -178,23 +205,32 @@ const pushInsert = async (pgPool, spec, row) => {
     return pushMaterialLossInsert(pgPool, spec, row);
   }
 
-  const cols = spec.columns.filter((c) => row[c] !== undefined && row[c] !== null);
+  const cols = pushColumns(spec).filter((c) => row[c] !== undefined && row[c] !== null);
   const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+
+  // Tables with cloud-owned values skip the INSERT when the row is already in Neon: a BEFORE
+  // INSERT trigger (the tracking-number counter) runs even for a row that ON CONFLICT then
+  // drops, so a re-sent order would use up a number. Sync is single-flight per server and
+  // offline ids are unique per computer, so check-then-insert cannot race with itself.
+  const alreadyThere = cloudOwnedColumns(spec).length > 0
+    && (await pgPool.query(`SELECT 1 FROM ${spec.table} WHERE ${spec.id} = $1`, [row[spec.id]])).rowCount > 0;
 
   // DO NOTHING: if the row already exists (e.g. the reply to an online insert was lost),
   // keep the cloud copy instead of overwriting it.
-  await pgPool.query(
-    `INSERT INTO ${spec.table} (${cols.join(', ')}, last_modified)
-     VALUES (${placeholders}, NOW())
-     ON CONFLICT (${spec.id}) DO NOTHING`,
-    cols.map((c) => row[c])
-  );
+  if (!alreadyThere) {
+    await pgPool.query(
+      `INSERT INTO ${spec.table} (${cols.join(', ')}, last_modified)
+       VALUES (${placeholders}, NOW())
+       ON CONFLICT (${spec.id}) DO NOTHING`,
+      cols.map((c) => row[c])
+    );
+  }
 
   const { rows } = await pgPool.query(
-    `SELECT ${versionExpr} AS version FROM ${spec.table} WHERE ${spec.id} = $1`,
+    `SELECT ${versionExpr} AS version${cloudOwnedSelect(spec)} FROM ${spec.table} WHERE ${spec.id} = $1`,
     [row[spec.id]]
   );
-  return { outcome: 'synced', version: rows[0] ? rows[0].version : null };
+  return { outcome: 'synced', version: rows[0] ? rows[0].version : null, cloud: cloudValuesOf(spec, rows[0]) };
 };
 
 const pushUpdate = async (pgPool, spec, row) => {
@@ -209,11 +245,11 @@ const pushUpdate = async (pgPool, spec, row) => {
         SET ${setClause}, last_modified = NOW()
       WHERE ${spec.id} = $${idParam}
         AND ($${baseParam}::text IS NULL OR ${versionExpr} = $${baseParam}::text)
-      RETURNING ${versionExpr} AS version`,
+      RETURNING ${versionExpr} AS version${cloudOwnedSelect(spec)}`,
     [...fields.map((f) => row[f]), row[spec.id], row.cloud_last_modified || null]
   );
 
-  if (result.rowCount === 1) return { outcome: 'synced', version: result.rows[0].version };
+  if (result.rowCount === 1) return { outcome: 'synced', version: result.rows[0].version, cloud: cloudValuesOf(spec, result.rows[0]) };
 
   const current = await pgPool.query(
     `SELECT ${versionExpr} AS version FROM ${spec.table} WHERE ${spec.id} = $1`,
@@ -327,11 +363,11 @@ const runSync = async (pgPool, localDb) => {
         }
 
         if (spec.table === 'inventory_items' || spec.table === 'material_loss') summary.inventory_changed = true;
-        if ((await markAsSynced(localDb, spec, row, result.version)) === 1) {
+        if ((await markAsSynced(localDb, spec, row, result.version, result.cloud)) === 1) {
           summary.synced++;
         } else {
           // H3: edited during the push; resend on the next cycle
-          await keepPendingAfterPush(localDb, spec, row, result.version);
+          await keepPendingAfterPush(localDb, spec, row, result.version, result.cloud);
           summary.requeued++;
           console.log(`↻ ${spec.table} ${row[spec.id]} changed during sync; will resend next cycle`);
         }

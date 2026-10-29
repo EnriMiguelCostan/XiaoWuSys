@@ -7,8 +7,8 @@ Inventory and order management for **XiaoMei Printshop** (Agdao, Davao City). It
 | Area | Features |
 |---|---|
 | **Catalog** | Sortable stock table with live updates. Each item has a unit (pcs, pack, ream…), a supplier and a low-stock alert. **Add / Subtract Stock** with a reason; lost or damaged stock is recorded with its cost. Duplicate names are blocked, ignoring case and spaces. Edit items, delete them to the **Recycle Bin** (restorable), **import from Excel** (CSV) and **export to Excel**. |
-| **Orders** | Create an order for a saved or new customer (11-digit mobile number). Stock is checked and **reserved** automatically; a halted order can be delayed or cancelled. The order detail shows materials, print details (size / name / number), the Google Drive design link and payments with the balance. You can edit the deadline and quote. Status runs Pending → Approved (Owner only, needs a 50% downpayment) → Printing → Completed. **Copy for Messenger** and **Print job order** buttons. |
-| **Dashboard** | Overdue orders, orders due this week, unpaid balances, payments per month, most-used materials, and a **restock list** with suggested quantities (copyable). Inventory, order and payment exports. |
+| **Orders** | Create an order for a saved or new customer (11-digit mobile number). Every order gets a sequential **order number** like `XM-2026-0123` that restarts each January (an order saved offline gets its number when it syncs); search by it in the Orders tab. Stock is checked and **reserved** automatically; a halted order can be delayed or cancelled. The order detail shows materials, print details (size / name / number), the Google Drive design link and payments with the balance. **Only the Owner** sets or changes the quote and cancels an order. Status runs Pending → Approved (Owner only, needs a 50% downpayment) → Printing → Completed. Approve and Resume are greyed out, with the reason, while the free stock does not cover the order. **Copy for Messenger** and **Print job order** buttons. |
+| **Dashboard** | A **yellow low-stock warning** pinned at the top while any material is at or below its alert level (it updates live and disappears after restocking). Overdue orders, orders due this week, unpaid balances, payments per month, most-used materials, and a **restock list** with suggested quantities (copyable). Inventory, order and payment exports. |
 | **Accounts** | The Owner / Admin create accounts, change roles, reset forgotten passwords and deactivate staff who left. Everyone can change their own password. |
 | **Offline** | If the internet drops, the system keeps working on a local copy and syncs when the connection returns. Accounts that have logged in on that computer can log in offline. |
 | **Traceability** | Every catalog change is written to a hidden, append-only audit trail (`npm run audit-log`). |
@@ -17,8 +17,8 @@ Inventory and order management for **XiaoMei Printshop** (Agdao, Davao City). It
 
 | Role | Can do |
 |---|---|
-| Owner | Everything, including approving job orders and managing Owner accounts |
-| Admin | Everything except approving job orders; manages non-Owner accounts |
+| Owner | Everything, including the money decisions only the Owner makes: setting or changing quotes, cancelling (voiding) orders and approving job orders; manages Owner accounts |
+| Admin | Everything except the Owner's money decisions (quotes, cancelling orders, approving); manages non-Owner accounts |
 | Production | Catalog, stock and orders |
 | Staff | View the catalog, orders and dashboard |
 
@@ -70,7 +70,15 @@ cd Backend
 npm test
 ```
 
-There are 55 automated tests in `Backend/tests/`. They start the real API on a throw-away SQLite database filled with the shop's own data (`tests/fixtures/data.js`), with the cloud switched off, and call it over HTTP like the browser does.
+There are 78 automated tests in `Backend/tests/`. They start the real API on a throw-away SQLite database filled with the shop's own data (`tests/fixtures/data.js`), with the cloud switched off, and call it over HTTP like the browser does.
+
+`tests/migrations.pg.test.js` adds 8 more that apply `schema.sql` and every migration to a real, throw-away PostgreSQL and check order numbering. They run when `TEST_DATABASE_URL` is set, which **wipes that database**, so it must be on `localhost` or have "test" in its name (never Neon):
+
+```bash
+TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/xiaowusys_test npm test
+```
+
+**CI:** every push runs the backend tests (with a PostgreSQL 16 service for the migration tests) and the frontend lint and build on GitHub Actions (`.github/workflows/ci.yml`).
 
 They cover:
 - login security: lockout after 5 wrong passwords, forged and expired tokens, deactivated accounts;
@@ -83,7 +91,9 @@ They cover:
 - mobile number rules;
 - stock reservation by orders and the capacity halt;
 - payments and balances;
-- order editing;
+- order editing, and the Owner-only quote and cancel rules;
+- order numbers (sync and PostgreSQL numbering) and the stock check before Approve / Resume;
+- logging out one device;
 - the dashboard and exports (including spreadsheet formula injection);
 - security headers and CORS.
 
@@ -107,9 +117,12 @@ Backend/   Node.js + Express 5 API, PostgreSQL (Neon) + SQLite offline cache, So
   server.js        start-up: databases, real-time updates, sync, migrations
   routes/          auth, inventory, orders, customers, reports
   services/        sync engine, stock rules, Recycle Bin, audit trail, sessions
+    domain/        business rules with no HTTP or SQL: permissions, order lifecycle, stock check
   migrations/      numbered, idempotent SQL changes (applied automatically)
   tests/           automated tests + fixture data
-Frontend/  React 19 + Vite (inline styles)
+Frontend/  React 19 + Vite (inline styles): the MVP/Beta client. It moves to Next.js + Tailwind CSS and
+           a mobile app at the end of the project (docs/sprint-12-steering.md §3)
+  src/lib/         plain-JS helpers with no React (reused by the future clients)
 docs/      sprint and audit notes
 ```
 
@@ -121,7 +134,7 @@ docs/      sprint and audit notes
 
 - Passwords are stored as bcrypt hashes and must have at least 8 characters, a letter and a number.
 - Login locks for 15 minutes after 5 wrong passwords. It gives the same answer for an unknown username and a wrong password.
-- Sessions last 8 hours. Deactivating an account, changing its role or resetting its password signs it out everywhere at once.
+- Sessions last 8 hours. **Logout** ends that device's session on the server (the same login on another device stays signed in). Deactivating an account, changing its role or resetting its password signs it out everywhere at once.
 - Roles are always taken from the signed login token and checked on the server.
 - All database queries use parameters (no SQL injection). Inputs are validated and errors are shown in plain language.
 - Security headers are set, CORS is limited to `CORS_ORIGINS`, and exports are protected against spreadsheet formula injection.

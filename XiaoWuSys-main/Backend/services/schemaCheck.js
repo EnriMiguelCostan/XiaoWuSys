@@ -12,8 +12,10 @@ const EXTRA_COLUMNS = [
   'inventory_items.purged_at',
   'users.is_active', 'users.tokens_valid_after',
   ...['audit_id', 'inventory_id', 'action', 'item_name', 'details', 'performed_by', 'performed_role', 'created_at', 'last_modified']
-    .map((c) => `inventory_audit_log.${c}`)
+    .map((c) => `inventory_audit_log.${c}`),
+  ...['session_id', 'user_id', 'expires_at', 'revoked_at', 'last_modified'].map((c) => `revoked_sessions.${c}`) // migration 007
 ];
+const EXPECTED_TRIGGERS = ['trg_order_profiles_last_modified', 'trg_inventory_items_notify', 'trg_order_profiles_assign_tracking_no'];
 
 const checkCloudSchema = async (pgPool) => {
   const expected = [
@@ -31,11 +33,8 @@ const checkCloudSchema = async (pgPool) => {
     );
     const present = new Set(rows.map((r) => r.col));
     const missing = expected.filter((c) => !present.has(c));
-    const triggers = await pgPool.query(
-      `SELECT tgname FROM pg_trigger WHERE tgname IN ('trg_inventory_items_notify', 'trg_order_profiles_last_modified')`
-    );
-    const missingTriggers = ['trg_order_profiles_last_modified', 'trg_inventory_items_notify']
-      .filter((t) => !triggers.rows.some((r) => r.tgname === t));
+    const triggers = await pgPool.query('SELECT tgname FROM pg_trigger WHERE tgname = ANY($1::text[])', [EXPECTED_TRIGGERS]);
+    const missingTriggers = EXPECTED_TRIGGERS.filter((t) => !triggers.rows.some((r) => r.tgname === t));
 
     if (missing.length === 0 && missingTriggers.length === 0) {
       console.log('✅ Cloud schema matches the backend');

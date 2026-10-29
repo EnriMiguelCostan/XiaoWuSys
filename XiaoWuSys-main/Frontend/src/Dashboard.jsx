@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
-import { RefreshCw, CloudOff, CalendarClock, AlarmClock, Wallet, PackageX, Copy, Download, TrendingUp } from 'lucide-react';
+import { RefreshCw, CloudOff, CalendarClock, AlarmClock, Wallet, PackageX, Copy, Download, TrendingUp, TriangleAlert } from 'lucide-react';
 import { createApi, errorText, peso, formatDateTime, downloadFile, copyText } from './api';
 import { ResultDialog } from './Dialogs';
+import { orderNumber } from './lib/orders';
 
 // Dashboard (replaces the old Analytics tab): what needs attention today.
 //   GET /api/reports/dashboard          orders due / overdue, unpaid balances, income, restock list
 //   GET /api/reports/export/*.csv       Excel / Google Sheets downloads
 const FINANCE_ROLES = ['Owner', 'Admin'];
-const shortId = (id) => String(id || '').slice(0, 8).toUpperCase();
+const PIN_NAMES = 4; // materials named in the pinned warning before "and N more"
 const monthLabel = (ym) => new Date(`${ym}-01T00:00:00`).toLocaleDateString('en-PH', { month: 'short', year: '2-digit' });
 
 export default function Dashboard({ apiBase, token, userRole, onUnauthorized, refreshKey, onOpenOrders }) {
@@ -84,6 +85,23 @@ export default function Dashboard({ apiBase, token, userRole, onUnauthorized, re
         </div>
       </div>
 
+      {/* PB 17: pinned while any material is at or below its low-stock alert. It updates live
+          (the Catalog's real-time push refreshes this page) and disappears once stock is added. */}
+      {inventory.restock.length > 0 && (
+        <div role="status" aria-live="polite" style={d.lowStockPin}>
+          <TriangleAlert size={20} color="#92400e" style={{ flexShrink: 0 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <strong>Low stock: {inventory.restock.length} material{inventory.restock.length === 1 ? '' : 's'} need{inventory.restock.length === 1 ? 's' : ''} restocking</strong>
+            {inventory.summary.out_of_stock > 0 && <> ({inventory.summary.out_of_stock} out of stock)</>}.
+            <span style={{ display: 'block', fontSize: '0.8rem', marginTop: '0.15rem' }}>
+              {inventory.restock.slice(0, PIN_NAMES).map((r) => `${r.item_name} (${r.free} ${r.unit} free)`).join(', ')}
+              {inventory.restock.length > PIN_NAMES ? `, and ${inventory.restock.length - PIN_NAMES} more` : ''}
+            </span>
+          </div>
+          <a href="#restock-list" style={d.pinLink}>See restock list</a>
+        </div>
+      )}
+
       {data.source === 'local' && (
         <p style={{ ...d.banner, ...d.bannerWarn }}><CloudOff size={16} /> Offline: these numbers come from the copy on this computer.</p>
       )}
@@ -103,7 +121,7 @@ export default function Dashboard({ apiBase, token, userRole, onUnauthorized, re
         <OrderList title="Due in the next 7 days" empty="No deadlines this week." rows={orders.due_this_week} tone="#92400e" canSeeMoney={canSeeMoney} onOpen={onOpenOrders} />
       </div>
 
-      <section style={d.panel}>
+      <section style={d.panel} id="restock-list">
         <div style={d.panelHead}>
           <h3 style={d.h3}>Restock list</h3>
           {inventory.restock.length > 0 && (
@@ -203,7 +221,7 @@ function OrderList({ title, empty, rows, tone, canSeeMoney, onOpen }) {
             <tbody>
               {rows.map((o) => (
                 <tr key={o.order_id} onClick={onOpen} style={{ cursor: onOpen ? 'pointer' : 'default' }}>
-                  <td style={d.td}><code style={d.code}>#{shortId(o.order_id)}</code></td>
+                  <td style={d.td}><code style={d.code}>{orderNumber(o)}</code></td>
                   <td style={d.td}>{o.customer_name}</td>
                   <td style={d.td}>{formatDateTime(o.production_deadline, { withTime: false })}</td>
                   <td style={d.td}>{o.production_status}</td>
@@ -225,6 +243,8 @@ const d = {
   meta: { fontSize: '0.8rem', color: '#64748b', margin: '0.25rem 0 0' },
   banner: { display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem', borderRadius: '0.375rem', margin: '0 0 1rem', fontSize: '0.875rem' },
   bannerWarn: { background: '#fef3c7', color: '#92400e' },
+  lowStockPin: { position: 'sticky', top: 0, zIndex: 5, display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.75rem 1rem', margin: '0 0 1rem', background: '#fef9c3', border: '1px solid #facc15', borderLeft: '6px solid #eab308', borderRadius: '0.375rem', color: '#713f12', fontSize: '0.875rem', boxShadow: '0 2px 6px rgba(0,0,0,0.08)' },
+  pinLink: { color: '#713f12', fontWeight: 'bold', fontSize: '0.85rem', whiteSpace: 'nowrap' },
   bannerError: { background: '#fee2e2', color: '#991b1b' },
   btn: { display: 'flex', alignItems: 'center', gap: '0.3rem', padding: '0.5rem 0.9rem', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '0.375rem', cursor: 'pointer', color: '#4f46e5', fontWeight: 'bold', fontSize: '0.85rem' },
   cards: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.75rem', marginBottom: '1rem' },

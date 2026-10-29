@@ -13,6 +13,8 @@ describe('Customers and orders', () => {
     t = await startTestServer();
     token = await t.login('production');
     await t.login('staff');
+    await t.login('owner');
+    await t.login('admin');
     for (const it of fixtures.ITEMS) {
       const r = await t.request('POST', '/api/inventory', { token, body: it });
       items[it.item_name] = r.body.item.inventory_id;
@@ -45,13 +47,29 @@ describe('Customers and orders', () => {
   });
 
   let orderId;
+  it('lets only the Owner put a price on a new order', async () => {
+    const before = (await t.get('SELECT COUNT(*) AS n FROM order_profiles')).n;
+    for (const who of ['production', 'admin']) {
+      const r = await t.request('POST', '/api/orders', {
+        token: t.tokens[who],
+        body: {
+          customer_id: customers['Maria Santos'], production_deadline: shopDate(4), total_quote_amount: 999,
+          required_items: [{ inventory_id: items['Deli A4 Paper'], quantity_needed: 1 }]
+        }
+      });
+      assert.equal(r.status, 403, who);
+      assert.equal(r.body.error, 'QUOTE_OWNER_ONLY');
+      assert.match(r.body.message, /^Only the Owner can set or change the quote\./);
+    }
+    assert.equal((await t.get('SELECT COUNT(*) AS n FROM order_profiles')).n, before, 'nothing was saved');
+  });
+
   it('creates an order and reserves its materials in the catalog', async () => {
     const r = await t.request('POST', '/api/orders', {
       token,
       body: {
         customer_id: customers['Agdao National High School'],
         production_deadline: shopDate(10),
-        total_quote_amount: 52500,
         required_items: [
           { inventory_id: items['Custom Shirt'], quantity_needed: 300 },
           { inventory_id: items['Custom Shirt'], quantity_needed: 50 },
@@ -62,7 +80,13 @@ describe('Customers and orders', () => {
     assert.equal(r.status, 201, r.text);
     assert.equal(r.body.items.length, 2, 'two lines of the same material are merged');
     assert.equal(r.body.order.stock_reserved, true);
+    assert.equal(r.body.order.total_quote_amount, 0, 'no price until the Owner sets one');
+    assert.equal(r.body.order.tracking_no, null, 'an order saved offline gets its number when it syncs');
     orderId = r.body.order_id;
+
+    const priced = await t.request('PATCH', `/api/orders/${orderId}/details`, { token: t.tokens.owner, body: { total_quote_amount: 52500 } });
+    assert.equal(priced.status, 200, priced.text);
+    assert.equal(priced.body.order.total_quote_amount, 52500);
 
     const cat = await t.request('GET', '/api/inventory', { token });
     const shirt = cat.body.items.find((i) => i.inventory_id === items['Custom Shirt']);
@@ -114,16 +138,26 @@ describe('Customers and orders', () => {
     assert.deepEqual([d.body.totals.total_paid, d.body.totals.balance], [27250.5, 25249.5]);
   });
 
-  it('edits the deadline and quote of an open order', async () => {
-    const r = await t.request('PATCH', `/api/orders/${orderId}/details`, { token, body: { production_deadline: shopDate(14), total_quote_amount: 53000 } });
+  it('edits the deadline and quote of an open order (the quote by the Owner only)', async () => {
+    const owner = t.tokens.owner;
+    const r = await t.request('PATCH', `/api/orders/${orderId}/details`, { token: owner, body: { production_deadline: shopDate(14), total_quote_amount: 53000 } });
     assert.equal(r.status, 200, r.text);
     assert.deepEqual(r.body.changed.sort(), ['production_deadline', 'total_quote_amount']);
     assert.equal(r.body.order.total_quote_amount, 53000);
     assert.equal(r.body.order.production_deadline.slice(0, 10), shopDate(14));
-    const none = await t.request('PATCH', `/api/orders/${orderId}/details`, { token, body: { total_quote_amount: 53000 } });
+    const none = await t.request('PATCH', `/api/orders/${orderId}/details`, { token: owner, body: { total_quote_amount: 53000 } });
     assert.deepEqual(none.body.changed, []);
+
+    for (const who of ['production', 'admin']) {
+      const blocked = await t.request('PATCH', `/api/orders/${orderId}/details`, { token: t.tokens[who], body: { total_quote_amount: 1 } });
+      assert.equal(blocked.status, 403, who);
+      assert.equal(blocked.body.error, 'QUOTE_OWNER_ONLY');
+    }
+    const deadline = await t.request('PATCH', `/api/orders/${orderId}/details`, { token, body: { production_deadline: shopDate(15) } });
+    assert.equal(deadline.status, 200, 'production staff can still move the deadline');
     const staff = await t.request('PATCH', `/api/orders/${orderId}/details`, { token: t.tokens.staff, body: { total_quote_amount: 1 } });
     assert.equal(staff.status, 403);
+    assert.equal((await t.get('SELECT total_quote_amount AS q FROM order_profiles WHERE order_id = ?', [orderId])).q, 53000, 'unchanged');
   });
 
   it('adds print details (sizes, names, numbers) to an order', async () => {
@@ -144,9 +178,18 @@ describe('Customers and orders', () => {
   });
 
   it('keeps stock-moving actions online-only, with a clear reason', async () => {
-    const status = await t.request('PATCH', `/api/orders/${orderId}/status`, { token, body: { status: 'Cancelled' } });
+    const status = await t.request('PATCH', `/api/orders/${orderId}/status`, { token: t.tokens.owner, body: { status: 'Cancelled' } });
     assert.equal(status.status, 503);
     assert.equal(status.body.error, 'STATUS_CHANGE_REQUIRES_CLOUD');
+  });
+
+  it('lets only the Owner cancel (void) an order', async () => {
+    for (const who of ['production', 'admin']) {
+      const r = await t.request('PATCH', `/api/orders/${orderId}/status`, { token: t.tokens[who], body: { status: 'Cancelled' } });
+      assert.equal(r.status, 403, who);
+      assert.equal(r.body.error, 'VOID_OWNER_ONLY');
+    }
+    assert.equal((await t.get('SELECT production_status AS s FROM order_profiles WHERE order_id = ?', [orderId])).s, 'Pending');
   });
 
   it('does not let a deleted material be ordered', async () => {

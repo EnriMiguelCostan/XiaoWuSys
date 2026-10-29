@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  RefreshCw, ClipboardList, X, ChevronLeft, ChevronRight, CloudOff, Printer, CircleCheck, CircleX, RotateCcw, Wallet, ShieldCheck, TriangleAlert, ArrowUp, ArrowDown, ArrowUpDown, Pencil, Copy, Link2, Shirt
+  RefreshCw, ClipboardList, X, ChevronLeft, ChevronRight, CloudOff, Printer, CircleCheck, CircleX, RotateCcw, Wallet, ShieldCheck, TriangleAlert, ArrowUp, ArrowDown, ArrowUpDown, Pencil, Copy, Link2, Shirt, Search
 } from 'lucide-react';
 import { createApi, errorText, peso, formatDateTime, copyText, todayInManila } from './api';
 import { ResultDialog, ConfirmDialog } from './Dialogs';
+import { orderActions } from './lib/permissions';
+import { orderNumber, hasOrderNumber, normalizeOrderNumber, shortfallLines, NUMBER_AFTER_SYNC } from './lib/orders';
 
 // Orders tab: every order profile, newest first, with its materials, payments and status.
 //   GET   /api/orders?status=&limit=&offset=      list
@@ -13,11 +15,13 @@ import { ResultDialog, ConfirmDialog } from './Dialogs';
 //   POST  /api/orders/:id/payments                record a payment
 // Status changes move stock (reserve on approval, release on Cancel, consume on Complete),
 // and the Catalog updates by itself through the real-time push.
+// Which buttons appear comes from the server ("allowed_actions" on each order), so this
+// screen keeps no copy of the role or status rules.
 
 const PAGE_SIZE = 20;
-const WRITE_ROLES = ['Owner', 'Admin', 'Production'];
 const PAYMENT_TYPES = ['Cash', 'GCash', 'Bank Transfer'];
-const APPROVABLE = ['Pending', 'Delayed'];
+// Statuses that show the approval progress box (display only; the server decides who may approve)
+const AWAITING_APPROVAL = ['Pending', 'Delayed'];
 
 // Sort options (the server sorts, see GET /api/orders?sort=&dir=)
 const SORT_OPTIONS = [
@@ -41,20 +45,15 @@ const ORDER_STATUS_META = {
   Cancelled: { bg: '#fee2e2', color: '#991b1b' }
 };
 
-// Must match STATUS_TRANSITIONS in Backend/routes/orders.js.
-// Pending -> Approved is not a status change: it is the Owner-only Approve Job Order button.
-const ACTIONS = {
-  Pending: [{ to: 'Cancelled', label: 'Cancel Order', Icon: CircleX, danger: true }],
-  Approved: [{ to: 'Printing', label: 'Start Printing', Icon: Printer }, { to: 'Cancelled', label: 'Cancel Order', Icon: CircleX, danger: true }],
-  Printing: [{ to: 'Completed', label: 'Mark Completed', Icon: CircleCheck }, { to: 'Cancelled', label: 'Cancel Order', Icon: CircleX, danger: true }],
-  Delayed: [{ to: 'Pending', label: 'Resume (reserve stock)', Icon: RotateCcw }, { to: 'Cancelled', label: 'Cancel Order', Icon: CircleX, danger: true }],
-  Completed: [],
-  Cancelled: []
+// Label and icon for each status button. WHICH buttons appear comes from the server
+// (allowed_actions.statuses); Approve is its own Owner-only button.
+const ACTION_META = {
+  Printing: { label: 'Start Printing', Icon: Printer },
+  Completed: { label: 'Mark Completed', Icon: CircleCheck },
+  Pending: { label: 'Resume (reserve stock)', Icon: RotateCcw },
+  Cancelled: { label: 'Cancel Order', Icon: CircleX, danger: true }
 };
-
-const shortId = (id) => (id ? String(id).slice(0, 8).toUpperCase() : '—');
-const EDITABLE = ['Pending', 'Approved', 'Printing', 'Delayed'];
-const QUOTE_EDITABLE = ['Pending', 'Delayed'];
+const statusAction = (to) => ({ to, label: to, Icon: CircleCheck, ...ACTION_META[to] });
 const EMPTY_PRINT_LINE = { product_type: 'Jersey print', quantity: '1', size: '', custom_name: '', custom_number: '' };
 const lineText = (it) => {
   const extra = [it.size, it.custom_name, it.custom_number && `#${it.custom_number}`].filter(Boolean).join(', ');
@@ -66,7 +65,7 @@ const escapeHtml = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&a
 const messengerSummary = (detail, customer) => {
   const { order, items, totals } = detail;
   return [
-    `Hi ${customer?.full_name || ''}! Here is your XiaoMei Printshop order #${shortId(order.order_id)}:`,
+    `Hi ${customer?.full_name || ''}! Here is your XiaoMei Printshop order${hasOrderNumber(order) ? ` ${order.tracking_no}` : ''}:`,
     ...items.map((it) => `• ${lineText(it)}`),
     `Deadline: ${formatDateTime(order.production_deadline, { withTime: false })}`,
     `Total: ${peso(order.total_quote_amount)}`,
@@ -81,13 +80,14 @@ const messengerSummary = (detail, customer) => {
 // Printable job order for the production team (opens the browser's print window)
 const printJobOrder = (detail, customer) => {
   const { order, items, totals, payments } = detail;
+  const label = hasOrderNumber(order) ? order.tracking_no : '(number given after sync)';
   const w = window.open('', '_blank', 'width=800,height=900');
   if (!w) return false;
-  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Job Order #${escapeHtml(shortId(order.order_id))}</title>
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Job Order ${escapeHtml(label)}</title>
 <style>body{font-family:Arial,sans-serif;margin:24px;color:#111}h1{font-size:20px;margin:0 0 4px}table{width:100%;border-collapse:collapse;margin:12px 0}
 th,td{border:1px solid #999;padding:6px;text-align:left;font-size:13px}td.n,th.n{text-align:right}.meta{font-size:13px;margin:2px 0}.sign{margin-top:40px;display:flex;gap:40px}
 .sign div{flex:1;border-top:1px solid #333;padding-top:4px;font-size:12px}@media print{button{display:none}}</style></head><body>
-<h1>XiaoMei Printshop — Job Order #${escapeHtml(shortId(order.order_id))}</h1>
+<h1>XiaoMei Printshop — Job Order ${escapeHtml(label)}</h1>
 <p class="meta"><b>Customer:</b> ${escapeHtml(customer?.full_name || order.customer_id)} ${customer?.contact_number ? `· ${escapeHtml(customer.contact_number)}` : ''}</p>
 <p class="meta"><b>Status:</b> ${escapeHtml(order.production_status)} · <b>Deadline:</b> ${escapeHtml(formatDateTime(order.production_deadline, { withTime: false }))}</p>
 ${order.design_drive_link ? `<p class="meta"><b>Design file:</b> ${escapeHtml(order.design_drive_link)}</p>` : ''}
@@ -121,6 +121,10 @@ const approvalReadiness = (detail) => {
   if (offlinePayments > 0) problems.push(`${offlinePayments} payment(s) saved offline do not count until they sync.`);
   if (items.length === 0) problems.push('Add at least one material to this order.');
   else if (unlinked > 0) problems.push(`${unlinked} item(s) are not linked to a stock item.`);
+  // PB 9: the server's stock check for orders that still have to reserve their materials
+  if (detail.stock_check && !detail.stock_check.sufficient) {
+    problems.push(...shortfallLines(detail.stock_check).map((line) => `Not enough stock: ${line}`));
+  }
   return {
     quoteC, requiredC, paidC,
     percent: requiredC > 0 ? Math.min(100, Math.floor((paidC / requiredC) * 100)) : 0,
@@ -129,13 +133,14 @@ const approvalReadiness = (detail) => {
   };
 };
 
-export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, refreshKey, onStockChanged }) {
+export default function OrdersPage({ apiBase, token, onUnauthorized, refreshKey, onStockChanged, inventoryKey }) {
   const api = useMemo(() => createApi({ apiBase, token, onUnauthorized }), [apiBase, token, onUnauthorized]);
-  const canWrite = WRITE_ROLES.includes(userRole);
-  const isOwner = userRole === 'Owner'; // UI only; the server enforces Owner-only approval
 
   const [statusFilter, setStatusFilter] = useState('');
   const [customerFilter, setCustomerFilter] = useState('');
+  const [numberFilter, setNumberFilter] = useState('');  // PB 6: find by order number
+  const [numberDraft, setNumberDraft] = useState('');
+  const [numberError, setNumberError] = useState('');
   const [sort, setSort] = useState(DEFAULT_SORT); // { key, dir }: sorted by the server across all pages
   const [page, setPage] = useState(0);
   const [list, setList] = useState({ orders: [], source: null, unsynced: 0 });
@@ -176,6 +181,7 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
     });
     if (statusFilter) qs.set('status', statusFilter);
     if (customerFilter) qs.set('customer_id', customerFilter);
+    if (numberFilter) qs.set('tracking_no', numberFilter);
     api('GET', `/orders?${qs}`).then(({ ok, data }) => {
       if (cancelled) return;
       setLoading(false);
@@ -184,19 +190,32 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
       setList({ orders: data.orders || [], source: data.source, unsynced: data.unsynced || 0 });
     });
     return () => { cancelled = true; };
-  }, [api, page, statusFilter, customerFilter, sort, refreshKey, tick]);
+  }, [api, page, statusFilter, customerFilter, numberFilter, sort, refreshKey, tick]);
 
   // Any filter / sort change starts again at page 1
   const changeFilter = (setter) => (value) => { setter(value); setPage(0); setLoading(true); };
   const setStatus = changeFilter(setStatusFilter);
   const setCustomer = changeFilter(setCustomerFilter);
+  const setNumber = changeFilter(setNumberFilter);
   const setSortTo = changeFilter(setSort);
+  const findNumber = (e) => {
+    e.preventDefault();
+    if (numberDraft.trim() === '') { setNumberError(''); setNumber(''); return; }
+    const value = normalizeOrderNumber(numberDraft);
+    if (!value) { setNumberError('An order number looks like XM-2026-0123.'); return; }
+    setNumberError('');
+    setNumberDraft(value);
+    setNumber(value);
+  };
   // Column header click: same column flips the direction, a new column starts at its natural direction
   const sortByColumn = (key) => setSortTo(sort.key === key
     ? { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' }
     : { key, dir: SORT_DEFAULT_DIR[key] });
-  const filtersActive = statusFilter || customerFilter || sort.key !== DEFAULT_SORT.key || sort.dir !== DEFAULT_SORT.dir;
-  const clearFilters = () => { setStatusFilter(''); setCustomerFilter(''); setSort(DEFAULT_SORT); setPage(0); setLoading(true); };
+  const filtersActive = statusFilter || customerFilter || numberFilter || sort.key !== DEFAULT_SORT.key || sort.dir !== DEFAULT_SORT.dir;
+  const clearFilters = () => {
+    setStatusFilter(''); setCustomerFilter(''); setNumberFilter(''); setNumberDraft(''); setNumberError('');
+    setSort(DEFAULT_SORT); setPage(0); setLoading(true);
+  };
 
   // Closes the detail pop-up on Escape (only when no inner dialog is open)
   useEffect(() => {
@@ -221,7 +240,7 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
       setDetail(data);
     });
     return () => { cancelled = true; };
-  }, [api, selectedId, detailTick, refreshKey]);
+  }, [api, selectedId, detailTick, refreshKey, inventoryKey]);
 
   const resetEditors = () => { setEditDetails(null); setDesignDraft(null); setPrintLine(null); };
   const openOrder = (id) => {
@@ -342,8 +361,8 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
   const saveDetails = async (e) => {
     e.preventDefault();
     const body = {};
-    if (editDetails.deadline && editDetails.deadline !== String(detail.order.production_deadline).slice(0, 10)) body.production_deadline = editDetails.deadline;
-    if (QUOTE_EDITABLE.includes(detail.order.production_status)) {
+    if (actions.edit_deadline && editDetails.deadline && editDetails.deadline !== String(detail.order.production_deadline).slice(0, 10)) body.production_deadline = editDetails.deadline;
+    if (actions.edit_quote) {
       const q = editDetails.quote.trim() === '' ? 0 : Number(editDetails.quote);
       if (!Number.isFinite(q) || q < 0 || Math.abs(Math.round(q * 100) - q * 100) > 1e-6) {
         return setResult({ type: 'error', title: 'Please check the quote', message: 'The quote must be a peso amount of 0 or more, like 1500 or 1500.50.' });
@@ -404,8 +423,11 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
   };
 
   const order = detail?.order;
+  const actions = orderActions(detail);
   const hasNext = list.orders.length === PAGE_SIZE;
-  const readiness = order && APPROVABLE.includes(order.production_status) ? approvalReadiness(detail) : null;
+  const readiness = order && AWAITING_APPROVAL.includes(order.production_status) ? approvalReadiness(detail) : null;
+  const stockShort = Boolean(detail?.stock_check && !detail.stock_check.sufficient);
+  const footerActions = order ? actions.statuses.map(statusAction) : [];
 
   return (
     <div style={o.root}>
@@ -447,6 +469,15 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
             )}
           </select>
         </label>
+        <form onSubmit={findNumber} style={o.control} role="search" aria-label="Find an order by its number">
+          <span style={o.controlLabel}>Order number</span>
+          <span style={{ display: 'flex', gap: '0.35rem' }}>
+            <input value={numberDraft} onChange={(e) => setNumberDraft(e.target.value)} placeholder="XM-2026-0123"
+              aria-label="Order number" aria-invalid={Boolean(numberError)} style={{ ...o.input, flex: 1 }} />
+            <button type="submit" style={o.btn} aria-label="Find order"><Search size={14} /></button>
+          </span>
+          {numberError && <span style={{ ...o.meta, color: '#b91c1c' }}>{numberError}</span>}
+        </form>
         {filtersActive && (
           <button type="button" onClick={clearFilters} style={o.clearBtn}>Clear filters</button>
         )}
@@ -474,7 +505,8 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
           <tbody>
             {!loading && list.orders.length === 0 && !listError && (
               <tr><td colSpan={6} style={o.emptyCell}>
-                {statusFilter || customerFilter ? 'No orders match these filters.' : 'No orders yet. Create one in the Create Order tab.'}
+                {numberFilter ? `No order has the number ${numberFilter}.`
+                  : statusFilter || customerFilter ? 'No orders match these filters.' : 'No orders yet. Create one in the Create Order tab.'}
               </td></tr>
             )}
             {list.orders.map((ord) => {
@@ -482,7 +514,7 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
               return (
                 <tr key={ord.order_id} onClick={() => openOrder(ord.order_id)} style={o.row} tabIndex={0}
                   onKeyDown={(e) => { if (e.key === 'Enter') openOrder(ord.order_id); }}>
-                  <td style={o.td}><code style={o.code}>#{shortId(ord.order_id)}</code>{ord.sync_status !== 'synced' && <span style={o.pending}>pending sync</span>}</td>
+                  <td style={o.td}><code style={o.code}>{orderNumber(ord)}</code>{ord.sync_status !== 'synced' && <span style={o.pending}>pending sync</span>}</td>
                   <td style={o.td}>{customerName(ord.customer_id)}</td>
                   <td style={o.td}>{formatDateTime(ord.date_created, { utc: true })}</td>
                   <td style={o.td}>{formatDateTime(ord.production_deadline, { withTime: false })}</td>
@@ -509,7 +541,7 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
           <section role="dialog" aria-modal="true" aria-labelledby="order-detail-title" style={o.modal} onClick={(e) => e.stopPropagation()}>
             <div style={o.modalHead}>
               <h3 id="order-detail-title" style={{ margin: 0, fontSize: '1.15rem', color: '#0f172a', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                Order <code style={o.code}>#{shortId(selectedId)}</code>
+                Order <code style={o.code}>{order ? orderNumber(order) : '…'}</code>
                 {order && (
                   <span style={{ ...o.badge, background: (ORDER_STATUS_META[order.production_status] || ORDER_STATUS_META.Pending).bg, color: (ORDER_STATUS_META[order.production_status] || ORDER_STATUS_META.Pending).color }}>
                     {order.production_status}
@@ -544,30 +576,39 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                     <Info label="Approved" value={formatDateTime(order.approved_at, { utc: true })} sub="by the Owner" />
                   )}
                 </div>
-                <p style={{ ...o.meta, margin: '0.25rem 0 1rem' }}>Full order ID: <code style={o.code}>{order.order_id}</code></p>
+                <p style={{ ...o.meta, margin: '0.25rem 0 1rem' }}>
+                  {hasOrderNumber(order) ? <>Order number <strong>{order.tracking_no}</strong>. </> : `${NUMBER_AFTER_SYNC} `}
+                  Internal ID: <code style={o.code}>{order.order_id}</code>
+                </p>
 
-                {/* Edit deadline / quote */}
-                {canWrite && EDITABLE.includes(order.production_status) && (
+                {/* Edit deadline / quote (the quote by the Owner only) */}
+                {(actions.edit_deadline || actions.edit_quote) && (
                   editDetails ? (
                     <form onSubmit={saveDetails} style={o.editBox}>
-                      <label style={o.control}>
-                        <span style={o.controlLabel}>Deadline</span>
-                        <input type="date" min={todayInManila()} value={editDetails.deadline} required style={o.input}
-                          onChange={(e) => setEditDetails({ ...editDetails, deadline: e.target.value })} />
-                      </label>
-                      <label style={o.control}>
-                        <span style={o.controlLabel}>Quote (₱)</span>
-                        <input type="number" min="0" step="0.01" inputMode="decimal" value={editDetails.quote} style={o.input}
-                          disabled={!QUOTE_EDITABLE.includes(order.production_status)}
-                          title={QUOTE_EDITABLE.includes(order.production_status) ? '' : 'The quote is fixed after approval'}
-                          onChange={(e) => setEditDetails({ ...editDetails, quote: e.target.value })} />
-                      </label>
+                      {actions.edit_deadline && (
+                        <label style={o.control}>
+                          <span style={o.controlLabel}>Deadline</span>
+                          <input type="date" min={todayInManila()} value={editDetails.deadline} required style={o.input}
+                            onChange={(e) => setEditDetails({ ...editDetails, deadline: e.target.value })} />
+                        </label>
+                      )}
+                      {actions.edit_quote && (
+                        <label style={o.control}>
+                          <span style={o.controlLabel}>Quote (₱)</span>
+                          <input type="number" min="0" step="0.01" inputMode="decimal" value={editDetails.quote} style={o.input}
+                            onChange={(e) => setEditDetails({ ...editDetails, quote: e.target.value })} />
+                        </label>
+                      )}
                       <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'flex-end' }}>
                         <button type="button" style={o.btn} onClick={() => setEditDetails(null)} disabled={busy}>Cancel</button>
                         <button type="submit" style={o.btnPrimary} disabled={busy}>Save</button>
                       </div>
-                      {!QUOTE_EDITABLE.includes(order.production_status) && (
-                        <p style={{ ...o.meta, flexBasis: '100%' }}>The quote cannot change after approval, because the downpayment was based on it.</p>
+                      {!actions.edit_quote && (
+                        <p style={{ ...o.meta, flexBasis: '100%' }}>
+                          {['Pending', 'Delayed'].includes(order.production_status)
+                            ? 'Only the Owner can change the quote.'
+                            : 'The quote cannot change after approval, because the downpayment was based on it.'}
+                        </p>
                       )}
                     </form>
                   ) : (
@@ -575,7 +616,7 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                       deadline: String(order.production_deadline).slice(0, 10) < todayInManila() ? todayInManila() : String(order.production_deadline).slice(0, 10),
                       quote: String(order.total_quote_amount ?? 0)
                     })}>
-                      <Pencil size={14} /> Edit deadline / quote
+                      <Pencil size={14} /> {actions.edit_quote ? 'Edit deadline / quote' : 'Edit deadline'}
                     </button>
                   )
                 )}
@@ -595,7 +636,7 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                       {order.design_drive_link
                         ? <a href={order.design_drive_link} target="_blank" rel="noopener noreferrer" style={o.link}>Open design file (Google Drive)</a>
                         : <span style={o.meta}>No design file linked yet.</span>}
-                      {canWrite && EDITABLE.includes(order.production_status) && (
+                      {actions.link_design && (
                         <button type="button" style={o.linkBtn} onClick={() => setDesignDraft(order.design_drive_link || '')}>
                           {order.design_drive_link ? 'Change' : 'Link design file'}
                         </button>
@@ -629,7 +670,7 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                   </table>
                 )}
 
-                {canWrite && EDITABLE.includes(order.production_status) && (
+                {actions.add_items && (
                   printLine ? (
                     <form onSubmit={savePrintLine} style={o.editBox}>
                       <label style={{ ...o.control, flex: '2 1 160px' }}>
@@ -698,7 +739,7 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                     </tfoot>
                   </table>
                 )}
-                {canWrite && order.production_status !== 'Cancelled' && (
+                {actions.record_payment && (
                   <form onSubmit={addPayment} style={o.payForm}>
                     <input type="number" min="0.01" step="0.01" inputMode="decimal" placeholder="Amount (₱)" required
                       value={payment.amount} onChange={(e) => setPayment({ ...payment, amount: e.target.value })} style={{ ...o.input, flex: 2 }} />
@@ -735,7 +776,7 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                         {readiness.notes.map((n) => <li key={n}>{n}</li>)}
                       </ul>
                     )}
-                    {!isOwner && (
+                    {!actions.approve && (
                       <p style={{ ...o.meta, marginTop: '0.6rem' }}>Waiting for the Owner to approve this job order before printing can start.</p>
                     )}
                   </section>
@@ -748,9 +789,9 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
             )}
 
             {/* Actions stay visible at the bottom of the pop-up while the details scroll */}
-            {order && ((readiness && isOwner) || (canWrite && (ACTIONS[order.production_status] || []).length > 0)) && (
+            {order && ((readiness && actions.approve) || footerActions.length > 0) && (
               <div style={o.modalFoot}>
-                {readiness && isOwner && (
+                {readiness && actions.approve && (
                   <button type="button" style={{ ...o.btnApprove, ...(readiness.blocking.length || busy ? o.btnDisabled : {}) }}
                     disabled={busy || readiness.blocking.length > 0}
                     title={readiness.blocking[0] || 'Approve this job order'}
@@ -758,18 +799,23 @@ export default function OrdersPage({ apiBase, token, userRole, onUnauthorized, r
                     <ShieldCheck size={16} /> Approve Job Order
                   </button>
                 )}
-                {readiness && isOwner && readiness.blocking.length > 0 && (
+                {readiness && actions.approve && readiness.blocking.length > 0 && (
                   <span style={o.footHint}>{readiness.blocking[0]}</span>
                 )}
-                {canWrite && (
+                {footerActions.length > 0 && (
                   <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginLeft: 'auto' }}>
-                    {(ACTIONS[order.production_status] || []).map((action) => (
-                      <button key={action.to} type="button" disabled={busy}
-                        onClick={() => (action.danger ? setPendingAction(action) : changeStatus(action))}
-                        style={action.danger ? o.btnDanger : o.btnPrimary}>
-                        <action.Icon size={16} /> {action.label}
-                      </button>
-                    ))}
+                    {footerActions.map((action) => {
+                      // PB 9: Resume reserves stock, so it is greyed out while the free stock is short
+                      const blocked = action.to === 'Pending' && stockShort;
+                      return (
+                        <button key={action.to} type="button" disabled={busy || blocked}
+                          title={blocked ? `Not enough stock to resume: ${shortfallLines(detail.stock_check)[0] || ''}` : action.label}
+                          onClick={() => (action.danger ? setPendingAction(action) : changeStatus(action))}
+                          style={{ ...(action.danger ? o.btnDanger : o.btnPrimary), ...(blocked ? o.btnDisabled : {}) }}>
+                          <action.Icon size={16} /> {action.label}
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
               </div>
