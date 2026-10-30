@@ -79,8 +79,8 @@ Code status was checked against the UAC on 2026-10-29.
 | 25 | 1 | Environment & server setup | Partly | CI pipeline done in Batch 1; hosting config remains |
 | 1 | 1 | Login / logout | Done (Batch 1) | — |
 | 2 | 2 | Role-based authorization | Done (Batch 1) | — |
-| 3 | 3 | Local data cache (offline) | Mostly | **Batch 2:** connection watcher |
-| 4 | 4 | Asynchronous cloud sync | Mostly | **Batch 2:** sync on reconnect, "Sync now" |
+| 3 | 3 | Local data cache (offline) | Done (Batch 2) | — |
+| 4 | 4 | Asynchronous cloud sync | Done (Batch 2) | Conflict resolution screens are Batch 3 (3.6) |
 | 5 | 5 | Owner overrides staff edits | Partly | **Batch 3:** Owner wins, staff notified, offline conflicts resolved by rank |
 | 6 | 6 | Create order profile | Done (Batch 1) | — |
 | 7 | 7 | Encode order details | Done | — |
@@ -97,7 +97,7 @@ Code status was checked against the UAC on 2026-10-29.
 | 18 | 13 | Record material loss | Partly | Misprint form with reason codes (§7) |
 | 19 | 13 | Differentiate defect type | Not started | Scope to agree with adviser |
 | 20 | 13 | Log financial waste cost | Mostly | Show waste cost in reports |
-| 21 | 14 | Process payment | Mostly | **Batch 2:** cap, labels, receiver, receipt |
+| 21 | 14 | Process payment | Done (Batch 2) | Refunds and voids are PB 23 |
 | 22 | 14 | Generate P&L report | Not started | Needs overhead entry; client's top priority |
 | 23 | 14 | Void transaction | Partly | Reason, voided payments, audit (§7) |
 | 26 | 15 | QA & load testing | Partly | 100+ concurrent-request test |
@@ -132,9 +132,21 @@ Batch 1 has no dependency on the other batches. It also lays down the shared dom
 | 1.5 | 17 | **Pinned yellow low-stock warning** | No server change. The dashboard already returns `inventory.restock`. | A yellow banner pinned at the top of the Dashboard lists low and out-of-stock items. It updates live from `inventory_updated` and disappears once stock is restocked. |
 | 1.6 | 25 | **CI (optional, needs confirmation)** | Add `.github/workflows/ci.yml`: backend `npm ci && npm test`, frontend `npm ci && npm run lint && npm run build`. | — |
 
-### Batch 2: Connection awareness and payments (migration `008`)
+### Batch 2: Connection awareness and payments (migration `008`) — BUILT
 
 Payments and the connection status both touch the offline/sync path, so they are tested together.
+
+**Decisions taken (2026-10-30):** D1 a printable "Payment Acknowledgement" is enough (not a BIR Official Receipt); D2 offline overpayments are all accepted on sync and the order shows Overpaid for a manual refund; D3 no probing while the cloud is reachable; D4 the payment status is separate from the production status. Defaults confirmed: receipt numbers `AR-YYYY-NNNN` per Manila year from the cloud database (P1); an offline payment prints at once as a provisional acknowledgement (P2); Cancelled orders refuse payments, Completed orders accept them (P3); a payment needs a quote above 0 (P4).
+
+**As built (differences from the table below):**
+- **Cloud health** is `services/cloudHealth.js`. `watchPool()` wraps the pg Pool in `server.js`, so every query reports success or a connection error (C5 rules; data errors are ignored). States: `unknown` (before the first query), `reachable`, `unreachable`, `disabled`. It probes `SELECT 1` every `CLOUD_PROBE_MS` (default 15 s) only while unreachable, and calls `onReconnect` once per unreachable → reachable flip, which runs `syncAndNotify()`. It is injected into `createApp({ cloudHealth })`; the tests pass a stub.
+- `GET /api/sync/status` (any login) and the `sync_status` socket event share one body, built by `buildSyncStatus()` in `services/sync.js`: `{ cloud, cloud_since, last_sync_at, last_sync_result, syncing, pending: {table: n}, pending_total, conflicts }`. `last_sync_at` only moves on a run that reached the cloud; `last_sync_result` is the latest run (`ok`, `conflicts` or `aborted`). The server emits `sync_status` when a screen connects, when the cloud state changes, before and after every sync, and (debounced 500 ms) after any write answered with `source: 'local'` (`createApp({ onLocalWrite })`). `GET /api/status` adds `cloud`.
+- **Connection bar** (`App.jsx`, wording in `src/lib/connection.js`): sticky under the header, with a fourth, short-lived `checking` state while the server has not tried the cloud yet. The 30-second fallback check of `/api/sync/status` runs only while the socket is disconnected. `navigator.onLine` only triggers a re-check.
+- **Payments:** rules in `services/domain/payments.js` (`paymentSummary`, `runningTotals`, `checkPayment`, `downpaymentWarnings`, `paymentBlockedReason`). `allowedActions(order, role, summary)` adds `record_payment` (false when Cancelled, no quote or fully paid), `max_payment`, `payment_blocked_reason` and `print_receipt`. Each payment in `GET /api/orders/:id` and `GET /:id/payments` carries `received_by_name`, `paid_to_date`, `remaining_after` and `status_after` (used by the printed acknowledgement). `totals` adds `remaining`, `overpaid_by`, `payment_status` and `downpayment`; `balance` keeps its old meaning (negative when overpaid).
+- The downpayment warning has a second, non-blocking code: `DOWNPAYMENT_NOT_SYNCED` when the 50% is reached only thanks to payments saved offline (they count for approval after they sync). `DOWNPAYMENT_SHORT` uses all payments, including this one.
+- Offline payments store `payment_date` with milliseconds, so payments in the same second keep their order. Payment lists sort by the qualified column (`payments.payment_date`), not the whole-second SELECT alias.
+- The dashboard's `orders.overpaid` (and `overpaid_total`) is filled only for `view_finance` roles; other roles get an empty list. CSV exports name an unsynced order "New order" instead of its internal id.
+- `tests/helpers/pgTestServer.js` starts the real app on a real PostgreSQL for `tests/payments.pg.test.js`.
 
 | # | PB | Change | Server | Screens |
 |---|---|---|---|---|
@@ -310,7 +322,7 @@ The earlier draft's designs remain valid. They now belong to these backlog items
 2. ~~Batch 1.3: tracking number format?~~ **`XM-2026-0123`, restarting each year.**
 3. ~~Batch 1.1: logout scope?~~ **This device only.**
 4. ~~Batch 1.6: add CI now?~~ **Yes.**
-5. **Batch 2.3:** Is "payment acknowledgement receipt" (not a BIR OR) acceptable? What should happen when two offline branches together overpay?
+5. ~~**Batch 2.3:** Is "payment acknowledgement receipt" (not a BIR OR) acceptable? What should happen when two offline branches together overpay?~~ **D1:** yes, a printable "Payment Acknowledgement" that says it is not an Official Receipt. **D2:** every payment is accepted when it syncs; the order shows "Overpaid" and the Owner refunds by hand (voids/refunds are PB 23).
 6. **Batch 3.1:** Can orders skip Pressing (e.g. mugs), going Printing → Completed?
 7. **PB 15:** Consumable list, usage rates, and the "never block a status change" rule.
 8. **PB 18:** Immediate deduction (UAC), or a report → verify flow?

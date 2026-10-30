@@ -19,20 +19,24 @@ describe('Who may do what (rules only)', () => {
   });
 
   it('offers each role only the buttons it may use, per order status', () => {
-    const pending = { production_status: 'Pending' };
+    const pending = { production_status: 'Pending', total_quote_amount: 1500 };
     assert.deepEqual(allowedActions(pending, 'Owner'), {
-      approve: true, statuses: ['Cancelled'], edit_deadline: true, edit_quote: true, link_design: true, add_items: true, record_payment: true
+      approve: true, statuses: ['Cancelled'], edit_deadline: true, edit_quote: true, link_design: true, add_items: true,
+      record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true
     });
     assert.deepEqual(allowedActions(pending, 'Admin'), {
-      approve: false, statuses: [], edit_deadline: true, edit_quote: false, link_design: true, add_items: true, record_payment: true
+      approve: false, statuses: [], edit_deadline: true, edit_quote: false, link_design: true, add_items: true,
+      record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true
     });
     assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Production').statuses, ['Completed'], 'no Cancel for Production');
     assert.deepEqual(allowedActions({ production_status: 'Delayed' }, 'Production').statuses, ['Pending']);
     assert.equal(allowedActions({ production_status: 'Approved' }, 'Owner').edit_quote, false, 'the quote is frozen after approval');
     const closed = allowedActions({ production_status: 'Cancelled' }, 'Owner');
     assert.deepEqual([closed.statuses, closed.edit_deadline, closed.record_payment], [[], false, false]);
-    const staff = allowedActions(pending, 'Staff');
-    assert.ok(Object.values(staff).every((v) => v === false || (Array.isArray(v) && v.length === 0)), 'Staff can only look');
+    const { print_receipt: staffPrints, ...staff } = allowedActions(pending, 'Staff');
+    assert.equal(staffPrints, true, 'Staff can print a payment acknowledgement');
+    assert.ok(Object.values(staff).every((v) => v === false || v === 0 || v === null || (Array.isArray(v) && v.length === 0)),
+      'otherwise Staff can only look');
   });
 
   it('adds up lines of the same material and reports what is short', () => {

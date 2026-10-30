@@ -8,7 +8,7 @@ const { validateDriveLink } = require('../utils/validateDriveLink');
 const { LOCAL_NOW, PG_VERSION_FORMAT, offlineUpdateBookkeeping } = require('../utils/localSync');
 const { createValidator, PAYMENT_TYPES, PRODUCTION_STATUSES } = require('../utils/validation');
 const {
-  selectList, serialize, listRecords, getRecord, locateRecord, readLocal, sqliteRun, sqliteAll, sqliteGet,
+  selectList, serialize, listRecords, getRecord, locateRecord, readLocal, userNames, sqliteRun, sqliteAll, sqliteGet,
   withPgTransaction, withLocalTransaction, ACTIVE_ITEM_SQL
 } = require('../services/records');
 const { withAvailability } = require('../services/inventorySnapshot');
@@ -17,6 +17,9 @@ const {
   STATUS_TRANSITIONS, CLOSED_STATUSES, QUOTE_FROZEN_STATUSES, APPROVABLE_STATUSES, capabilityForTransition, allowedActions
 } = require('../services/domain/orderLifecycle');
 const { needsReservation, stockNeeds, buildStockCheck } = require('../services/domain/stockCheck');
+const {
+  paymentSummary, runningTotals, checkPayment, downpaymentWarnings, toCentavos, toPesos
+} = require('../services/domain/payments');
 
 const VERSION_SQL = `to_char(last_modified, '${PG_VERSION_FORMAT}')`;
 const READ_ROLES = rolesWith('view_orders');
@@ -68,6 +71,46 @@ const checkStock = (needs, rowsById) => {
   }
   return { missing, shortages };
 };
+
+// ---- Payments as shown to people (PB 21) ----
+const NOT_RECORDED = 'Not recorded';
+// Stable sort: payments in the same second keep the database order (full timestamp precision)
+const byPaymentDate = (a, b) => String(a.payment_date || '').localeCompare(String(b.payment_date || ''));
+
+// The order's payments (oldest first) with the receiver's name and the totals right after each
+// one (for the printable acknowledgement), plus the order's payment summary.
+// -> { source, payments, summary }
+const loadPaymentView = async (req, order) => {
+  // Qualified names: a bare payment_date would sort by the SELECT alias, which is cut to whole seconds
+  const list = await listRecords(req, 'payments', {
+    filters: [['order_id', order.order_id]], orderBy: 'payments.payment_date, payments.payment_id'
+  });
+  const payments = [...list.records].sort(byPaymentDate);
+  const names = await userNames(req, payments.map((p) => p.received_by));
+  const running = runningTotals({ quote: order.total_quote_amount, payments });
+  return {
+    source: list.source,
+    summary: paymentSummary({ quote: order.total_quote_amount, payments }),
+    payments: payments.map((p, i) => ({
+      ...p,
+      received_by_name: (p.received_by && names.get(p.received_by)) || NOT_RECORDED,
+      paid_to_date: running[i].paid_to_date,
+      remaining_after: running[i].remaining_after,
+      status_after: running[i].status_after
+    }))
+  };
+};
+
+// "totals" money fields of an order response. balance keeps its old meaning (quote - paid,
+// negative when overpaid); remaining never goes below 0.
+const paymentTotals = (order, summary) => ({
+  total_paid: summary.total_paid,
+  balance: toPesos(toCentavos(order.total_quote_amount) - toCentavos(summary.total_paid)),
+  remaining: summary.remaining,
+  overpaid_by: summary.overpaid_by,
+  payment_status: summary.payment_status,
+  downpayment: summary.downpayment
+});
 
 // Statuses staff can log when an order is halted for insufficient inventory (PB 10)
 const HALT_RESOLUTIONS = ['Delayed', 'Cancelled'];
@@ -176,24 +219,22 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
     if (!order) return notFound(res, 'Order', order_id);
 
     const items = await listRecords(req, 'order_items', { filters: [['order_id', order_id]], orderBy: 'line_item_id' });
-    const payments = await listRecords(req, 'payments', { filters: [['order_id', order_id]], orderBy: 'payment_date, payment_id' });
-    const totalPaid = Math.round(payments.records.reduce((sum, p) => sum + p.amount, 0) * 100) / 100;
+    const view = await loadPaymentView(req, order);
     const needs = needsReservation(order) ? stockNeeds(items.records) : [];
     const evaluation = needs.length > 0 ? await evaluateCapacity(req, needs) : null;
-    const sources = [source, items.source, payments.source, evaluation && evaluation.source];
+    const sources = [source, items.source, view.source, evaluation && evaluation.source];
 
     res.status(200).json({
       source: sources.includes('local') ? 'local' : 'cloud',
       order,
       items: items.records,
-      payments: payments.records,
+      payments: view.payments,
       totals: {
         item_count: items.records.length,
         total_quantity: items.records.reduce((sum, i) => sum + i.quantity, 0),
-        total_paid: totalPaid,
-        balance: Math.round(((order.total_quote_amount || 0) - totalPaid) * 100) / 100
+        ...paymentTotals(order, view.summary)
       },
-      allowed_actions: allowedActions(order, req.user.role),
+      allowed_actions: allowedActions(order, req.user.role, view.summary),
       stock_check: buildStockCheck(order, items.records, evaluation)
     });
   } catch (err) {
@@ -641,24 +682,42 @@ router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess
 });
 
 // ==========================================
-// ORDER PAYMENTS
-// GET  /api/orders/:order_id/payments -> { source, order_id, payments, total_paid }
-// POST /api/orders/:order_id/payments -> 201 { message, source, payment }
+// ORDER PAYMENTS (PB 21)
+// GET  /api/orders/:order_id/payments
+//   -> { source, order_id, payments: [{ ...payment, received_by_name, paid_to_date, remaining_after,
+//        status_after }], total_paid, totals }
+// POST /api/orders/:order_id/payments   Body: { amount, payment_type }
+//   -> 201 { message, source, payment, totals, allowed_actions, warnings: [{ code, message }] }
+//
+// Rules (services/domain/payments.js):
+//   409 ORDER_CLOSED             the order was cancelled (Completed orders still take the final balance)
+//   422 QUOTE_REQUIRED           no quote yet (only the Owner sets it)
+//   409 PAYMENT_EXCEEDS_BALANCE  amount > remaining balance { remaining, total_paid, total_quote_amount }
+//   400 VALIDATION_FAILED        received_by / receipt_no sent: the server fills them in
+// received_by is always the logged-in account. receipt_no (AR-YYYY-NNNN) comes from the cloud
+// database; a payment saved offline gets it when it syncs.
+// Online: one transaction that locks the order row FOR UPDATE, so two payments at the same
+// moment are checked one after the other; the INSERT is guarded in SQL as well.
+// Offline (cloud unreachable only, C5): the same checks against this computer's copy,
+// including payments still waiting to sync. Sync later pushes them with no cap (D2).
 // ==========================================
 router.get('/:order_id/payments', requireRole(WRITE_ROLES), async (req, res) => {
   const { order_id } = req.params;
   try {
-    const order = await locateRecord(req, 'order_profiles', order_id);
-    if (!order.location) return notFound(res, 'Order', order_id);
-    const payments = await listRecords(req, 'payments', { filters: [['order_id', order_id]], orderBy: 'payment_date, payment_id' });
-    const total_paid = Math.round(payments.records.reduce((sum, p) => sum + p.amount, 0) * 100) / 100;
-    res.status(200).json({ source: payments.source, order_id, payments: payments.records, total_paid });
+    const { record: order } = await getRecord(req, 'order_profiles', order_id);
+    if (!order) return notFound(res, 'Order', order_id);
+    const view = await loadPaymentView(req, order);
+    res.status(200).json({
+      source: view.source, order_id, payments: view.payments, total_paid: view.summary.total_paid, totals: paymentTotals(order, view.summary)
+    });
   } catch (err) {
     sendDbError(res, err, 'listing payments');
   }
 });
 
-router.post('/:order_id/payments', requireRole(WRITE_ROLES), async (req, res) => {
+const SERVER_FILLED_PAYMENT_FIELDS = ['received_by', 'receipt_no'];
+
+router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), async (req, res) => {
   const { order_id } = req.params;
   const body = req.body || {};
 
@@ -666,44 +725,120 @@ router.post('/:order_id/payments', requireRole(WRITE_ROLES), async (req, res) =>
   const v = createValidator();
   const amount = v.positiveMoney(body.amount, 'amount');
   const payment_type = v.oneOf(body.payment_type, 'payment_type', PAYMENT_TYPES);
+  for (const field of SERVER_FILLED_PAYMENT_FIELDS) {
+    if (body[field] !== undefined) {
+      v.errors.push({ field, message: 'The receiver and the receipt number are filled in by the system. Remove them and try again.' });
+    }
+  }
   if (v.failed()) return v.send(res);
 
-  try {
-    const order = await locateRecord(req, 'order_profiles', order_id);
-    if (!order.location) return notFound(res, 'Order', order_id);
+  const payment_id = crypto.randomUUID();
+  const received_by = req.user.user_id; // from the verified login token, never from the body
+  const reject = (problem) => new Rejected(problem.status, problem.body);
 
-    const payment_id = crypto.randomUUID();
-    const values = [payment_id, order_id, amount, payment_type];
-
-    const { source, record } = await writeCloudFirst(
-      order.location,
-      async () => {
-        const { rows } = await req.pgPool.query(
-          `INSERT INTO payments (payment_id, order_id, amount, payment_type)
-           VALUES ($1, $2, $3, $4) RETURNING ${selectList('payments', 'pg')}`,
-          values
-        );
-        return { source: 'cloud', record: serialize('payments', rows[0]) };
-      },
-      async () => {
-        await sqliteRun(
-          req.localDb,
-          `INSERT INTO payments (payment_id, order_id, amount, payment_type, sync_status, last_modified)
-           VALUES (?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
-          values
-        );
-        return { source: 'local', record: await readLocal(req.localDb, 'payments', payment_id) };
-      }
+  // ---- Online: lock the order, check, insert with a SQL guard ----
+  const recordInCloud = () => withPgTransaction(req.pgPool, async (client) => {
+    const ord = await client.query(
+      `SELECT production_status, ROUND(COALESCE(total_quote_amount, 0) * 100)::bigint AS quote_centavos
+         FROM order_profiles WHERE order_id = $1 FOR UPDATE`,
+      [order_id]
     );
+    if (ord.rowCount === 0) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
+    const quote = toPesos(Number(ord.rows[0].quote_centavos));
+    const paidRes = await client.query(
+      'SELECT COALESCE(ROUND(SUM(amount) * 100), 0)::bigint AS paid_centavos FROM payments WHERE order_id = $1',
+      [order_id]
+    );
+    const paid = toPesos(Number(paidRes.rows[0].paid_centavos));
+    const problem = checkPayment({ status: ord.rows[0].production_status, quote, paid, amount });
+    if (problem) throw reject(problem);
 
+    // Defence in depth: the order lock already serialises payments for this order
+    const inserted = await client.query(
+      `INSERT INTO payments (payment_id, order_id, amount, payment_type, received_by)
+       SELECT $1::text, $2::text, $3::numeric, $4::text, $5::text
+        WHERE (SELECT ROUND(COALESCE(total_quote_amount, 0) * 100) FROM order_profiles WHERE order_id = $2::text)
+            - (SELECT COALESCE(ROUND(SUM(amount) * 100), 0) FROM payments WHERE order_id = $2::text)
+            >= ROUND($3::numeric * 100)
+       RETURNING ${selectList('payments', 'pg')}`,
+      [payment_id, order_id, amount, payment_type, received_by]
+    );
+    if (inserted.rowCount !== 1) {
+      const again = await client.query(
+        'SELECT COALESCE(ROUND(SUM(amount) * 100), 0)::bigint AS paid_centavos FROM payments WHERE order_id = $1', [order_id]);
+      throw reject(checkPayment({ status: ord.rows[0].production_status, quote, paid: toPesos(Number(again.rows[0].paid_centavos)), amount })
+        || { status: 409, body: { error: 'PAYMENT_EXCEEDS_BALANCE', message: 'The balance changed while saving. Reload the order and try again.' } });
+    }
+    return { source: 'cloud', record: serialize('payments', inserted.rows[0]), status: ord.rows[0].production_status };
+  });
+
+  // ---- Offline: the same checks against the local copy (pending payments included) ----
+  const recordLocally = () => withLocalTransaction(req.localDbPath, async (tx) => {
+    const ord = await sqliteGet(tx,
+      'SELECT production_status, ROUND(COALESCE(total_quote_amount, 0) * 100) AS quote_centavos FROM order_profiles WHERE order_id = ?',
+      [order_id]);
+    if (!ord) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
+    const paidRow = await sqliteGet(tx,
+      'SELECT COALESCE(SUM(ROUND(amount * 100)), 0) AS paid_centavos FROM payments WHERE order_id = ?', [order_id]);
+    const problem = checkPayment({
+      status: ord.production_status, quote: toPesos(Number(ord.quote_centavos)), paid: toPesos(Number(paidRow.paid_centavos)), amount
+    });
+    if (problem) throw reject(problem);
+    await sqliteRun(tx,
+      `INSERT INTO payments (payment_id, order_id, amount, payment_type, received_by, payment_date, sync_status, last_modified)
+       VALUES (?, ?, ?, ?, ?, ${LOCAL_NOW}, 'pending_insert', ${LOCAL_NOW})`,
+      [payment_id, order_id, amount, payment_type, received_by]);
+    return { source: 'local', record: await readLocal(tx, 'payments', payment_id), status: ord.production_status };
+  });
+
+  try {
+    const located = await locateRecord(req, 'order_profiles', order_id);
+    if (!located.location) return notFound(res, 'Order', order_id);
+
+    let result;
+    if (located.location === 'local') {
+      result = await recordLocally();
+    } else {
+      try {
+        result = await recordInCloud();
+      } catch (err) {
+        if (err instanceof Rejected || !isConnectionError(err)) throw err;
+        if (err.commitUnknown) {
+          return res.status(503).json({
+            error: 'COMMIT_UNKNOWN',
+            message: 'The connection to the cloud dropped while saving. Reload the order to see whether the payment was recorded before trying again.'
+          });
+        }
+        console.error('☁️  Cloud unreachable, saving payment locally:', err.message);
+        result = await recordLocally(); // C5: genuine outage only
+      }
+    }
+
+    // Fresh totals, read the same way as GET /:order_id (cloud + payments waiting to sync)
+    const { record: order } = await getRecord(req, 'order_profiles', order_id);
+    const view = await loadPaymentView(req, order);
+    const payment = view.payments.find((p) => p.payment_id === payment_id)
+      || { ...result.record, received_by_name: NOT_RECORDED };
+    const warnings = downpaymentWarnings({
+      status: result.status,
+      quote: view.summary.quote,
+      paidTotal: view.summary.total_paid,
+      paidSynced: view.summary.downpayment.paid_synced
+    });
+
+    console.log(`💰 Payment on order ${order_id} by ${received_by} saved to ${result.source}`);
     res.status(201).json({
-      message: source === 'cloud'
+      message: result.source === 'cloud'
         ? 'Payment recorded.'
-        : 'Payment saved locally (Offline Mode). It will sync to the cloud when internet is restored.',
-      source,
-      payment: record
+        : 'Payment saved on this computer (offline). It will be sent to the cloud when the connection is back.',
+      source: result.source,
+      payment,
+      totals: paymentTotals(order, view.summary),
+      allowed_actions: allowedActions(order, req.user.role, view.summary),
+      warnings
     });
   } catch (err) {
+    if (err instanceof Rejected) return res.status(err.status).json(err.body);
     sendDbError(res, err, 'recording payment');
   }
 });

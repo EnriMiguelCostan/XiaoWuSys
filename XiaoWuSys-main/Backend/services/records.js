@@ -32,7 +32,11 @@ const ENTITIES = {
   },
   payments: {
     id: 'payment_id',
-    fields: { payment_id: 'text', order_id: 'text', amount: 'money', payment_date: 'timestamp', payment_type: 'text' }
+    fields: {
+      payment_id: 'text', order_id: 'text', amount: 'money', payment_date: 'timestamp', payment_type: 'text',
+      received_by: 'text', // user_id from the login token (migration 008); null for older payments
+      receipt_no: 'text'   // AR-YYYY-NNNN, given by the cloud database (null until an offline payment syncs)
+    }
   },
   material_loss: {
     id: 'loss_id',
@@ -202,6 +206,23 @@ const locateRecord = async (req, table, id) => {
   }
 };
 
+// user_id -> username, for showing who did something (e.g. who received a payment).
+// Cloud first; the local copy of the accounts (pull-synced) when the cloud is unreachable.
+// Never returns password hashes or roles.
+const userNames = async (req, ids) => {
+  const wanted = [...new Set(ids.filter(Boolean))];
+  if (wanted.length === 0) return new Map();
+  try {
+    const { rows } = await req.pgPool.query('SELECT user_id, username FROM users WHERE user_id = ANY($1::text[])', [wanted]);
+    return new Map(rows.map((r) => [r.user_id, r.username]));
+  } catch (err) {
+    if (!isConnectionError(err)) throw err;
+    const rows = await sqliteAll(req.localDb,
+      `SELECT user_id, username FROM users WHERE user_id IN (${wanted.map(() => '?').join(', ')})`, wanted);
+    return new Map(rows.map((r) => [r.user_id, r.username]));
+  }
+};
+
 const readLocal = async (db, table, id) =>
   serialize(table, await sqliteGet(db, `SELECT ${selectList(table, 'sqlite')} FROM ${table} WHERE ${ENTITIES[table].id} = ?`, [id]));
 
@@ -273,6 +294,7 @@ module.exports = {
   getRecord,
   locateRecord,
   readLocal,
+  userNames,
   withPgTransaction,
   withLocalTransaction,
   sqliteAll,
