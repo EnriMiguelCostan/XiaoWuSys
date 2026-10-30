@@ -85,6 +85,37 @@ export default function Dashboard({ apiBase, token, userRole, onUnauthorized, re
         </div>
       </div>
 
+      {/* PB 21 / D2: branches that together overpaid while offline. The Owner refunds by hand. */}
+      {canSeeMoney && (orders.overpaid || []).length > 0 && (
+        <section style={{ ...d.panel, ...d.overpaidPanel }} aria-labelledby="overpaid-title">
+          <h3 id="overpaid-title" style={{ ...d.h3, color: '#991b1b', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+            <TriangleAlert size={18} /> Overpaid: review and refund ({orders.overpaid.length})
+          </h3>
+          <p style={{ ...d.meta, margin: '0 0 0.5rem' }}>
+            These orders received more than their price, usually because two branches took payments while offline.
+            Total to review: <strong>{peso(orders.overpaid_total)}</strong>. Refunds are given outside the system.
+          </p>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={d.table}>
+              <thead>
+                <tr><th style={d.th}>Order</th><th style={d.th}>Customer</th><th style={d.thNum}>Price</th><th style={d.thNum}>Paid</th><th style={d.thNum}>Paid too much</th></tr>
+              </thead>
+              <tbody>
+                {orders.overpaid.map((o) => (
+                  <tr key={o.order_id} onClick={onOpenOrders} style={{ cursor: onOpenOrders ? 'pointer' : 'default' }}>
+                    <td style={d.td}><code style={d.code}>{orderNumber(o)}</code></td>
+                    <td style={d.td}>{o.customer_name}</td>
+                    <td style={d.tdNum}>{peso(o.total_quote_amount)}</td>
+                    <td style={d.tdNum}>{peso(o.total_paid)}</td>
+                    <td style={{ ...d.tdNum, color: '#991b1b', fontWeight: 'bold' }}>{peso(o.overpaid_by)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
       {/* PB 17: pinned while any material is at or below its low-stock alert. It updates live
           (the Catalog's real-time push refreshes this page) and disappears once stock is added. */}
       {inventory.restock.length > 0 && (
@@ -243,9 +274,11 @@ const d = {
   meta: { fontSize: '0.8rem', color: '#64748b', margin: '0.25rem 0 0' },
   banner: { display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem', borderRadius: '0.375rem', margin: '0 0 1rem', fontSize: '0.875rem' },
   bannerWarn: { background: '#fef3c7', color: '#92400e' },
-  lowStockPin: { position: 'sticky', top: 0, zIndex: 5, display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.75rem 1rem', margin: '0 0 1rem', background: '#fef9c3', border: '1px solid #facc15', borderLeft: '6px solid #eab308', borderRadius: '0.375rem', color: '#713f12', fontSize: '0.875rem', boxShadow: '0 2px 6px rgba(0,0,0,0.08)' },
+  // top: just below the sticky connection bar in App.jsx
+  lowStockPin: { position: 'sticky', top: '2.75rem', zIndex: 5, display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.75rem 1rem', margin: '0 0 1rem', background: '#fef9c3', border: '1px solid #facc15', borderLeft: '6px solid #eab308', borderRadius: '0.375rem', color: '#713f12', fontSize: '0.875rem', boxShadow: '0 2px 6px rgba(0,0,0,0.08)' },
   pinLink: { color: '#713f12', fontWeight: 'bold', fontSize: '0.85rem', whiteSpace: 'nowrap' },
   bannerError: { background: '#fee2e2', color: '#991b1b' },
+  overpaidPanel: { border: '1px solid #fecaca', borderLeft: '6px solid #ef4444', background: '#fff7f7' },
   btn: { display: 'flex', alignItems: 'center', gap: '0.3rem', padding: '0.5rem 0.9rem', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '0.375rem', cursor: 'pointer', color: '#4f46e5', fontWeight: 'bold', fontSize: '0.85rem' },
   cards: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.75rem', marginBottom: '1rem' },
   card: { display: 'flex', flexDirection: 'column', gap: '0.25rem', background: '#fff', border: '1px solid #e2e8f0', borderRadius: '0.5rem', padding: '0.9rem' },

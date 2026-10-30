@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Package, PlusCircle, LogOut, TriangleAlert, Clock, XCircle, Trash2, Plus, X, ClipboardList, LayoutDashboard, Users, KeyRound } from 'lucide-react';
+import { Package, PlusCircle, LogOut, TriangleAlert, Clock, XCircle, Trash2, Plus, X, ClipboardList, LayoutDashboard, Users, KeyRound, Cloud, CloudOff, ServerOff, RefreshCw } from 'lucide-react';
 import { io } from 'socket.io-client';
 import InventoryCatalog from './InventoryCatalog';
 import OrdersPage from './OrdersPage';
@@ -7,15 +7,17 @@ import Dashboard from './Dashboard';
 import UsersPage, { ChangePasswordDialog } from './UsersPage';
 import { API_BASE, SOCKET_URL } from './config';
 import { ResultDialog } from './Dialogs';
-import { createApi, errorText, todayInManila, MOBILE_PATTERN } from './api';
+import { createApi, errorText, todayInManila, formatDateTime, MOBILE_PATTERN } from './api';
 import { can } from './lib/permissions';
 import { orderNumber, NUMBER_AFTER_SYNC } from './lib/orders';
+import { deriveConnectionState, connectionText, pendingText, syncDisabledReason, syncResultMessage } from './lib/connection';
 
 
 const emptyOrderLine = () => ({ inventory_id: '', quantity_needed: '' });
 
 // Polling is only a fallback for when the real-time socket is disconnected
 const INVENTORY_POLL_MS = 30000;
+const SYNC_STATUS_POLL_MS = 30000;
 const CHANGE_HIGHLIGHT_MS = 2500;
 
 // GET /api/inventory. Never throws: resolves to { ok, status, data } or { networkError }.
@@ -73,6 +75,15 @@ export default function App() {
   const [cloudListening, setCloudListening] = useState(false);
   const [recentlyChanged, setRecentlyChanged] = useState([]);
 
+  // PB 3 / PB 4: connection bar. syncStatus = GET /api/sync/status or the "sync_status" event;
+  // serverReachable: null until the first answer, false when the shop server cannot be reached.
+  const [syncStatus, setSyncStatus] = useState(null);
+  const [serverReachable, setServerReachable] = useState(null);
+  const [browserOnline, setBrowserOnline] = useState(() => (typeof navigator === 'undefined' ? true : navigator.onLine));
+  const [syncStatusTick, setSyncStatusTick] = useState(0);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState(null);
+
   // Sprint 9: Order materials + Capacity Alert (PB 9 & PB 10)
   const [orderLines, setOrderLines] = useState([emptyOrderLine()]);
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
@@ -129,14 +140,21 @@ export default function App() {
 
     socket.on('connect', () => {
       setLiveStatus('live');
+      setServerReachable(true);
       socket.emit('inventory_subscribe', {}, (reply) => {
         if (!reply) return;
         setCloudListening(Boolean(reply.listening));
         if (reply.ok) applyInventoryResult({ ok: true, status: 200, data: reply.snapshot });
       });
     });
-    socket.on('disconnect', () => setLiveStatus('disconnected'));
-    socket.on('connect_error', () => setLiveStatus('disconnected'));
+    // The socket dropping does not prove the server is down: re-check with a normal request
+    socket.on('disconnect', () => { setLiveStatus('disconnected'); setSyncStatusTick((t) => t + 1); });
+    socket.on('connect_error', () => { setLiveStatus('disconnected'); setSyncStatusTick((t) => t + 1); });
+    // PB 4: connection state and "changes waiting" pushed by the server (no polling while live)
+    socket.on('sync_status', (status) => {
+      setServerReachable(true);
+      if (status && typeof status === 'object') setSyncStatus(status);
+    });
     socket.on('inventory_live', ({ listening }) => setCloudListening(Boolean(listening)));
     socket.on('inventory_updated', ({ changed_ids, snapshot }) => {
       applyInventoryResult({ ok: true, status: 200, data: snapshot });
@@ -175,6 +193,55 @@ export default function App() {
   }, [token, activeTab, inventoryTick, liveStatus]);
 
   const api = useMemo(() => createApi({ apiBase: API_BASE, token, onUnauthorized: handleLogout }), [token, handleLogout]);
+
+  // PB 3: check the server and the cloud on login, when the socket drops, when the browser
+  // says the network changed, after "Sync now", and every 30 s ONLY while the socket is down.
+  useEffect(() => {
+    if (!token) return undefined;
+    let cancelled = false;
+    const check = () => api('GET', '/sync/status').then(({ ok, status, data }) => {
+      if (cancelled) return;
+      if (status === 0) { setServerReachable(false); return; }
+      setServerReachable(true);
+      if (ok) setSyncStatus(data);
+    });
+    check();
+    const timer = liveStatus === 'live' ? null : setInterval(() => {
+      if (document.visibilityState === 'visible') check();
+    }, SYNC_STATUS_POLL_MS);
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [api, token, liveStatus, syncStatusTick]);
+
+  // navigator.onLine is a hint only: it triggers an immediate re-check, it never decides the state
+  useEffect(() => {
+    const onChange = () => {
+      setBrowserOnline(navigator.onLine);
+      setSyncStatusTick((t) => t + 1);
+    };
+    window.addEventListener('online', onChange);
+    window.addEventListener('offline', onChange);
+    return () => {
+      window.removeEventListener('online', onChange);
+      window.removeEventListener('offline', onChange);
+    };
+  }, []);
+
+  // PB 4: "Sync now" (POST /api/sync: 200 done, 409 conflicts, 503 cloud unreachable)
+  const handleSyncNow = async () => {
+    setSyncing(true);
+    const { status, data } = await api('POST', '/sync');
+    setSyncing(false);
+    if (status === 0) setServerReachable(false);
+    setSyncResult(syncResultMessage(status, data, { canSeeConflicts: ['Owner', 'Admin'].includes(user?.role) }));
+    setSyncStatusTick((t) => t + 1);
+    if (status === 200 || status === 409) {
+      setOrdersRefreshKey((k) => k + 1); // offline orders now have their numbers
+      refreshInventory();
+    }
+  };
 
   // PB 1: "Logout" ends this device's session on the server too (other devices stay logged in).
   // If the server cannot be reached, the browser still forgets the session.
@@ -431,6 +498,16 @@ export default function App() {
 
   const canManageUsers = ['Owner', 'Admin'].includes(user?.role);
 
+  // Connection bar (the wording and the rules live in src/lib/connection.js)
+  const connectionState = deriveConnectionState({ serverReachable, cloud: syncStatus?.cloud });
+  const connection = connectionText(connectionState, { cloud: syncStatus?.cloud, browserOnline });
+  const connectionLook = CONNECTION_STYLE[connectionState] || CONNECTION_STYLE.checking;
+  const ConnectionIcon = connectionLook.Icon;
+  const syncBusy = syncing || Boolean(syncStatus?.syncing);
+  const syncBlocked = syncDisabledReason({ state: connectionState, syncing: syncBusy });
+  const pendingTotal = syncStatus?.pending_total || 0;
+  const conflictCount = canManageUsers ? (syncStatus?.conflicts || 0) : 0;
+
   if (!token) {
     return (
       <div style={styles.authContainer}>
@@ -507,6 +584,37 @@ export default function App() {
           </button>
         </nav>
       </header>
+
+      {/* PB 3 / PB 4: always-visible connection bar */}
+      <div role="status" aria-live="polite" style={{ ...styles.statusBar, ...connectionLook.bar }}>
+        <ConnectionIcon size={16} color={connectionLook.icon} aria-hidden="true" />
+        <strong>{connection.label}</strong>
+        <span style={styles.statusDetail}>
+          {connection.detail}
+          {connectionState === 'online' && syncStatus?.last_sync_at
+            ? ` Last synced ${formatDateTime(syncStatus.last_sync_at)}.` : ''}
+        </span>
+        <span style={styles.statusRight}>
+          <span style={{ ...styles.statusBadge, ...(pendingTotal > 0 ? styles.statusBadgeWaiting : {}) }}>
+            {pendingText(pendingTotal)}
+          </span>
+          {conflictCount > 0 && (
+            <span style={{ ...styles.statusBadge, ...styles.statusBadgeConflict }}>
+              {conflictCount} need{conflictCount === 1 ? 's' : ''} a decision
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={handleSyncNow}
+            disabled={Boolean(syncBlocked)}
+            title={syncBlocked || 'Send the changes saved on this computer to the cloud now'}
+            aria-label={syncBusy ? 'Sync is running' : 'Sync now: send the changes saved on this computer to the cloud'}
+            style={{ ...styles.syncBtn, ...(syncBlocked ? styles.syncBtnDisabled : {}) }}
+          >
+            <RefreshCw size={14} /> {syncBusy ? 'Syncing…' : 'Sync now'}
+          </button>
+        </span>
+      </div>
 
       <main style={{ maxWidth: '1000px', margin: '2rem auto', padding: '0 1rem' }}>
         {activeTab === 'catalog' && (
@@ -801,6 +909,8 @@ export default function App() {
           />
         )}
 
+        <ResultDialog result={syncResult} onClose={() => setSyncResult(null)} />
+
         <ResultDialog
           result={orderResult}
           onClose={() => setOrderResult(null)}
@@ -869,5 +979,23 @@ const styles = {
   td: { padding: '0.5rem', borderBottom: '1px solid #f1f5f9' },
   tdNum: { textAlign: 'right', padding: '0.5rem', borderBottom: '1px solid #f1f5f9' },
   btnWarning: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.75rem', background: '#f59e0b', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold' },
-  btnDanger: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.75rem', background: '#ef4444', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold' }
+  btnDanger: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem', padding: '0.75rem', background: '#ef4444', color: '#fff', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold' },
+
+  // PB 3 / PB 4: connection bar (colours per state are in CONNECTION_STYLE below)
+  statusBar: { position: 'sticky', top: 0, zIndex: 30, display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', padding: '0.45rem 2rem', fontSize: '0.82rem', borderBottom: '1px solid', textAlign: 'left' },
+  statusDetail: { opacity: 0.9 },
+  statusRight: { display: 'flex', alignItems: 'center', gap: '0.5rem', marginLeft: 'auto', flexWrap: 'wrap' },
+  statusBadge: { padding: '0.1rem 0.55rem', borderRadius: '999px', background: 'rgba(255,255,255,0.7)', color: '#334155', fontSize: '0.75rem', fontWeight: 'bold' },
+  statusBadgeWaiting: { background: '#e0e7ff', color: '#3730a3' },
+  statusBadgeConflict: { background: '#fee2e2', color: '#991b1b' },
+  syncBtn: { display: 'flex', alignItems: 'center', gap: '0.3rem', padding: '0.3rem 0.75rem', background: '#fff', color: '#4f46e5', border: '1px solid #c7d2fe', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.8rem' },
+  syncBtnDisabled: { color: '#94a3b8', borderColor: '#e2e8f0', cursor: 'not-allowed' }
+};
+
+// One place for the look of each connection state, so the later Tailwind move is mechanical
+const CONNECTION_STYLE = {
+  online: { Icon: Cloud, icon: '#15803d', bar: { background: '#f0fdf4', color: '#166534', borderColor: '#bbf7d0' } },
+  offline_local: { Icon: CloudOff, icon: '#b45309', bar: { background: '#fffbeb', color: '#92400e', borderColor: '#fde68a' } },
+  server_down: { Icon: ServerOff, icon: '#b91c1c', bar: { background: '#fef2f2', color: '#991b1b', borderColor: '#fecaca' } },
+  checking: { Icon: Cloud, icon: '#64748b', bar: { background: '#f8fafc', color: '#475569', borderColor: '#e2e8f0' } }
 };

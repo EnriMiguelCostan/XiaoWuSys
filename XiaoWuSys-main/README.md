@@ -7,10 +7,10 @@ Inventory and order management for **XiaoMei Printshop** (Agdao, Davao City). It
 | Area | Features |
 |---|---|
 | **Catalog** | Sortable stock table with live updates. Each item has a unit (pcs, pack, ream…), a supplier and a low-stock alert. **Add / Subtract Stock** with a reason; lost or damaged stock is recorded with its cost. Duplicate names are blocked, ignoring case and spaces. Edit items, delete them to the **Recycle Bin** (restorable), **import from Excel** (CSV) and **export to Excel**. |
-| **Orders** | Create an order for a saved or new customer (11-digit mobile number). Every order gets a sequential **order number** like `XM-2026-0123` that restarts each January (an order saved offline gets its number when it syncs); search by it in the Orders tab. Stock is checked and **reserved** automatically; a halted order can be delayed or cancelled. The order detail shows materials, print details (size / name / number), the Google Drive design link and payments with the balance. **Only the Owner** sets or changes the quote and cancels an order. Status runs Pending → Approved (Owner only, needs a 50% downpayment) → Printing → Completed. Approve and Resume are greyed out, with the reason, while the free stock does not cover the order. **Copy for Messenger** and **Print job order** buttons. |
-| **Dashboard** | A **yellow low-stock warning** pinned at the top while any material is at or below its alert level (it updates live and disappears after restocking). Overdue orders, orders due this week, unpaid balances, payments per month, most-used materials, and a **restock list** with suggested quantities (copyable). Inventory, order and payment exports. |
+| **Orders** | Create an order for a saved or new customer (11-digit mobile number). Every order gets a sequential **order number** like `XM-2026-0123` that restarts each January (an order saved offline gets its number when it syncs); search by it in the Orders tab. Stock is checked and **reserved** automatically; a halted order can be delayed or cancelled. The order detail shows materials, print details (size / name / number), the Google Drive design link and payments. **Payments** can't go above the remaining balance (**Pay full balance** fills it in). Each payment records who received it and gets an acknowledgement number like `AR-2026-0001`; a payment saved offline gets its number when it syncs. Every order shows a payment status (**Unpaid**, **Partial**, **Fully Paid** or **Overpaid**) separate from its production status. Staff are warned when the downpayment is still below 50%. **Print receipt** prints a payment acknowledgement (not an Official Receipt). **Only the Owner** sets or changes the quote and cancels an order; a payment needs a quote, and a cancelled order takes no payments. Status runs Pending → Approved (Owner only, needs a 50% downpayment) → Printing → Completed. Approve and Resume are greyed out, with the reason, while the free stock does not cover the order. **Copy for Messenger** and **Print job order** buttons. |
+| **Dashboard** | A **yellow low-stock warning** pinned at the top while any material is at or below its alert level (it updates live and disappears after restocking). Overdue orders, orders due this week, unpaid balances, an **Overpaid: review and refund** list for the Owner and Admin, payments per month, most-used materials, and a **restock list** with suggested quantities (copyable). Inventory, order and payment exports. |
 | **Accounts** | The Owner / Admin create accounts, change roles, reset forgotten passwords and deactivate staff who left. Everyone can change their own password. |
-| **Offline** | If the internet drops, the system keeps working on a local copy and syncs when the connection returns. Accounts that have logged in on that computer can log in offline. |
+| **Offline** | If the internet drops, the system keeps working on a local copy and syncs **automatically** when the connection returns. A bar under the header always shows **Online**, **Offline: saving on this computer** or **Can't reach the shop server**, how many changes are waiting to sync, and a **Sync now** button. While online the server never checks the cloud on its own, so Neon can still sleep when the shop is idle; it checks every 15 seconds only while the cloud is unreachable. Accounts that have logged in on that computer can log in offline. |
 | **Traceability** | Every catalog change is written to a hidden, append-only audit trail (`npm run audit-log`). |
 
 ### Roles
@@ -70,9 +70,9 @@ cd Backend
 npm test
 ```
 
-There are 78 automated tests in `Backend/tests/`. They start the real API on a throw-away SQLite database filled with the shop's own data (`tests/fixtures/data.js`), with the cloud switched off, and call it over HTTP like the browser does.
+There are 98 automated tests in `Backend/tests/`. Most start the real API on a throw-away SQLite database filled with the shop's own data (`tests/fixtures/data.js`), with the cloud switched off, and call it over HTTP like the browser does. The sync and connection tests use a small scripted stand-in for the cloud.
 
-`tests/migrations.pg.test.js` adds 8 more that apply `schema.sql` and every migration to a real, throw-away PostgreSQL and check order numbering. They run when `TEST_DATABASE_URL` is set, which **wipes that database**, so it must be on `localhost` or have "test" in its name (never Neon):
+`tests/migrations.pg.test.js` and `tests/payments.pg.test.js` add 16 more that apply `schema.sql` and every migration to a real, throw-away PostgreSQL and check order and receipt numbering and two payments sent at the same moment. They run when `TEST_DATABASE_URL` is set, which **wipes that database**, so it must be on `localhost` or have "test" in its name (never Neon):
 
 ```bash
 TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/xiaowusys_test npm test
@@ -90,7 +90,8 @@ They cover:
 - the audit trail;
 - mobile number rules;
 - stock reservation by orders and the capacity halt;
-- payments and balances;
+- payments: the balance limit (in centavos), receiver, receipt numbers, payment status, the downpayment warning, offline payments that sync with no limit (two branches overpaying shows **Overpaid**);
+- the connection watcher (no checks while online, one sync when the cloud comes back) and the "changes waiting" count;
 - order editing, and the Owner-only quote and cancel rules;
 - order numbers (sync and PostgreSQL numbering) and the stock check before Approve / Resume;
 - logging out one device;
@@ -116,8 +117,8 @@ Backend/   Node.js + Express 5 API, PostgreSQL (Neon) + SQLite offline cache, So
   app.js           the HTTP API (used by server.js and by the tests)
   server.js        start-up: databases, real-time updates, sync, migrations
   routes/          auth, inventory, orders, customers, reports
-  services/        sync engine, stock rules, Recycle Bin, audit trail, sessions
-    domain/        business rules with no HTTP or SQL: permissions, order lifecycle, stock check
+  services/        sync engine, cloud health watcher, stock rules, Recycle Bin, audit trail, sessions
+    domain/        business rules with no HTTP or SQL: permissions, order lifecycle, stock check, payments
   migrations/      numbered, idempotent SQL changes (applied automatically)
   tests/           automated tests + fixture data
 Frontend/  React 19 + Vite (inline styles): the MVP/Beta client. It moves to Next.js + Tailwind CSS and
@@ -128,7 +129,7 @@ docs/      sprint and audit notes
 
 - **Source of truth:** Neon PostgreSQL. Writes go to the cloud first. If the cloud is unreachable they are saved to SQLite and synced later, pushing only the changed fields, with conflict detection.
 - **Stock:** "Free to use" = on hand − reserved. Orders reserve stock in the same transaction that creates them. Cancelling releases the stock; completing uses it up.
-- **Money:** stored as `NUMERIC(10,2)` and compared in whole centavos.
+- **Money:** stored as `NUMERIC(10,2)` and compared in whole centavos. Online, a payment locks its order row so two payments at the same moment are checked one after the other. Offline payments are checked against the local copy and are always accepted when they sync; if branches together overpay, the order shows **Overpaid** and the Owner refunds by hand.
 
 ## Security and privacy
 

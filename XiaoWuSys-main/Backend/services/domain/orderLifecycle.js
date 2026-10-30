@@ -11,6 +11,7 @@
 // never re-implement these rules. The server still checks every action when it is sent.
 // ==========================================
 const { can } = require('./permissions');
+const { paymentSummary, paymentBlockedReason } = require('./payments');
 
 const STATUS_TRANSITIONS = {
   Pending: ['Cancelled'],
@@ -33,12 +34,18 @@ const capabilityForTransition = (to) => (to === 'Cancelled' ? 'void_order' : 'ch
 
 const canTransition = (from, to) => (STATUS_TRANSITIONS[from] || []).includes(to);
 
-// -> { approve, statuses: [...], edit_deadline, edit_quote, link_design, add_items, record_payment }
-// Based on role and status only. Whether the cloud is reachable is reported separately
-// (the response's "source" and the order's sync_status).
-const allowedActions = (order, role) => {
+// -> { approve, statuses: [...], edit_deadline, edit_quote, link_design, add_items,
+//      record_payment, max_payment, payment_blocked_reason, print_receipt }
+// Based on role, status and the payment totals (paymentSummary). Whether the cloud is
+// reachable is reported separately (the response's "source" and the order's sync_status).
+//   record_payment  PB 21: never on a Cancelled order, never without a quote, never once fully paid
+//   max_payment     the remaining balance, so a screen can limit its amount field
+const allowedActions = (order, role, summary = null) => {
   const status = order && order.production_status;
   const editable = EDITABLE_STATUSES.includes(status);
+  const totals = summary || paymentSummary({ quote: order ? order.total_quote_amount : 0, payments: [] });
+  const blocked = paymentBlockedReason(order, totals);
+  const mayPay = Boolean(status) && can(role, 'record_payment');
   return {
     approve: can(role, 'approve_order') && APPROVABLE_STATUSES.includes(status),
     statuses: (STATUS_TRANSITIONS[status] || []).filter((to) => can(role, capabilityForTransition(to))),
@@ -46,7 +53,10 @@ const allowedActions = (order, role) => {
     edit_quote: QUOTE_EDITABLE_STATUSES.includes(status) && can(role, 'set_quote'),
     link_design: editable && can(role, 'edit_order'),
     add_items: editable && can(role, 'edit_order'),
-    record_payment: Boolean(status) && status !== 'Cancelled' && can(role, 'record_payment')
+    record_payment: mayPay && !blocked,
+    max_payment: mayPay && !blocked ? totals.remaining : 0,
+    payment_blocked_reason: mayPay ? blocked : null,
+    print_receipt: can(role, 'view_orders')
   };
 };
 

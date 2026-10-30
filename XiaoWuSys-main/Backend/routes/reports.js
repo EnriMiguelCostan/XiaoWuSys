@@ -12,7 +12,9 @@ const router = express.Router();
 const { verifyToken, requireRole } = require('../middleware/authMiddleware');
 const { sendDbError } = require('../utils/dbErrors');
 const { localDateTime } = require('../utils/validation');
-const { listRecords } = require('../services/records');
+const { listRecords, userNames } = require('../services/records');
+const { paymentSummary } = require('../services/domain/payments');
+const { can } = require('../services/domain/permissions');
 const { buildInventorySnapshot } = require('../services/inventorySnapshot');
 
 const READ_ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
@@ -21,7 +23,12 @@ const OPEN = (o) => !['Completed', 'Cancelled'].includes(o.production_status);
 const MAX_ROWS = 10000;
 const round2 = (n) => Math.round(n * 100) / 100;
 // Order number for people (PB 6): XM-2026-0123, or the old short id until an offline order syncs
-const orderLabel = (o) => (o && o.tracking_no) || (o ? `#${String(o.order_id).slice(0, 8).toUpperCase()}` : '');
+const orderLabel = (o) => {
+  if (!o) return '';
+  if (o.tracking_no) return o.tracking_no;
+  if (o.sync_status && o.sync_status !== 'synced') return 'New order'; // saved offline: numbered when it syncs
+  return `#${String(o.order_id).slice(0, 8).toUpperCase()}`;
+};
 
 router.use(verifyToken);
 
@@ -37,19 +44,26 @@ const addDays = (ymd, days) => {
 const loadAll = async (req) => {
   const [orders, payments, customers, items] = await Promise.all([
     listRecords(req, 'order_profiles', { orderBy: 'date_created DESC, order_id', limit: MAX_ROWS }),
-    listRecords(req, 'payments', { orderBy: 'payment_date, payment_id', limit: MAX_ROWS * 5 }),
+    listRecords(req, 'payments', { orderBy: 'payments.payment_date, payments.payment_id', limit: MAX_ROWS * 5 }),
     listRecords(req, 'customers', { orderBy: 'customer_id', limit: MAX_ROWS }),
     listRecords(req, 'order_items', { orderBy: 'line_item_id', limit: MAX_ROWS * 5 })
   ]);
   const paidByOrder = new Map();
-  for (const p of payments.records) paidByOrder.set(p.order_id, round2((paidByOrder.get(p.order_id) || 0) + p.amount));
+  const paymentsByOrder = new Map();
+  for (const p of payments.records) {
+    paidByOrder.set(p.order_id, round2((paidByOrder.get(p.order_id) || 0) + p.amount));
+    paymentsByOrder.set(p.order_id, [...(paymentsByOrder.get(p.order_id) || []), p]);
+  }
+  // PB 21: payment status per order, from the same rules as the order screen
+  const summaryOf = (o) => paymentSummary({ quote: o.total_quote_amount, payments: paymentsByOrder.get(o.order_id) || [] });
   return {
     source: [orders, payments, customers, items].some((r) => r.source === 'local') ? 'local' : 'cloud',
     orders: orders.records,
     payments: payments.records,
     customers: new Map(customers.records.map((c) => [c.customer_id, c])),
     itemsByOrder: items.records.reduce((m, i) => m.set(i.order_id, [...(m.get(i.order_id) || []), i]), new Map()),
-    paidByOrder
+    paidByOrder,
+    summaryOf
   };
 };
 
@@ -75,7 +89,8 @@ router.get('/dashboard', requireRole(READ_ROLES), async (req, res) => {
         production_deadline: o.production_deadline,
         total_quote_amount: o.total_quote_amount || 0,
         total_paid: paid,
-        balance: round2((o.total_quote_amount || 0) - paid)
+        balance: round2((o.total_quote_amount || 0) - paid),
+        payment_status: data.summaryOf(o).payment_status
       };
     };
     const open = data.orders.filter(OPEN);
@@ -87,6 +102,13 @@ router.get('/dashboard', requireRole(READ_ROLES), async (req, res) => {
     }).sort(byDeadline).map(brief);
     const unpaid = data.orders.filter((o) => o.production_status !== 'Cancelled')
       .map(brief).filter((o) => o.balance > 0).sort((a, b) => b.balance - a.balance);
+    // D2: branches that together overpaid while offline. The Owner reviews and refunds by hand.
+    // Money figures, so only for accounts that may see finances.
+    const overpaid = !can(req.user.role, 'view_finance') ? [] : data.orders
+      .map((o) => ({ o, s: data.summaryOf(o) }))
+      .filter(({ s }) => s.payment_status === 'Overpaid')
+      .map(({ o, s }) => ({ ...brief(o), overpaid_by: s.overpaid_by }))
+      .sort((a, b) => b.overpaid_by - a.overpaid_by);
 
     // Money received per month (shop time), last 6 months including this one
     const months = [];
@@ -151,7 +173,9 @@ router.get('/dashboard', requireRole(READ_ROLES), async (req, res) => {
         due_this_week: dueSoon,
         unpaid: unpaid.slice(0, 20),
         unpaid_count: unpaid.length,
-        outstanding_balance: round2(unpaid.reduce((s, o) => s + o.balance, 0))
+        outstanding_balance: round2(unpaid.reduce((s, o) => s + o.balance, 0)),
+        overpaid,
+        overpaid_total: round2(overpaid.reduce((s, o) => s + o.overpaid_by, 0))
       },
       income_by_month: months.map((m) => ({ month: m, amount: income[m] })),
       top_materials: topMaterials,
@@ -204,7 +228,8 @@ router.get('/export/orders.csv', requireRole(FINANCE_ROLES), async (req, res) =>
   try {
     const data = await loadAll(req);
     sendCsv(res, 'orders',
-      ['Order', 'Created', 'Customer', 'Mobile number', 'From', 'Deadline', 'Status', 'Quote (PHP)', 'Paid (PHP)', 'Balance (PHP)', 'Materials / items'],
+      ['Order', 'Created', 'Customer', 'Mobile number', 'From', 'Deadline', 'Status', 'Quote (PHP)', 'Paid (PHP)', 'Balance (PHP)',
+        'Payment status', 'Materials / items'],
       data.orders.map((o) => {
         const c = data.customers.get(o.customer_id) || {};
         const paid = data.paidByOrder.get(o.order_id) || 0;
@@ -213,7 +238,7 @@ router.get('/export/orders.csv', requireRole(FINANCE_ROLES), async (req, res) =>
           .join('; ');
         return [orderLabel(o), toShopTime(o.date_created).replace('T', ' '), c.full_name || o.customer_id,
           c.contact_number || '', c.platform_source || '', String(o.production_deadline || '').slice(0, 10), o.production_status,
-          o.total_quote_amount || 0, paid, round2((o.total_quote_amount || 0) - paid), lines];
+          o.total_quote_amount || 0, paid, round2((o.total_quote_amount || 0) - paid), data.summaryOf(o).payment_status, lines];
       }),
       data.source);
   } catch (err) {
@@ -225,10 +250,14 @@ router.get('/export/payments.csv', requireRole(FINANCE_ROLES), async (req, res) 
   try {
     const data = await loadAll(req);
     const orders = new Map(data.orders.map((o) => [o.order_id, o]));
+    const names = await userNames(req, data.payments.map((p) => p.received_by));
     sendCsv(res, 'payments',
-      ['Date', 'Order', 'Customer', 'Payment type', 'Amount (PHP)'],
-      data.payments.map((p) => [toShopTime(p.payment_date).replace('T', ' '), orderLabel(orders.get(p.order_id) || { order_id: p.order_id }),
-        data.customers.get(orders.get(p.order_id)?.customer_id)?.full_name || '', p.payment_type, p.amount]),
+      ['Date', 'Receipt no.', 'Order', 'Customer', 'Payment type', 'Amount (PHP)', 'Received by'],
+      data.payments.map((p) => [toShopTime(p.payment_date).replace('T', ' '),
+        p.receipt_no || 'Given after sync',
+        orderLabel(orders.get(p.order_id) || { order_id: p.order_id }),
+        data.customers.get(orders.get(p.order_id)?.customer_id)?.full_name || '', p.payment_type, p.amount,
+        (p.received_by && names.get(p.received_by)) || 'Not recorded']),
       data.source);
   } catch (err) {
     sendDbError(res, err, 'exporting payments');

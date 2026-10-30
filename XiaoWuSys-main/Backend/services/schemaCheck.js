@@ -15,7 +15,10 @@ const EXTRA_COLUMNS = [
     .map((c) => `inventory_audit_log.${c}`),
   ...['session_id', 'user_id', 'expires_at', 'revoked_at', 'last_modified'].map((c) => `revoked_sessions.${c}`) // migration 007
 ];
-const EXPECTED_TRIGGERS = ['trg_order_profiles_last_modified', 'trg_inventory_items_notify', 'trg_order_profiles_assign_tracking_no'];
+const EXPECTED_TRIGGERS = [
+  'trg_order_profiles_last_modified', 'trg_inventory_items_notify', 'trg_order_profiles_assign_tracking_no',
+  'trg_payments_assign_receipt_no' // migration 008
+];
 
 const checkCloudSchema = async (pgPool) => {
   const expected = [

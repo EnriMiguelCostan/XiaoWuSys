@@ -16,7 +16,8 @@ const { startRecycleBinJanitor } = require('./services/recycleBin');
 const { startRevocationRefresh, isTokenRevoked, onSessionRevoked } = require('./services/sessions');
 const { createCloudDisabledPool } = require('./services/cloudDisabledPool');
 const { isConnectionError } = require('./utils/dbErrors');
-const { syncOfflineData, listConflicts, SYNC_TABLES } = require('./services/sync');
+const { syncOfflineData, listConflicts, buildSyncStatus, SYNC_TABLES } = require('./services/sync');
+const { createCloudHealth, watchPool } = require('./services/cloudHealth');
 
 // ================= START-UP CHECKS =================
 // Without a secret anyone could forge a login token, so refuse to start.
@@ -41,11 +42,25 @@ if (/demo/i.test(process.env.LOCAL_DB_PATH || '') && !cloudDisabled) {
 }
 
 // 1. Cloud: PostgreSQL on Neon (source of truth)
-const pgPool = cloudDisabled ? createCloudDisabledPool() : new Pool({
+const rawPgPool = cloudDisabled ? createCloudDisabledPool() : new Pool({
   connectionTimeoutMillis: 5000,
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false } // Neon
 });
+
+// PB 3: cloud health. Every query the server makes reports whether the cloud answered; only
+// while it is unreachable does the watcher probe (SELECT 1 every 15 s), never while online (D3).
+// The handlers are defined further down (they need the socket server and the sync).
+let onCloudChange = () => {};
+let onCloudBack = () => {};
+const cloudHealth = createCloudHealth({
+  pgPool: rawPgPool,
+  cloudDisabled,
+  probeMs: Number(process.env.CLOUD_PROBE_MS) || 15000,
+  onChange: (next, previous) => onCloudChange(next, previous),
+  onReconnect: () => onCloudBack()
+});
+const pgPool = cloudDisabled ? rawPgPool : watchPool(rawPgPool, cloudHealth);
 
 if (cloudDisabled) {
   console.warn('☁️  Cloud disabled (CLOUD_DISABLED=true or no DATABASE_URL): running in OFFLINE-ONLY mode on the local database.');
@@ -157,16 +172,57 @@ io.on('connection', (socket) => {
 });
 
 // ================= SYNC =================
+// PB 4: every logged-in screen gets the connection state and the "changes waiting" count
+// as a "sync_status" event (same body as GET /api/sync/status). Each branch server reports
+// its own local queue.
+const emitSyncStatus = async () => {
+  try {
+    io.emit('sync_status', await buildSyncStatus({ localDb, cloudHealth, conflicts: listConflicts }));
+  } catch (err) {
+    console.error('⚠️ Could not send the sync status:', err.message);
+  }
+};
+// Writes saved offline come in bursts (an order and its items): send one update per burst
+let localWriteTimer = null;
+const onLocalWrite = () => {
+  if (localWriteTimer) return;
+  localWriteTimer = setTimeout(() => { localWriteTimer = null; emitSyncStatus(); }, 500);
+};
+
 // Runs a sync and pushes stock changes it pulled from / pushed to the cloud
 const syncAndNotify = async () => {
   if (cloudDisabled) return { synced: 0, conflicts: [], failed: 0, requeued: 0, aborted: true };
-  const summary = await syncOfflineData(pgPool, localDb);
-  if (summary && summary.inventory_changed && !summary.joined) inventoryEvents.notifyChanged([], 'sync');
-  return summary;
+  const running = syncOfflineData(pgPool, localDb);
+  emitSyncStatus(); // shows "syncing" on every screen
+  try {
+    const summary = await running;
+    if (summary && summary.inventory_changed && !summary.joined) inventoryEvents.notifyChanged([], 'sync');
+    return summary;
+  } finally {
+    emitSyncStatus();
+  }
 };
 
+// PB 3 / PB 4: tell the screens, and sync once when the cloud comes back. Single-flight in
+// the sync service means this never overlaps the 5-minute timer or a "Sync now".
+onCloudChange = () => { emitSyncStatus(); };
+onCloudBack = () => {
+  console.log('🔄 Cloud is back: sending changes saved on this computer.');
+  return syncAndNotify();
+};
+
+// A screen that connects gets the current state straight away
+io.on('connection', (socket) => {
+  buildSyncStatus({ localDb, cloudHealth, conflicts: listConflicts })
+    .then((status) => socket.emit('sync_status', status))
+    .catch(() => {});
+});
+
 // ================= HTTP API =================
-app = createApp({ pgPool, localDb, localDbPath: sqliteDbPath, orderLocks, inventoryEvents, syncAndNotify, listConflicts, corsOrigins });
+app = createApp({
+  pgPool, localDb, localDbPath: sqliteDbPath, orderLocks, inventoryEvents, syncAndNotify, listConflicts,
+  cloudHealth, onLocalWrite, corsOrigins
+});
 
 // Applies pending migrations/*.sql to Neon (AUTO_MIGRATE=false to manage them by hand)
 const autoMigrate = async () => {

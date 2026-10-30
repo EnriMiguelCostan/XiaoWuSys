@@ -6,6 +6,7 @@ import { createApi, errorText, peso, formatDateTime, copyText, todayInManila } f
 import { ResultDialog, ConfirmDialog } from './Dialogs';
 import { orderActions } from './lib/permissions';
 import { orderNumber, hasOrderNumber, normalizeOrderNumber, shortfallLines, NUMBER_AFTER_SYNC } from './lib/orders';
+import { escapeHtml, receiptHtml } from './lib/receipt';
 
 // Orders tab: every order profile, newest first, with its materials, payments and status.
 //   GET   /api/orders?status=&limit=&offset=      list
@@ -59,7 +60,26 @@ const lineText = (it) => {
   const extra = [it.size, it.custom_name, it.custom_number && `#${it.custom_number}`].filter(Boolean).join(', ');
   return `${it.quantity} x ${it.product_type}${extra ? ` (${extra})` : ''}`;
 };
-const escapeHtml = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// PB 21: payment status (from the server's totals.payment_status), separate from the production status
+const PAYMENT_STATUS_META = {
+  Unpaid: { background: '#f1f5f9', color: '#475569' },
+  Partial: { background: '#fef3c7', color: '#92400e' },
+  'Fully Paid': { background: '#dcfce7', color: '#166534' },
+  Overpaid: { background: '#fee2e2', color: '#991b1b' }
+};
+const RECEIPT_AFTER_SYNC = 'Given after sync';
+
+// Printable payment acknowledgement (the text is built in src/lib/receipt.js)
+const printReceipt = (detail, payment, customer) => {
+  const w = window.open('', '_blank', 'width=600,height=800');
+  if (!w) return false;
+  w.document.write(receiptHtml({ payment, order: detail.order, customer }));
+  w.document.close();
+  w.focus();
+  setTimeout(() => w.print(), 300);
+  return true;
+};
 
 // Text the staff can paste into Messenger / Facebook to update the customer
 const messengerSummary = (detail, customer) => {
@@ -69,8 +89,8 @@ const messengerSummary = (detail, customer) => {
     ...items.map((it) => `• ${lineText(it)}`),
     `Deadline: ${formatDateTime(order.production_deadline, { withTime: false })}`,
     `Total: ${peso(order.total_quote_amount)}`,
-    `Paid: ${peso(totals.total_paid)}`,
-    `Balance: ${peso(totals.balance)}`,
+    `Paid: ${peso(totals.total_paid)}${totals.payment_status ? ` (${totals.payment_status})` : ''}`,
+    `Balance: ${peso(totals.remaining ?? totals.balance)}`,
     `Status: ${order.production_status}`,
     order.design_drive_link ? `Design: ${order.design_drive_link}` : null,
     'Thank you!'
@@ -94,7 +114,7 @@ ${order.design_drive_link ? `<p class="meta"><b>Design file:</b> ${escapeHtml(or
 <table><thead><tr><th>Item / material</th><th>Size</th><th>Name</th><th>No.</th><th class="n">Qty</th></tr></thead><tbody>
 ${items.map((it) => `<tr><td>${escapeHtml(it.product_type)}</td><td>${escapeHtml(it.size || '')}</td><td>${escapeHtml(it.custom_name || '')}</td><td>${escapeHtml(it.custom_number || '')}</td><td class="n">${escapeHtml(it.quantity)}</td></tr>`).join('')}
 </tbody></table>
-<p class="meta"><b>Quote:</b> ${escapeHtml(peso(order.total_quote_amount))} · <b>Paid:</b> ${escapeHtml(peso(totals.total_paid))} (${payments.length} payment(s)) · <b>Balance:</b> ${escapeHtml(peso(totals.balance))}</p>
+<p class="meta"><b>Quote:</b> ${escapeHtml(peso(order.total_quote_amount))} · <b>Paid:</b> ${escapeHtml(peso(totals.total_paid))} (${payments.length} payment(s)) · <b>Balance:</b> ${escapeHtml(peso(totals.remaining ?? totals.balance))}${totals.payment_status ? ` · <b>Payment:</b> ${escapeHtml(totals.payment_status)}` : ''}</p>
 <div class="sign"><div>Prepared by</div><div>Printed by</div><div>Released to customer</div></div>
 <p><button onclick="window.print()">Print</button></p></body></html>`);
   w.document.close();
@@ -104,14 +124,14 @@ ${items.map((it) => `<tr><td>${escapeHtml(it.product_type)}</td><td>${escapeHtml
 };
 const toCentavos = (n) => Math.round(Number(n || 0) * 100);
 
-// What the server will check before approving (§4.4), worked out from the loaded detail so
-// the button can explain itself. The server stays the real check.
-// Money is compared in integer centavos, like the backend; offline payments do not count.
+// What the server will check before approving (§4.4), from the loaded detail so the button
+// can explain itself. The server stays the real check. The downpayment numbers come from the
+// server (totals.downpayment: 50% rounded up, cloud payments only).
 const approvalReadiness = (detail) => {
-  const { order, items, payments } = detail;
+  const { order, items, payments, totals } = detail;
   const quoteC = toCentavos(order.total_quote_amount);
-  const requiredC = Math.ceil(quoteC / 2);
-  const paidC = payments.filter((p) => p.sync_status === 'synced').reduce((sum, p) => sum + toCentavos(p.amount), 0);
+  const requiredC = toCentavos(totals.downpayment?.required ?? Math.ceil(quoteC / 2) / 100);
+  const paidC = toCentavos(totals.downpayment?.paid_synced ?? 0);
   const offlinePayments = payments.filter((p) => p.sync_status !== 'synced').length;
   const unlinked = items.filter((i) => !i.inventory_id).length;
   const problems = [];
@@ -340,6 +360,8 @@ export default function OrdersPage({ apiBase, token, onUnauthorized, refreshKey,
     setResult({ type: 'error', title: 'Not approved', message: errorText(data, 'Could not approve this job order.') });
   };
 
+  // PB 21: the server limits the amount to the remaining balance and fills in the receiver
+  // and the receipt number; this form only reads allowed_actions.max_payment.
   const addPayment = async (e) => {
     e.preventDefault();
     const amount = Number(payment.amount);
@@ -351,10 +373,33 @@ export default function OrdersPage({ apiBase, token, onUnauthorized, refreshKey,
       amount: Math.round(amount * 100) / 100, payment_type: payment.payment_type
     });
     setBusy(false);
-    if (!ok) return setResult({ type: 'error', title: 'Payment not saved', message: errorText(data, 'Could not record the payment.') });
-    setResult({ type: 'success', title: 'Payment recorded', message: `${peso(amount)} (${payment.payment_type}) recorded. ${data.source === 'local' ? 'Saved offline; it will sync later.' : ''}` });
+    if (!ok) {
+      const tooMuch = data.error === 'PAYMENT_EXCEEDS_BALANCE';
+      setResult({ type: tooMuch ? 'warning' : 'error', title: tooMuch ? 'Amount is more than the balance' : 'Payment not saved', message: errorText(data, 'Could not record the payment.') });
+      if (tooMuch) setDetailTick((t) => t + 1); // someone else may have just paid
+      return undefined;
+    }
+    const warnings = (data.warnings || []).map((w) => w.message);
+    const receipt = data.payment?.receipt_no ? `Receipt no. ${data.payment.receipt_no}.` : `Receipt number: ${RECEIPT_AFTER_SYNC.toLowerCase()}.`;
+    setResult({
+      type: warnings.length ? 'warning' : 'success',
+      title: 'Payment recorded',
+      message: [
+        `${peso(amount)} (${payment.payment_type}) recorded. ${receipt}`,
+        data.totals ? `Payment status: ${data.totals.payment_status}. Remaining balance: ${peso(data.totals.remaining)}.` : null,
+        data.source === 'local' ? 'Saved on this computer (offline). It will be sent to the cloud when the connection is back.' : null,
+        ...warnings
+      ].filter(Boolean).join('\n')
+    });
     setPayment({ amount: '', payment_type: payment.payment_type });
     setDetailTick((t) => t + 1);
+    return undefined;
+  };
+
+  const printPaymentReceipt = (p) => {
+    if (!printReceipt(detail, p, customers[detail.order.customer_id])) {
+      setResult({ type: 'error', title: 'Could not open the print window', message: 'Allow pop-ups for this site, then try again.' });
+    }
   };
 
   // ---- Edit deadline / quote ----
@@ -571,7 +616,8 @@ export default function OrdersPage({ apiBase, token, onUnauthorized, refreshKey,
                   <Info label="Created" value={formatDateTime(order.date_created, { utc: true })} />
                   <Info label="Deadline" value={formatDateTime(order.production_deadline, { withTime: false })} />
                   <Info label="Quote" value={peso(order.total_quote_amount)} />
-                  <Info label="Paid / Balance" value={`${peso(detail.totals.total_paid)} / ${peso(detail.totals.balance)}`} />
+                  <Info label="Paid / Balance" value={`${peso(detail.totals.total_paid)} / ${peso(detail.totals.remaining ?? detail.totals.balance)}`}
+                    sub={detail.totals.payment_status ? `Payment: ${detail.totals.payment_status}` : undefined} />
                   {order.approved_at && (
                     <Info label="Approved" value={formatDateTime(order.approved_at, { utc: true })} sub="by the Owner" />
                   )}
@@ -711,43 +757,87 @@ export default function OrdersPage({ apiBase, token, onUnauthorized, refreshKey,
                   )
                 )}
 
-                <h4 style={o.h4}>Payments</h4>
-                {detail.payments.length === 0 ? <p style={o.meta}>No payments yet.</p> : (
-                  <table style={o.table}>
-                    <thead><tr><th style={o.th}>Date</th><th style={o.th}>Type</th><th style={o.thNum}>Amount</th></tr></thead>
-                    <tbody>
-                      {detail.payments.map((p) => (
-                        <tr key={p.payment_id}>
-                          <td style={o.td}>
-                            {formatDateTime(p.payment_date, { utc: true })}
-                            {p.sync_status !== 'synced' && <span style={o.pending}>offline</span>}
-                          </td>
-                          <td style={o.td}>{p.payment_type}</td>
-                          <td style={o.tdNum}>{peso(p.amount)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                    <tfoot>
-                      <tr>
-                        <td style={o.tfoot} colSpan={2}>Total paid</td>
-                        <td style={o.tfootNum}>{peso(detail.totals.total_paid)}</td>
-                      </tr>
-                      <tr>
-                        <td style={{ ...o.tfoot, borderTop: 'none', fontWeight: 'normal' }} colSpan={2}>Balance</td>
-                        <td style={{ ...o.tfootNum, borderTop: 'none', color: detail.totals.balance > 0 ? '#b91c1c' : '#166534' }}>{peso(detail.totals.balance)}</td>
-                      </tr>
-                    </tfoot>
-                  </table>
+                <h4 style={{ ...o.h4, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  Payments
+                  {detail.totals.payment_status && (
+                    <span style={{ ...o.badge, ...(PAYMENT_STATUS_META[detail.totals.payment_status] || PAYMENT_STATUS_META.Unpaid) }}>
+                      {detail.totals.payment_status}
+                    </span>
+                  )}
+                </h4>
+                {detail.totals.payment_status === 'Overpaid' && (
+                  <p style={{ ...o.banner, background: '#fee2e2', color: '#991b1b' }}>
+                    <TriangleAlert size={16} /> This order was paid {peso(detail.totals.overpaid_by)} more than its price
+                    (payments taken at different branches while offline). The Owner should review it and refund the customer.
+                  </p>
                 )}
-                {actions.record_payment && (
+                {detail.payments.length === 0 ? <p style={o.meta}>No payments yet.</p> : (
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={o.table}>
+                      <thead>
+                        <tr>
+                          <th style={o.th}>Date</th><th style={o.th}>Receipt no.</th><th style={o.th}>Type</th>
+                          <th style={o.th}>Received by</th><th style={o.thNum}>Amount</th>
+                          {actions.print_receipt && <th style={o.th}><span style={o.srOnly}>Print</span></th>}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.payments.map((p) => (
+                          <tr key={p.payment_id}>
+                            <td style={o.td}>
+                              {formatDateTime(p.payment_date, { utc: true })}
+                              {p.sync_status !== 'synced' && <span style={o.pending}>offline</span>}
+                            </td>
+                            <td style={o.td}>{p.receipt_no ? <code style={o.code}>{p.receipt_no}</code> : <span style={o.meta}>{RECEIPT_AFTER_SYNC}</span>}</td>
+                            <td style={o.td}>{p.payment_type}</td>
+                            <td style={o.td}>{p.received_by_name || 'Not recorded'}</td>
+                            <td style={o.tdNum}>{peso(p.amount)}</td>
+                            {actions.print_receipt && (
+                              <td style={o.td}>
+                                <button type="button" style={o.linkBtn} onClick={() => printPaymentReceipt(p)}
+                                  aria-label={`Print the payment acknowledgement for ${peso(p.amount)}`}
+                                  title={p.receipt_no ? 'Print a payment acknowledgement' : 'Print a provisional acknowledgement (the receipt number comes after sync)'}>
+                                  <Printer size={14} /> Print receipt
+                                </button>
+                              </td>
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr>
+                          <td style={o.tfoot} colSpan={4}>Total paid</td>
+                          <td style={o.tfootNum}>{peso(detail.totals.total_paid)}</td>
+                          {actions.print_receipt && <td style={o.tfoot} />}
+                        </tr>
+                        <tr>
+                          <td style={{ ...o.tfoot, borderTop: 'none', fontWeight: 'normal' }} colSpan={4}>Remaining balance</td>
+                          <td style={{ ...o.tfootNum, borderTop: 'none', color: detail.totals.remaining > 0 ? '#b91c1c' : '#166534' }}>
+                            {peso(detail.totals.remaining ?? detail.totals.balance)}
+                          </td>
+                          {actions.print_receipt && <td style={{ ...o.tfoot, borderTop: 'none' }} />}
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                )}
+                {actions.record_payment ? (
                   <form onSubmit={addPayment} style={o.payForm}>
-                    <input type="number" min="0.01" step="0.01" inputMode="decimal" placeholder="Amount (₱)" required
+                    <input type="number" min="0.01" max={actions.max_payment || undefined} step="0.01" inputMode="decimal" required
+                      placeholder={`Amount (up to ${peso(actions.max_payment)})`} aria-label={`Amount, up to ${peso(actions.max_payment)}`}
                       value={payment.amount} onChange={(e) => setPayment({ ...payment, amount: e.target.value })} style={{ ...o.input, flex: 2 }} />
-                    <select value={payment.payment_type} onChange={(e) => setPayment({ ...payment, payment_type: e.target.value })} style={{ ...o.input, flex: 1 }}>
+                    <select value={payment.payment_type} onChange={(e) => setPayment({ ...payment, payment_type: e.target.value })} style={{ ...o.input, flex: 1 }}
+                      aria-label="Payment type">
                       {PAYMENT_TYPES.map((t) => <option key={t} value={t} style={o.option}>{t}</option>)}
                     </select>
+                    <button type="button" style={o.btn} disabled={busy}
+                      onClick={() => setPayment({ ...payment, amount: String(actions.max_payment) })}>
+                      Pay full balance
+                    </button>
                     <button type="submit" style={o.btnPrimary} disabled={busy}><Wallet size={16} /> Add Payment</button>
                   </form>
+                ) : (
+                  actions.payment_blocked_reason && <p style={o.meta}>{actions.payment_blocked_reason}</p>
                 )}
 
                 {readiness && (
@@ -918,6 +1008,7 @@ const control = { color: '#0f172a', backgroundColor: '#fff', colorScheme: 'light
 
 const o = {
   root: { textAlign: 'left' },
+  srOnly: { position: 'absolute', width: '1px', height: '1px', overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' },
   topBar: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' },
   meta: { fontSize: '0.8rem', color: '#64748b', margin: '0.25rem 0 0' },
   banner: { display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem', borderRadius: '0.375rem', marginBottom: '1rem', fontSize: '0.875rem' },

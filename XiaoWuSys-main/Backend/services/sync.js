@@ -60,7 +60,10 @@ const SYNC_TABLES = [
   {
     table: 'payments',
     id: 'payment_id',
-    columns: ['payment_id', 'order_id', 'amount', 'payment_date', 'payment_type']
+    // D2: offline payments are pushed as they are, with no balance cap, so a payment is never
+    // dropped. received_by is pushed; the receipt number is given by the cloud (migration 008).
+    columns: ['payment_id', 'order_id', 'amount', 'payment_date', 'payment_type', 'received_by', 'receipt_no'],
+    cloudOwned: ['receipt_no']
   },
   {
     table: 'material_loss',
@@ -395,6 +398,15 @@ const runSync = async (pgPool, localDb) => {
 
 // ---------- Public API ----------
 let syncInProgress = null; // H3: shared by the 5-minute timer and POST /api/sync
+// PB 4: outcome of the latest run, for GET /api/sync/status.
+//   at      when the last run that reached the cloud finished (an aborted run is not a sync)
+//   result  'ok' | 'conflicts' | 'aborted' for the latest run of any kind
+const lastSync = { at: null, result: null };
+
+const resultOf = (summary) => {
+  if (summary.aborted) return 'aborted';
+  return summary.conflicts.length > 0 || summary.unresolved_conflicts > 0 ? 'conflicts' : 'ok';
+};
 
 // Concurrent callers join the in-flight run instead of starting a second, overlapping one
 const syncOfflineData = (pgPool, localDb) => {
@@ -411,10 +423,51 @@ const syncOfflineData = (pgPool, localDb) => {
       console.error('❌ Critical Sync Error:', err.message);
       throw err;
     })
+    .then((summary) => {
+      lastSync.result = resultOf(summary);
+      if (!summary.aborted) lastSync.at = new Date().toISOString();
+      return summary;
+    })
     .finally(() => {
       syncInProgress = null;
     });
   return syncInProgress;
+};
+
+const getLastSync = () => ({ ...lastSync });
+
+// Rows saved on this computer that still have to reach the cloud, per table (only tables
+// with at least one). Rows held back by a conflict are counted in "conflicts" instead.
+const countPending = async (localDb) => {
+  const pending = {};
+  for (const spec of SYNC_TABLES) {
+    if (spec.pullOnly) continue;
+    const [row] = await sqliteAll(
+      localDb,
+      `SELECT COUNT(*) AS n FROM ${spec.table}
+        WHERE sync_status IN ('pending_insert', 'pending_update') AND sync_conflict IS NULL`
+    );
+    const n = Number(row ? row.n : 0);
+    if (n > 0) pending[spec.table] = n;
+  }
+  return pending;
+};
+
+// Body of GET /api/sync/status and of the "sync_status" socket event (same shape).
+// cloudHealth: services/cloudHealth.js (or a stub with state() / since()).
+const buildSyncStatus = async ({ localDb, cloudHealth, conflicts = listConflicts }) => {
+  const pending = await countPending(localDb);
+  const since = cloudHealth && typeof cloudHealth.since === 'function' ? cloudHealth.since() : null;
+  return {
+    cloud: cloudHealth ? cloudHealth.state() : 'unknown',
+    cloud_since: since ? new Date(since).toISOString() : null,
+    last_sync_at: lastSync.at,
+    last_sync_result: lastSync.result,
+    syncing: syncInProgress !== null,
+    pending,
+    pending_total: Object.values(pending).reduce((a, b) => a + b, 0),
+    conflicts: (await conflicts(localDb)).length
+  };
 };
 
 const isSyncRunning = () => syncInProgress !== null;
@@ -438,4 +491,6 @@ const listConflicts = async (localDb) => {
 const refreshLocalRows = (pgPool, localDb, table, ids) =>
   refreshTable(pgPool, localDb, specFor(table), ids);
 
-module.exports = { syncOfflineData, isSyncRunning, listConflicts, refreshLocalRows, SYNC_TABLES };
+module.exports = {
+  syncOfflineData, isSyncRunning, listConflicts, refreshLocalRows, countPending, buildSyncStatus, getLastSync, SYNC_TABLES
+};

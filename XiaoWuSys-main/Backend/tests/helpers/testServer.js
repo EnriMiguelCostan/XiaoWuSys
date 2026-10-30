@@ -45,18 +45,29 @@ const prepareDatabase = async (file, { users = fixtures.USERS, password = fixtur
   return db;
 };
 
-const startTestServer = async ({ corsOrigins } = {}) => {
+// Offline-only mode, like `npm run demo`: the cloud is switched off
+const disabledCloudHealth = () => {
+  const since = Date.now();
+  return { state: () => 'disabled', since: () => since };
+};
+
+// Options: dbPath (reuse a prepared SQLite file), pgPool (a scripted cloud), cloudHealth (stub)
+const startTestServer = async ({ corsOrigins, dbPath: givenPath, pgPool: givenPool, cloudHealth } = {}) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaowusys-test-'));
-  const dbPath = path.join(dir, 'test_cache.db');
-  const localDb = await prepareDatabase(dbPath);
-  const pgPool = createCloudDisabledPool();
+  const dbPath = givenPath || path.join(dir, 'test_cache.db');
+  const localDb = givenPath ? await openDb(dbPath) : await prepareDatabase(dbPath);
+  if (givenPath) await sqliteRun(localDb, 'PRAGMA foreign_keys = ON');
+  const pgPool = givenPool || createCloudDisabledPool();
   const pushes = [];
+  const localWrites = [];
   const inventoryEvents = { notifyChanged: (ids, reason) => pushes.push({ ids, reason }) };
 
   const app = createApp({
     pgPool, localDb, localDbPath: dbPath, orderLocks: createOrderLockManager(), inventoryEvents,
     syncAndNotify: async () => ({ synced: 0, conflicts: [], failed: 0, requeued: 0, aborted: true }),
-    listConflicts, corsOrigins
+    listConflicts, corsOrigins,
+    cloudHealth: cloudHealth || disabledCloudHealth(),
+    onLocalWrite: () => localWrites.push(Date.now())
   });
   await loadRevocations({ pgPool, localDb });
   const server = http.createServer(app);
@@ -96,7 +107,7 @@ const startTestServer = async ({ corsOrigins } = {}) => {
   };
 
   return {
-    baseUrl, request, login, tokens, close, pushes, localDb, dbPath,
+    baseUrl, request, login, tokens, close, pushes, localWrites, localDb, dbPath,
     get: (sql, p) => sqliteGet(localDb, sql, p),
     all: (sql, p) => sqliteAll(localDb, sql, p),
     run: (sql, p) => sqliteRun(localDb, sql, p)
@@ -109,4 +120,4 @@ const shopDate = (days = 0) => {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Manila' }).format(d);
 };
 
-module.exports = { startTestServer, prepareDatabase, shopDate, fixtures };
+module.exports = { startTestServer, prepareDatabase, openDb, shopDate, fixtures };

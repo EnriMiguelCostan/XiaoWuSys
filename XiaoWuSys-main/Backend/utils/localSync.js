@@ -25,7 +25,9 @@ const LOCAL_SYNC_COLUMNS = ['dirty_fields', 'cloud_last_modified', 'sync_conflic
 //   inventory_items.unit/supplier, users.is_active/tokens_valid_after   mirror migration 006
 //   order_profiles.approved_by/approved_at           job order approval (mirrors Neon, migration 005)
 //   order_profiles.tracking_no                       order number from the cloud (migration 007)
+//   payments.received_by / receipt_no                receiver, and receipt number from the cloud (migration 008)
 const TABLE_EXTRA_COLUMNS = {
+  payments: [['received_by', 'TEXT'], ['receipt_no', 'TEXT']],
   material_loss: [['cloud_stock_delta', 'INTEGER']],
   inventory_items: [['deleted_at', 'TEXT'], ['deleted_by', 'TEXT'], ['purged_at', 'TEXT'],
                     ['unit', "TEXT NOT NULL DEFAULT 'pcs'"], ['supplier', 'TEXT']],

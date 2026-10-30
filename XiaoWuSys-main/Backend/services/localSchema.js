@@ -84,6 +84,8 @@ const LOCAL_TABLES = [
       amount REAL NOT NULL,
       payment_date DATETIME DEFAULT CURRENT_TIMESTAMP,
       payment_type TEXT NOT NULL CHECK (payment_type IN ('Cash', 'GCash', 'Bank Transfer')),
+      received_by TEXT,
+      receipt_no TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -124,7 +126,8 @@ const LOCAL_TABLES = [
   )`,
   'CREATE INDEX IF NOT EXISTS idx_local_inventory_bin ON inventory_items (deleted_at)',
   'CREATE INDEX IF NOT EXISTS idx_local_audit_item ON inventory_audit_log (inventory_id, created_at)',
-  'CREATE INDEX IF NOT EXISTS idx_local_order_tracking ON order_profiles (tracking_no)'
+  'CREATE INDEX IF NOT EXISTS idx_local_order_tracking ON order_profiles (tracking_no)',
+  'CREATE INDEX IF NOT EXISTS idx_local_payments_order ON payments (order_id)'
 ];
 
 const run = (db, sql) => new Promise((resolve, reject) => db.run(sql, (err) => (err ? reject(err) : resolve())));
