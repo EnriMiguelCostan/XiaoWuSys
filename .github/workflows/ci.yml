@@ -41,9 +41,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: XiaoWuSys-main/Backend/package-lock.json
-      - run: npm ci
+      - run: npm install
       - run: npm test
 
   shared-core:
@@ -73,9 +71,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: XiaoWuSys-main/Frontend/package-lock.json
       - run: npm install
+      - run: npm install ../shared/client-core
       - run: npm run lint
       - run: npm run build
 
@@ -91,9 +88,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: XiaoWuSys-main/Web/package-lock.json
       - run: npm install
+      - run: npm install ../shared/client-core
       - run: npm run check-rules:test
       - run: npm run check-rules
       - run: npm run lint
