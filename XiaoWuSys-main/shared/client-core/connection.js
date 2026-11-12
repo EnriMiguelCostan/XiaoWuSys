@@ -7,7 +7,7 @@
 //                  off in demo mode): work is saved on this computer and synced later
 //   server_down    the shop server itself cannot be reached from this browser
 //   checking       the server has not tried the cloud yet (only right after it starts)
-// navigator.onLine is only a hint: the shop server is often on this same computer, so a
+// The browser online status is only a hint: the shop server is often on this same computer, so a
 // browser that thinks it is offline can still reach it.
 
 export const CONNECTION_STATES = ['online', 'offline_local', 'server_down', 'checking'];

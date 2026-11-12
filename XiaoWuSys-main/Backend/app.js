@@ -9,7 +9,13 @@ const crypto = require('crypto');
 const { verifyToken, requireRole } = require('./middleware/authMiddleware');
 const { buildSyncStatus } = require('./services/sync');
 
-const DEFAULT_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:4173', 'http://127.0.0.1:4173'];
+// Vite MVP (5173 dev, 4173 preview) and the Next.js app in Web/ (3000, Batch M0).
+// Tablets on the shop Wi-Fi open the UI by the shop computer's LAN address, which can't be known
+// here: list those in CORS_ORIGINS (e.g. http://192.168.1.20:3000).
+const DEFAULT_ORIGINS = [
+  'http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:4173', 'http://127.0.0.1:4173',
+  'http://localhost:3000', 'http://127.0.0.1:3000'
+];
 
 // CORS_ORIGINS="https://shop.example.com,http://localhost:5173" (or "*" to allow any site)
 const parseOrigins = (value) => {

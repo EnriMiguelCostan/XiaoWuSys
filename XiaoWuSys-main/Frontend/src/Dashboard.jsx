@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { RefreshCw, CloudOff, CalendarClock, AlarmClock, Wallet, PackageX, Copy, Download, TrendingUp, TriangleAlert } from 'lucide-react';
 import { createApi, errorText, peso, formatDateTime, downloadFile, copyText } from './api';
 import { ResultDialog } from './Dialogs';
-import { orderNumber } from './lib/orders';
+import { orderNumber } from '@xiaowu/client-core/orders';
 
 // Dashboard (replaces the old Analytics tab): what needs attention today.
 //   GET /api/reports/dashboard          orders due / overdue, unpaid balances, income, restock list

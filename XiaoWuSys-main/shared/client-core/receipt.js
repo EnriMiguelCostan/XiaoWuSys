@@ -1,7 +1,7 @@
 // Printable payment acknowledgement (PB 21). Plain JS (no React, no DOM) so the future
 // Next.js and mobile apps can reuse it: it only builds text / HTML from what the API returned.
 // This is an acknowledgement of payment, not an Official Receipt (team decision D1).
-import { orderNumber } from './orders';
+import { orderNumber } from './orders.js';
 
 export const RECEIPT_TITLE = 'XiaoMei Printshop: Payment Acknowledgement';
 export const RECEIPT_FOOTER = 'This is an acknowledgement of payment, not an Official Receipt.';
@@ -52,7 +52,11 @@ export const receiptText = (args) => {
     ...r.totals.map(([k, v]) => `${k}: ${v}`), '', RECEIPT_FOOTER].join('\n');
 };
 
-// Full HTML page for the browser's print window. Every value is escaped.
+// Markup inside the printed page (runs in the print window, not in this package)
+// rules-guard: allow client-core-stays-plain the print button is HTML text for the print window
+const PRINT_BUTTON = '<p><button onclick="window.print()">Print</button></p>';
+
+// Full HTML page for the browser print dialog. Every value is escaped.
 export const receiptHtml = (args) => {
   const r = receiptLines(args);
   const row = ([k, v]) => `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(v)}</td></tr>`;
@@ -68,5 +72,5 @@ td{font-weight:bold}.foot{margin-top:18px;font-size:12px;border-top:1px solid #3
 <table><tbody>${r.totals.map(row).join('')}</tbody></table>
 <div class="sign">Received by (signature)</div>
 <p class="foot">${escapeHtml(RECEIPT_FOOTER)}</p>
-<p><button onclick="window.print()">Print</button></p></body></html>`;
+${PRINT_BUTTON}</body></html>`;
 };
