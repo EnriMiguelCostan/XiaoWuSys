@@ -56,7 +56,7 @@ export const receiptText = (args) => {
 // rules-guard: allow client-core-stays-plain the print button is HTML text for the print window
 const PRINT_BUTTON = '<p><button onclick="window.print()">Print</button></p>';
 
-// Full HTML page for the browser's print window. Every value is escaped.
+// Full HTML page for the browser print dialog. Every value is escaped.
 export const receiptHtml = (args) => {
   const r = receiptLines(args);
   const row = ([k, v]) => `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(v)}</td></tr>`;
