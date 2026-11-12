@@ -4,9 +4,9 @@ import {
 } from 'lucide-react';
 import { createApi, errorText, peso, formatDateTime, copyText, todayInManila } from './api';
 import { ResultDialog, ConfirmDialog } from './Dialogs';
-import { orderActions } from './lib/permissions';
-import { orderNumber, hasOrderNumber, normalizeOrderNumber, shortfallLines, NUMBER_AFTER_SYNC } from './lib/orders';
-import { escapeHtml, receiptHtml } from './lib/receipt';
+import { orderActions } from '@xiaowu/client-core/permissions';
+import { orderNumber, hasOrderNumber, normalizeOrderNumber, shortfallLines, NUMBER_AFTER_SYNC } from '@xiaowu/client-core/orders';
+import { escapeHtml, receiptHtml } from '@xiaowu/client-core/receipt';
 
 // Orders tab: every order profile, newest first, with its materials, payments and status.
 //   GET   /api/orders?status=&limit=&offset=      list
@@ -70,7 +70,7 @@ const PAYMENT_STATUS_META = {
 };
 const RECEIPT_AFTER_SYNC = 'Given after sync';
 
-// Printable payment acknowledgement (the text is built in src/lib/receipt.js)
+// Printable payment acknowledgement (the text is built in shared/client-core/receipt.js)
 const printReceipt = (detail, payment, customer) => {
   const w = window.open('', '_blank', 'width=600,height=800');
   if (!w) return false;

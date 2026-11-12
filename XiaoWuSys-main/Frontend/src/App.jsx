@@ -8,9 +8,9 @@ import UsersPage, { ChangePasswordDialog } from './UsersPage';
 import { API_BASE, SOCKET_URL } from './config';
 import { ResultDialog } from './Dialogs';
 import { createApi, errorText, todayInManila, formatDateTime, MOBILE_PATTERN } from './api';
-import { can } from './lib/permissions';
-import { orderNumber, NUMBER_AFTER_SYNC } from './lib/orders';
-import { deriveConnectionState, connectionText, pendingText, syncDisabledReason, syncResultMessage } from './lib/connection';
+import { can } from '@xiaowu/client-core/permissions';
+import { orderNumber, NUMBER_AFTER_SYNC } from '@xiaowu/client-core/orders';
+import { deriveConnectionState, connectionText, pendingText, syncDisabledReason, syncResultMessage } from '@xiaowu/client-core/connection';
 
 
 const emptyOrderLine = () => ({ inventory_id: '', quantity_needed: '' });
@@ -498,7 +498,7 @@ export default function App() {
 
   const canManageUsers = ['Owner', 'Admin'].includes(user?.role);
 
-  // Connection bar (the wording and the rules live in src/lib/connection.js)
+  // Connection bar (the wording lives in shared/client-core/connection.js)
   const connectionState = deriveConnectionState({ serverReachable, cloud: syncStatus?.cloud });
   const connection = connectionText(connectionState, { cloud: syncStatus?.cloud, browserOnline });
   const connectionLook = CONNECTION_STYLE[connectionState] || CONNECTION_STYLE.checking;

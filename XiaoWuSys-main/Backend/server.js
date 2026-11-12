@@ -4,6 +4,7 @@ const { Server } = require('socket.io');
 const { Pool } = require('pg');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const os = require('os');
 const jwt = require('jsonwebtoken');
 const { createApp, parseOrigins } = require('./app');
 const { createOrderLockManager } = require('./services/orderLocks');
@@ -30,6 +31,9 @@ if (process.env.JWT_SECRET.length < 32) {
 }
 
 const PORT = process.env.PORT || 5000;
+// Q4 (Batch M0): tablets on the shop Wi-Fi reach this server, so listen on every network
+// interface by default. HOST=127.0.0.1 keeps it reachable from this computer only.
+const HOST = process.env.HOST || '0.0.0.0';
 const corsOrigins = parseOrigins(process.env.CORS_ORIGINS);
 // Offline-only mode: no cloud at all (demo / testing without a Neon account)
 const cloudDisabled = String(process.env.CLOUD_DISABLED).toLowerCase() === 'true' || !process.env.DATABASE_URL;
@@ -253,7 +257,19 @@ if (!cloudDisabled) startRecycleBinJanitor({ pgPool, localDb, inventoryEvents })
 // Sync every 5 minutes. H3: overlapping runs are impossible (a call joins the running one).
 setInterval(() => { syncAndNotify().catch(() => {}); }, 300000);
 
-server.listen(PORT, () => {
-  console.log(`🚀 XiaoMei ERP Backend running on http://localhost:${PORT}`);
+// IPv4 addresses of this computer on the shop network (Wi-Fi / LAN), for the start-up hints
+const lanAddresses = () => Object.values(os.networkInterfaces()).flat()
+  .filter((a) => a && a.family === 'IPv4' && !a.internal)
+  .map((a) => a.address);
+
+server.listen(PORT, HOST, () => {
+  console.log(`🚀 XiaoMei ERP Backend running on http://localhost:${PORT} (listening on ${HOST})`);
   console.log(`🌐 Allowed frontend origins: ${corsOrigins.join(', ')}`);
+  if (HOST === '0.0.0.0' || HOST === '::') {
+    for (const ip of lanAddresses()) {
+      const uiOrigin = `http://${ip}:3000`;
+      const allowed = corsOrigins.includes('*') || corsOrigins.includes(uiOrigin);
+      console.log(`📱 Tablets on this network: open ${uiOrigin}${allowed ? '' : `  ⚠️ add ${uiOrigin} to CORS_ORIGINS in Backend/.env first`}`);
+    }
+  }
 });

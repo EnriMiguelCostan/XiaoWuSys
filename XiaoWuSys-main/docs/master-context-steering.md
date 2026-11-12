@@ -35,11 +35,12 @@ After Batch 3 comes PB 15 (consumables, including the **inventory units refactor
 ## 2. Ground rules (non-negotiable)
 
 
-1. **Read before you write.** Open the files you will touch and reuse the existing helpers (records.js, validation.js, dbErrors.js, localSync.js, services/domain/*, src/lib/*). Never re-implement them.
+1. **Read before you write.** Open the files you will touch and reuse the existing helpers (records.js, validation.js, dbErrors.js, localSync.js, services/domain/*, shared/client-core/*). Never re-implement them.
 2. **Every business rule lives on the server**, as pure functions in Backend/services/domain/ where possible (no Express, no SQL). Routes stay thin: validate, call the service, serialize.
 3. **The API returns decisions, not raw data the client must interpret.** Examples: capabilities, allowed_actions (which buttons to show, max_payment, payment_blocked_reason), stock_check, stock_status, payment_status, remaining, downpayment and sync_status. Clients never recompute rules. The server re-checks every action.
-4. **Frontend non-UI code goes in Frontend/src/lib/**, as plain JS with no React and no DOM styling, so Next.js and React Native can reuse it.
-5. **Styling until the migration:** React inline styles only. lucide-react is the only UI dependency allowed (no Tailwind, no UI libraries). Each component keeps one style object at the bottom of its file. Visual states map to style tokens in one place (e.g. CONNECTION_STYLE[state], PAYMENT_STATUS_META). Form controls set color: '#0f172a', backgroundColor: '#fff' and colorScheme: 'light'.
+4. **Client non-UI code goes in shared/client-core/** (package @xiaowu/client-core, Batch M0), as plain JS with no React and no DOM, plus a .d.ts per module. Frontend/, Web/ and the future React Native app all import it. Relative imports keep their .js extension.
+5. **Styling in Frontend/ (Vite MVP, frozen since Batch M0: bug fixes only):** React inline styles only. lucide-react is the only UI dependency allowed (no Tailwind, no UI libraries). Each component keeps one style object at the bottom of its file. Visual states map to style tokens in one place (e.g. CONNECTION_STYLE[state], PAYMENT_STATUS_META). Form controls set color: '#0f172a', backgroundColor: '#fff' and colorScheme: 'light'.
+   **Styling in Web/ (Next.js):** Tailwind + shadcn/ui only. State colours come from Web/lib/ui-tokens.ts and app/state-tokens.css; components never pick colours for states. `npm run check-rules` in Web/ enforces the server-decides rules (steering §6).
 6. **Errors are structured JSON:** { error: 'MACHINE_CODE', message: 'Plain sentence for printshop staff', ...details }.
    - Database errors **always** go through sendDbError(res, err, '<context>') from utils/dbErrors.js.
    - Business failures inside a transaction are thrown as new Rejected(status, body) (class in routes/orders.js) and sent as-is.
@@ -100,10 +101,11 @@ Backend/   Node 22, Express 5, pg (Neon PostgreSQL = source of truth), sqlite3 (
     domain/       permissions.js, orderLifecycle.js, stockCheck.js, payments.js (pure rules)
   migrations/     001–008 (applied automatically on start; npm run migrate)
   tests/          node:test; helpers/testServer.js (offline), helpers/pgTestServer.js (real PG), fixtures/data.js
-Frontend/  React 19 + Vite + inline styles = MVP/Beta. Moves to Next.js + Tailwind + a mobile app at the end.
+Frontend/  React 19 + Vite + inline styles = MVP/Beta, frozen since Batch M0. Replaced by Web/ (see docs/nextjs-migration-steering.md).
   src/App.jsx, OrdersPage.jsx, Dashboard.jsx, InventoryCatalog.jsx, UsersPage.jsx, Dialogs.jsx (ResultDialog,
   ConfirmDialog), api.js (createApi never throws; status 0 = server unreachable; errorText, peso, formatDateTime)
-  src/lib/        permissions.js, orders.js, connection.js, receipt.js (plain JS)
+shared/client-core/  permissions.js, orders.js, connection.js, receipt.js, api.js, format.js, csv.js, config.js (plain JS + .d.ts)
+Web/       Next.js App Router + TypeScript + Tailwind + shadcn/ui. UI only: no API routes, no DB, no secrets.
 **Writes are cloud-first.**
 writeCloudFirst() or a withPgTransaction() path runs first. Only on a connection error does the route fall back to withLocalTransaction() / SQLite with sync_status = 'pending_insert' | 'pending_update', dirty_fields, and last_modified = LOCAL_NOW (milliseconds).
 listRecords() reads the cloud and also merges local pending_insert rows, so a record never "disappears" before it syncs.
@@ -149,7 +151,7 @@ next_order_tracking_no(ts) / next_receipt_no(ts) work out the **Asia/Manila** ye
   - Cloud-owned columns are **never pushed**.
   - After a push they are read back from Neon and copied into the local row (markAsSynced / keepPendingAfterPush).
   - For tables with cloud-owned columns, pushInsert first checks SELECT 1 ... WHERE id = $1 and skips the INSERT if the row is already in Neon. Without that check, a resent row would fire the trigger and burn a number.
-**Offline display:** no number yet. Orders show "New order", and NUMBER_AFTER_SYNC in src/lib/orders.js explains why. Payments show "Given after sync".
+**Offline display:** no number yet. Orders show "New order", and NUMBER_AFTER_SYNC in shared/client-core/orders.js explains why. Payments show "Given after sync".
 GET /api/orders?tracking_no=XM-2026-0123 searches by number (v.trackingNo).
 order_id and payment_id stay UUIDs, because sync and foreign keys depend on them.
 ### 4.2 Owner-only financial permissions (JWT)
@@ -174,7 +176,7 @@ Approve (POST /api/orders/:id/approve, online only, one transaction) requires, i
   5. at least one item, with every item linked to stock;
   6. enough free stock (with locked rows).
 Login and GET /api/auth/me return capabilities.
-GET /api/orders/:id returns allowed_actions from orderLifecycle.allowedActions(order, role, paymentSummary). The frontend uses orderActions(detail) and can(user, cap) from src/lib/permissions.js only to show or hide buttons.
+GET /api/orders/:id returns allowed_actions from orderLifecycle.allowedActions(order, role, paymentSummary). The frontend uses orderActions(detail) and can(user, cap) from shared/client-core/permissions.js only to show or hide buttons.
 ### 4.3 Device-specific logout (PB 1)
 
 
@@ -227,7 +229,7 @@ GET /api/status (no login) adds cloud. Never add URLs or secrets to it.
 POST /api/sync returns 200, 409 SYNC_CONFLICT or 503 CLOUD_UNREACHABLE. Keep this contract.
 GET /api/sync/conflicts (Owner, Admin) only lists conflicts. Resolving them is Batch 3.
 **Frontend:**
-src/lib/connection.js:
+shared/client-core/connection.js:
   - deriveConnectionState({ serverReachable, cloud }) returns online, offline_local ("Offline: saving on this computer"), server_down ("Can't reach the shop server") or checking;
   - also exports connectionText, pendingText, syncDisabledReason and syncResultMessage(status, body).
 App.jsx shows a sticky status bar under the header with:
@@ -297,7 +299,7 @@ Exports:
 
 
 **Printable acknowledgement:**
-src/lib/receipt.js (receiptLines, receiptHtml, receiptText, escapeHtml) builds it. OrdersPage.jsx prints it through window.open + print(), like printJobOrder.
+shared/client-core/receipt.js (receiptLines, receiptHtml, receiptText, escapeHtml) builds it. OrdersPage.jsx prints it through window.open + print(), like printJobOrder.
 It shows:
   - the title "XiaoMei Printshop: Payment Acknowledgement";
   - the receipt number, or **"Receipt number given when the system is back online"** for an offline payment (**provisional**; it can be reprinted with its AR number after sync);

@@ -1,0 +1,27 @@
+{
+  "name": "@xiaowu/client-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plain-JS client code shared by the Vite MVP, the Next.js app (Web/) and the future mobile app. No React, no DOM, no business rules.",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./api": "./api.js",
+    "./config": "./config.js",
+    "./connection": "./connection.js",
+    "./csv": "./csv.js",
+    "./format": "./format.js",
+    "./orders": "./orders.js",
+    "./permissions": "./permissions.js",
+    "./receipt": "./receipt.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
