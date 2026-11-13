@@ -5,7 +5,7 @@
 // Wording stays in @xiaowu/client-core (connectionText, pendingText, …) so web and mobile say
 // the same thing. This file only adds tone and icon.
 import type { LucideIcon } from 'lucide-react';
-import { CircleCheck, CircleDashed, CircleDot, HardDrive, Loader, ServerCrash, TriangleAlert, Wifi } from 'lucide-react';
+import { CircleCheck, CircleDashed, CircleDot, CircleX, HardDrive, Loader, ServerCrash, TriangleAlert, Wifi } from 'lucide-react';
 import type { ConnectionState } from '@xiaowu/client-core/connection';
 
 export type Tone = 'success' | 'warning' | 'danger' | 'info' | 'muted';
@@ -46,5 +46,12 @@ export const UNKNOWN_STATE: StateLook = { tone: 'muted', icon: CircleDashed };
 
 export const lookFor = (table: Record<string, StateLook>, value: string | null | undefined): StateLook =>
   (value && table[value]) || UNKNOWN_STATE;
+
+// ResultDialog outcome (type from syncResultMessage() and the screens' own result objects)
+export const RESULT: Record<'success' | 'warning' | 'error', StateLook> = {
+  success: { tone: 'success', icon: CircleCheck },
+  warning: { tone: 'warning', icon: TriangleAlert },
+  error: { tone: 'danger', icon: CircleX },
+};
 
 // ORDER_STATUS, STOCK_STATUS and SYNC_STATUS are added with the screens that show them (M2, M3).

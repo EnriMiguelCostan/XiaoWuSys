@@ -26,7 +26,17 @@ const nextConfig: NextConfig = {
 
   // Plain-JS package linked with "file:../shared/client-core"
   transpilePackages: ['@xiaowu/client-core'],
-  turbopack: { root: appRoot },
+  turbopack: {
+    root: appRoot,
+    // Tailwind v4 runs as a Turbopack loader. Without this rule globals.css reaches the browser
+    // unprocessed (no utilities, "Unknown at rule: @apply" at build time).
+    rules: {
+      '*.css': {
+        loaders: [{ loader: '@tailwindcss/turbopack', options: { base: __dirname } }],
+        as: '*.css',
+      },
+    },
+  },
   outputFileTracingRoot: appRoot,
 
   // Runs offline on the shop computer: no remote image optimisation service.
