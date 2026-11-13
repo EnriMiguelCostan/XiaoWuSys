@@ -7,11 +7,7 @@
   --warning: oklch(0.55 0.15 65);
   --danger: oklch(0.53 0.2 27);
   --info: oklch(0.5 0.15 255);
-
-  /* System fonts only: the shop must work offline, so nothing is fetched from Google Fonts.
-     Covers create-next-app's Geist variables in case globals.css still points at them. */
-  --font-geist-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-geist-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  /* Fonts: --font-geist-* are set by next/font/local (app/layout.tsx); see globals.css @theme. */
 }
 
 .dark {

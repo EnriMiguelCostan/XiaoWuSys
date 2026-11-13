@@ -39,6 +39,49 @@ export function api<T = ApiBody>(method: HttpMethod, path: string, body?: unknow
   return call<T>(method, path, body);
 }
 
+/**
+ * Plain-language error for any response body (client-core's errorText, without requiring the
+ * body type to match ApiBody exactly).
+ */
+export const errorMessage = (data: unknown, fallback: string): string =>
+  errorText(data && typeof data === 'object' ? (data as ApiBody) : null, fallback);
+
+// ---------------------------------------------------------------------------------------------
+// File downloads (CSV exports). Same token and 401 handling as api(); the browser saves the
+// file under the name the server gives in Content-Disposition. Never throws.
+// ---------------------------------------------------------------------------------------------
+export type DownloadResult = { ok: true; name: string; offline: boolean } | { ok: false; message: string };
+
+export async function downloadFile(path: string): Promise<DownloadResult> {
+  const { token } = getSession();
+  try {
+    const res = await fetch(`${apiBase()}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (res.status === 401) endSessionIfCurrent(token, SESSION_ENDED_NOTICE);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      return { ok: false, message: errorText(data, 'The file could not be downloaded.') };
+    }
+    const name = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') || '')?.[1] || 'export.csv';
+    saveBlob(await res.blob(), name);
+    return { ok: true, name, offline: res.headers.get('X-Data-Source') === 'local' };
+  } catch (err) {
+    console.error(`download ${path} failed`, err);
+    return { ok: false, message: 'Cannot reach the server. Check that the backend is running.' };
+  }
+}
+
+/** Hands a file made in the browser (e.g. a CSV template) to the user. */
+export function saveBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Login: the one request where 401 means "wrong password", not "session ended".
 // ---------------------------------------------------------------------------------------------
