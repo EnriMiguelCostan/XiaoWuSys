@@ -1,13 +1,17 @@
+import { Suspense } from 'react';
 import type { Metadata } from 'next';
-import { PagePlaceholder } from '@/components/layout/page-placeholder';
 import { RequireCapability } from '@/components/layout/require-capability';
+import { OrdersScreen } from '@/components/orders/orders-screen';
 
 export const metadata: Metadata = { title: 'Orders · XiaoMei ERP' };
 
+// OrdersScreen reads ?order=<id> in the browser, so it sits in a Suspense boundary.
 export default function Page() {
   return (
     <RequireCapability capability="view_orders">
-      <PagePlaceholder title="Orders" batch="Batch M3" />
+      <Suspense>
+        <OrdersScreen />
+      </Suspense>
     </RequireCapability>
   );
 }

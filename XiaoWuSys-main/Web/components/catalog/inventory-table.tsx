@@ -66,6 +66,10 @@ const COLUMNS: { key: SortKey; label: string; num?: boolean; wide?: 'sm' | 'md' 
 ];
 const WIDE_CLASS = { sm: 'hidden sm:table-cell', md: 'hidden md:table-cell', lg: 'hidden lg:table-cell' } as const;
 
+// The "⋯" actions column stays pinned to the right edge while the table scrolls sideways
+// (long names, huge numbers). Needs an opaque background, set per cell.
+const STICKY_ACTIONS = 'sticky right-0 z-10 border-l';
+
 function SortHead({ col, sort, onSort }: { col: (typeof COLUMNS)[number]; sort: SortState; onSort: (key: SortKey) => void }) {
   const active = sort.key === col.key;
   const Arrow = active ? (sort.dir === 1 ? ArrowUp : ArrowDown) : ArrowUpDown;
@@ -113,13 +117,14 @@ export function InventoryTable({
     // then it scrolls sideways inside this box instead of stretching the page.
     <div className="max-w-full min-w-0 overflow-x-auto rounded-lg border bg-card">
       <Table aria-label="Stock items">
-        <TableHeader className="bg-muted/50">
+        {/* Opaque header: the sticky Actions cell must not let scrolled columns show through */}
+        <TableHeader className="bg-muted">
           <TableRow>
             {COLUMNS.map((col) => (
               <SortHead key={col.key} col={col} sort={sort} onSort={onSort} />
             ))}
             {canEdit && (
-              <TableHead className="w-px text-right">
+              <TableHead className={cn(STICKY_ACTIONS, 'w-px bg-muted text-right')}>
                 <span className="sr-only">Actions</span>
               </TableHead>
             )}
@@ -173,7 +178,7 @@ export function InventoryTable({
                 <TableCell className="hidden text-right tabular-nums lg:table-cell">{item.minimum_threshold.toLocaleString()}</TableCell>
                 <TableCell className="hidden text-right tabular-nums lg:table-cell">{peso(item.unit_cost)}</TableCell>
                 {canEdit && (
-                  <TableCell className="text-right">
+                  <TableCell className={cn(STICKY_ACTIONS, 'bg-card text-right')}>
                     {/* modal={false}: these items open dialogs; a modal menu can leave the page unclickable */}
                     <DropdownMenu modal={false}>
                       <DropdownMenuTrigger asChild>

@@ -22,13 +22,15 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
+import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@/components/forms/bounded-select';
 import { useInventorySnapshot } from '@/hooks/use-inventory-snapshot';
 import { useApi } from '@/hooks/use-api';
 import { useSession } from '@/hooks/use-session';
 import { downloadFile, errorMessage } from '@/lib/api';
 import { canEditInventory, canPurgeInventory, type InventoryItem } from '@/lib/inventory';
-import { POPOVER_MAX_WIDTH, STOCK_STATUS, TONE_CLASSES, type Tone } from '@/lib/ui-tokens';
+import { STOCK_STATUS, TONE_CLASSES, type Tone } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
+import { TEXT_MAX } from '@/lib/input-limits';
 
 const LIST_PAGE = 50;
 const ALL = 'all';
@@ -239,6 +241,7 @@ export function CatalogScreen() {
           <Search className="pointer-events-none absolute inset-y-0 left-2.5 my-auto size-4 text-muted-foreground" aria-hidden />
           <Input
             type="search"
+            maxLength={TEXT_MAX.search}
             placeholder="Search materials…"
             aria-label="Search materials"
             value={search}
@@ -247,17 +250,17 @@ export function CatalogScreen() {
           />
         </div>
         <Select value={category} onValueChange={setCategory}>
-          <SelectTrigger className="max-w-full min-w-0 flex-[1_1_10rem] bg-card" aria-label="Filter by category">
+          <BoundedSelectTrigger className="flex-[1_1_10rem] bg-card" aria-label="Filter by category">
             <SelectValue />
-          </SelectTrigger>
-          <SelectContent className={POPOVER_MAX_WIDTH}>
+          </BoundedSelectTrigger>
+          <BoundedSelectContent>
             <SelectItem value={ALL}>All categories</SelectItem>
             {categories.map((c) => (
-              <SelectItem key={c} value={c} className="wrap-anywhere whitespace-normal">
+              <BoundedSelectItem key={c} value={c} label={c}>
                 {c}
-              </SelectItem>
+              </BoundedSelectItem>
             ))}
-          </SelectContent>
+          </BoundedSelectContent>
         </Select>
         <Select value={status} onValueChange={setStatus}>
           <SelectTrigger className="flex-[1_1_10rem] bg-card" aria-label="Filter by stock status">
