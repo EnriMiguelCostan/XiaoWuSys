@@ -134,7 +134,8 @@ export function AppHeader() {
         </nav>
 
         <div className="ml-auto">
-          <DropdownMenu>
+          {/* modal={false}: "Change my password" opens a dialog; a modal menu can leave the page unclickable */}
+          <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" className="gap-2" aria-label="Account menu">
                 <UserRound aria-hidden />

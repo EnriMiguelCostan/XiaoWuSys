@@ -42,7 +42,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="sticky top-14 z-30">
             <ConnectionBar />
           </div>
-          <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">{children}</main>
+          {/* min-w-0: wide content (tables) scrolls inside its own box, never widens the page */}
+          <main className="mx-auto w-full max-w-6xl min-w-0 flex-1 px-4 py-6">{children}</main>
         </div>
       </ConnectionProvider>
     </SocketProvider>

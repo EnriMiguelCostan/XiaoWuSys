@@ -54,4 +54,23 @@ export const RESULT: Record<'success' | 'warning' | 'error', StateLook> = {
   error: { tone: 'danger', icon: CircleX },
 };
 
-// ORDER_STATUS, STOCK_STATUS and SYNC_STATUS are added with the screens that show them (M2, M3).
+// stock_status from the server (services/inventorySnapshot.js decides it; never derive it here)
+export const STOCK_STATUS: Record<string, StateLook & { label: string }> = {
+  in_stock: { tone: 'success', icon: CircleCheck, label: 'In Stock' },
+  low_stock: { tone: 'warning', icon: TriangleAlert, label: 'Low Stock' },
+  out_of_stock: { tone: 'danger', icon: CircleX, label: 'Out of Stock' },
+};
+
+// Left edge of a catalog row, by tone
+export const TONE_EDGE: Record<Tone, string> = {
+  success: 'border-l-success',
+  warning: 'border-l-warning',
+  danger: 'border-l-danger',
+  info: 'border-l-info',
+  muted: 'border-l-border',
+};
+
+// Drop-down lists (Select) never grow wider than the screen, whatever the longest name is
+export const POPOVER_MAX_WIDTH = 'max-w-[min(28rem,calc(100vw-2rem))]';
+
+// ORDER_STATUS and SYNC_STATUS are added with the screens that show them (M3).

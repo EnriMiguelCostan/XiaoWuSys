@@ -33,7 +33,7 @@ export function ResultDialog({ result, onClose }: { result: ResultMessage | null
             {result?.title}
           </DialogTitle>
           {/* Server and client-core messages use \n for line breaks */}
-          <DialogDescription className="whitespace-pre-line">{result?.message}</DialogDescription>
+          <DialogDescription className="whitespace-pre-line wrap-anywhere">{result?.message}</DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <Button onClick={onClose} autoFocus>
