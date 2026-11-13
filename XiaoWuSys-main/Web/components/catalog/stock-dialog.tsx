@@ -7,7 +7,7 @@
 // "Not enough stock" is decided by the server (409 INSUFFICIENT_STOCK) and shown in the form.
 import { useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
-import { Field, FormProblem } from '@/components/catalog/form-bits';
+import { Field, FormProblem } from '@/components/forms/form-bits';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Button } from '@/components/ui/button';
 import {
@@ -22,11 +22,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@/components/forms/bounded-select';
 import { useApi } from '@/hooks/use-api';
 import { errorMessage } from '@/lib/api';
 import { offlineNote, toNumberInput, type InventoryItem } from '@/lib/inventory';
-import { POPOVER_MAX_WIDTH, TONE_CLASSES } from '@/lib/ui-tokens';
+import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
+import { TEXT_MAX, WHOLE_NUMBER_MAX } from '@/lib/input-limits';
 
 export type StockAction = 'add' | 'subtract';
 type SubtractReason = 'taken' | 'lost';
@@ -112,27 +114,32 @@ export function StockDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="min-w-0 sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Adjust stock</DialogTitle>
           <DialogDescription>Every stock change is recorded with who made it and why.</DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={submit} className="space-y-4">
+        <form onSubmit={submit} className="max-w-full min-w-0 space-y-4">
           <FormProblem message={problem} />
 
           <Field id="stock-item" label="Item *">
             <Select value={itemId} onValueChange={setItemId}>
-              <SelectTrigger id="stock-item" className="w-full">
+              <BoundedSelectTrigger id="stock-item">
                 <SelectValue placeholder="Select an item…" />
-              </SelectTrigger>
-              <SelectContent className={POPOVER_MAX_WIDTH}>
+              </BoundedSelectTrigger>
+              <BoundedSelectContent>
                 {items.map((i) => (
-                  <SelectItem key={i.inventory_id} value={i.inventory_id} className="wrap-anywhere whitespace-normal">
-                    {i.item_name} ({i.quantity_available.toLocaleString()} in stock)
-                  </SelectItem>
+                  <BoundedSelectItem
+                    key={i.inventory_id}
+                    value={i.inventory_id}
+                    label={i.item_name}
+                    suffix={`(${i.quantity_available.toLocaleString()} in stock)`}
+                  >
+                    {i.item_name}
+                  </BoundedSelectItem>
                 ))}
-              </SelectContent>
+              </BoundedSelectContent>
             </Select>
           </Field>
 
@@ -160,6 +167,7 @@ export function StockDialog({
                 id="stock-quantity"
                 type="number"
                 min={1}
+                max={WHOLE_NUMBER_MAX}
                 step={1}
                 inputMode="numeric"
                 placeholder="1"
@@ -189,7 +197,7 @@ export function StockDialog({
 
           {recordsLoss && (
             <Field id="stock-note" label="What happened? (optional)">
-              <Input id="stock-note" maxLength={200} placeholder="e.g. misprint, water damage" value={note} onChange={(e) => setNote(e.target.value)} />
+              <Input id="stock-note" maxLength={TEXT_MAX.note} placeholder="e.g. misprint, water damage" value={note} onChange={(e) => setNote(e.target.value)} />
             </Field>
           )}
 

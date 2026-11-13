@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ChevronLeft, ChevronRight, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
 import { formatDateTime } from '@xiaowu/client-core/format';
-import { FormProblem } from '@/components/catalog/form-bits';
+import { FormProblem } from '@/components/forms/form-bits';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Badge } from '@/components/ui/badge';

@@ -5,7 +5,20 @@
 // Wording stays in @xiaowu/client-core (connectionText, pendingText, …) so web and mobile say
 // the same thing. This file only adds tone and icon.
 import type { LucideIcon } from 'lucide-react';
-import { CircleCheck, CircleDashed, CircleDot, CircleX, HardDrive, Loader, ServerCrash, TriangleAlert, Wifi } from 'lucide-react';
+import {
+  CircleCheck,
+  CircleDashed,
+  CircleDot,
+  CircleX,
+  Clock,
+  HardDrive,
+  Loader,
+  Printer,
+  ServerCrash,
+  ShieldCheck,
+  TriangleAlert,
+  Wifi,
+} from 'lucide-react';
 import type { ConnectionState } from '@xiaowu/client-core/connection';
 
 export type Tone = 'success' | 'warning' | 'danger' | 'info' | 'muted';
@@ -70,7 +83,14 @@ export const TONE_EDGE: Record<Tone, string> = {
   muted: 'border-l-border',
 };
 
-// Drop-down lists (Select) never grow wider than the screen, whatever the longest name is
-export const POPOVER_MAX_WIDTH = 'max-w-[min(28rem,calc(100vw-2rem))]';
+// production_status from the server (the label is the server's value itself)
+export const ORDER_STATUS: Record<string, StateLook> = {
+  Pending: { tone: 'info', icon: Clock },
+  Approved: { tone: 'info', icon: ShieldCheck },
+  Printing: { tone: 'warning', icon: Printer },
+  Completed: { tone: 'success', icon: CircleCheck },
+  Delayed: { tone: 'warning', icon: TriangleAlert },
+  Cancelled: { tone: 'danger', icon: CircleX },
+};
 
-// ORDER_STATUS and SYNC_STATUS are added with the screens that show them (M3).
+// SYNC_STATUS is added with the screen that shows it.

@@ -9,7 +9,7 @@
 // stock changes go through Adjust stock so every movement is recorded.
 import { useState } from 'react';
 import { Pencil, Plus } from 'lucide-react';
-import { Field, FormProblem, Suggestions } from '@/components/catalog/form-bits';
+import { Field, FormProblem, Suggestions } from '@/components/forms/form-bits';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Button } from '@/components/ui/button';
 import {
@@ -24,6 +24,7 @@ import { Input } from '@/components/ui/input';
 import { useApi } from '@/hooks/use-api';
 import { errorMessage } from '@/lib/api';
 import { COMMON_UNITS, offlineNote, toNumberInput, type InventoryItem } from '@/lib/inventory';
+import { MONEY_INPUT_MAX, TEXT_MAX, WHOLE_NUMBER_MAX } from '@/lib/input-limits';
 
 interface ItemResponse {
   message?: string;
@@ -159,27 +160,27 @@ export function ItemFormDialog({
             </div>
           )}
           <Field id="item-name" label="Item name *" className="sm:col-span-2">
-            <Input id="item-name" required maxLength={255} placeholder="e.g. Valiant Columnar Notebook" autoFocus {...bind('item_name')} />
+            <Input id="item-name" required maxLength={TEXT_MAX.default} placeholder="e.g. Valiant Columnar Notebook" autoFocus {...bind('item_name')} />
           </Field>
           <Field id="item-category" label="Category *">
-            <Input id="item-category" required maxLength={100} list="catalog-category-options" placeholder="e.g. Notebooks" {...bind('item_category')} />
+            <Input id="item-category" required maxLength={TEXT_MAX.category} list="catalog-category-options" placeholder="e.g. Notebooks" {...bind('item_category')} />
           </Field>
           <Field id="item-unit" label="Unit (what 1 means)">
-            <Input id="item-unit" maxLength={30} list="catalog-unit-options" placeholder="pcs, pack, ream…" {...bind('unit')} />
+            <Input id="item-unit" maxLength={TEXT_MAX.unit} list="catalog-unit-options" placeholder="pcs, pack, ream…" {...bind('unit')} />
           </Field>
           <Field id="item-supplier" label="Supplier (optional)" className="sm:col-span-2">
-            <Input id="item-supplier" maxLength={255} placeholder="e.g. Quaff PH" {...bind('supplier')} />
+            <Input id="item-supplier" maxLength={TEXT_MAX.default} placeholder="e.g. Quaff PH" {...bind('supplier')} />
           </Field>
           {!editing && (
             <Field id="item-quantity" label="Quantity in stock">
-              <Input id="item-quantity" type="number" min={0} step={1} inputMode="numeric" placeholder="0" {...bind('quantity_available')} />
+              <Input id="item-quantity" type="number" min={0} max={WHOLE_NUMBER_MAX} step={1} inputMode="numeric" placeholder="0" {...bind('quantity_available')} />
             </Field>
           )}
           <Field id="item-threshold" label="Low-stock alert at">
-            <Input id="item-threshold" type="number" min={0} step={1} inputMode="numeric" placeholder="0" required={editing} {...bind('minimum_threshold')} />
+            <Input id="item-threshold" type="number" min={0} max={WHOLE_NUMBER_MAX} step={1} inputMode="numeric" placeholder="0" required={editing} {...bind('minimum_threshold')} />
           </Field>
           <Field id="item-cost" label="Unit cost (₱)">
-            <Input id="item-cost" type="number" min={0} step="0.01" inputMode="decimal" placeholder="0.00" {...bind('unit_cost')} />
+            <Input id="item-cost" type="number" min={0} max={MONEY_INPUT_MAX} step="0.01" inputMode="decimal" placeholder="0.00" {...bind('unit_cost')} />
           </Field>
           {editing && (
             <p className="text-sm text-muted-foreground sm:col-span-2">

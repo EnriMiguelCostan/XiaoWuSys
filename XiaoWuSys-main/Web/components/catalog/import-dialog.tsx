@@ -11,7 +11,7 @@
 import { useState } from 'react';
 import { CircleCheck, FileDown, Upload } from 'lucide-react';
 import { parseCsv } from '@xiaowu/client-core/csv';
-import { FormProblem } from '@/components/catalog/form-bits';
+import { FormProblem } from '@/components/forms/form-bits';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Button } from '@/components/ui/button';
 import {

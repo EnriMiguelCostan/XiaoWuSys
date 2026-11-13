@@ -38,8 +38,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <SocketProvider>
       <ConnectionProvider>
         <div className="flex min-h-dvh flex-col bg-muted/30">
-          <AppHeader />
-          <div className="sticky top-14 z-30">
+          {/* Header and connection bar stick together as ONE opaque block, stacked with flex-col.
+              The bar's tint is translucent (e.g. bg-success at 10%), so without the opaque bg-background here the
+              page scrolled underneath (search, filters) showed through it; and one block needs no
+              hard-coded offset for the header's height. */}
+          <div className="sticky top-0 z-40 flex flex-col bg-background shadow-xs">
+            <AppHeader />
             <ConnectionBar />
           </div>
           {/* min-w-0: wide content (tables) scrolls inside its own box, never widens the page */}

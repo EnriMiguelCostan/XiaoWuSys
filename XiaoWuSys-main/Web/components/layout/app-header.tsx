@@ -91,7 +91,8 @@ export function AppHeader() {
   };
 
   return (
-    <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur supports-backdrop-filter:bg-background/80">
+    // Sticky positioning lives on the shell's wrapper (header + connection bar as one block)
+    <header className="border-b bg-background">
       <div className="mx-auto flex h-14 max-w-6xl items-center gap-3 px-4">
         {/* Phone / portrait tablet: sections in a sheet */}
         <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
