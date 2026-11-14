@@ -6,3 +6,8 @@
 # text=auto leaves binary files (icons, fonts) untouched.
 Web/** text=auto eol=lf
 shared/client-core/** text=auto eol=lf
+
+# Shop start-up scripts: the POSIX script must stay LF to run; the Windows ones stay CRLF.
+scripts/*.sh text eol=lf
+scripts/*.ps1 text eol=crlf
+scripts/*.cmd text eol=crlf

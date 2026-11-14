@@ -84,7 +84,9 @@ export function ChangePasswordDialog({ open, onOpenChange }: { open: boolean; on
 
         {done ? (
           <>
-            <p className={cn('rounded-md border p-3 text-sm', TONE_CLASSES.success.banner)}>{done}</p>
+            <p role="status" className={cn('rounded-md border p-3 text-sm', TONE_CLASSES.success.banner)}>
+              {done}
+            </p>
             <DialogFooter>
               <Button onClick={() => close(false)} autoFocus>
                 OK
