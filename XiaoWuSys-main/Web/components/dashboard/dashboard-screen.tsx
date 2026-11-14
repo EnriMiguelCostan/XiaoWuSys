@@ -4,10 +4,12 @@
 //   GET /api/reports/dashboard          orders due / overdue, unpaid, overpaid, income, restock list
 //   GET /api/reports/export/*.csv       Excel / Google Sheets downloads
 // Money panels and the orders / payments exports are for accounts with view_finance (the
-// server also leaves the overpaid list empty, and refuses the exports, for everyone else).
-// Reloads when stock changes anywhere ('inventory_updated') and after a sync.
+// server also refuses the exports for everyone else). The Overpaid panel appears only when the
+// server returns rows (it leaves the list empty for accounts without view_finance).
+// Refreshes: when stock changes anywhere ('inventory_updated'), after a sync, and every 30 s
+// ONLY while the live socket is down (useFallbackPolling).
 import { useCallback, useEffect, useState } from 'react';
-import { AlarmClock, CalendarClock, CloudOff, Copy, Download, PackageX, PhilippinePeso, RefreshCw, ShoppingCart, Wallet } from 'lucide-react';
+import { AlarmClock, CalendarClock, CloudOff, Copy, Download, PackageX, RefreshCw, ShoppingCart, TriangleAlert, Wallet } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { can } from '@xiaowu/client-core/permissions';
 import { useConnection } from '@/components/connection/connection-provider';
@@ -20,6 +22,7 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useApi } from '@/hooks/use-api';
+import { useFallbackPolling } from '@/hooks/use-fallback-polling';
 import { useSession } from '@/hooks/use-session';
 import { useSocketEvent } from '@/hooks/use-socket-event';
 import { downloadFile, errorMessage } from '@/lib/api';
@@ -29,6 +32,8 @@ import { lookFor, STOCK_STATUS, TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
 
 type Loaded = { key: string; data: Dashboard | null; error: string };
+
+const DASHBOARD_POLL_MS = 30_000;
 
 export function DashboardScreen() {
   const api = useApi();
@@ -60,6 +65,8 @@ export function DashboardScreen() {
 
   // PB 17: the low-stock banner and restock list follow stock changes live
   useSocketEvent('inventory_updated', reload);
+  // No pushes while the socket is down: re-read on a timer until it is back (never while live)
+  useFallbackPolling(reload, DASHBOARD_POLL_MS);
 
   const loading = !loaded || loaded.key !== requestKey;
   // The last figures stay on screen while a refresh is on its way
@@ -144,7 +151,6 @@ export function DashboardScreen() {
   }
 
   const { orders, inventory, income_by_month: income, top_materials: top } = data;
-  const thisMonth = income[income.length - 1];
   // Longest bar = the busiest month (a scale for the bars, not a figure shown to anyone)
   const busiestMonth = Math.max(0, ...income.map((m) => m.amount));
 
@@ -164,72 +170,58 @@ export function DashboardScreen() {
         </p>
       )}
 
-      {/* D2: branches that together overpaid while offline. The Owner refunds by hand. */}
-      {canSeeMoney && orders.overpaid.length > 0 && (
+      {/* PB 21 / D2: branches that together overpaid while offline. The Owner refunds by hand.
+          Shown whenever the server returns rows; it returns none to accounts without view_finance. */}
+      {orders.overpaid.length > 0 && (
         <OrdersTableCard
-          title={`Overpaid: review and refund (${orders.overpaid.length})`}
-          description={`Paid more than their price, usually two branches taking payments offline. Total to review: ${peso(orders.overpaid_total)}. Refunds are given outside the system.`}
+          title={`Overpaid: review and refund (${orders.overpaid.length.toLocaleString()})`}
+          description={`These orders received more than their price, usually because two branches took payments while offline. Total to review: ${peso(orders.overpaid_total)}. Refunds are given outside the system.`}
           empty=""
           orders={orders.overpaid}
           money="overpaid"
           tone="danger"
+          icon={TriangleAlert}
         />
       )}
 
-      <section aria-label="Summary" className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <section aria-label="Summary" className={cn('grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2', canSeeMoney ? 'xl:grid-cols-5' : 'xl:grid-cols-4')}>
         <SummaryCard
-          title="Open orders"
-          icon={ShoppingCart}
-          value={orders.open.toLocaleString()}
-          footnote={`${orders.overdue.length} overdue · ${orders.due_this_week.length} due in 7 days`}
-          tone={orders.overdue.length ? 'danger' : 'info'}
+          title="Overdue orders"
+          icon={AlarmClock}
+          value={orders.overdue.length.toLocaleString()}
+          footnote="Open orders past their deadline"
+          tone={orders.overdue.length ? 'danger' : 'success'}
         />
-        {canSeeMoney ? (
+        <SummaryCard
+          title="Due in 7 days"
+          icon={CalendarClock}
+          value={orders.due_this_week.length.toLocaleString()}
+          footnote="Open orders with a deadline this week"
+          tone="warning"
+        />
+        <SummaryCard title="Open orders" icon={ShoppingCart} value={orders.open.toLocaleString()} footnote="Not completed or cancelled" tone="info" />
+        {canSeeMoney && (
           <SummaryCard
-            title="Unpaid balances"
+            title="Unpaid balance"
             icon={Wallet}
             value={peso(orders.outstanding_balance)}
-            footnote={`${orders.unpaid_count.toLocaleString()} order(s) with a balance`}
+            footnote={`${orders.unpaid_count.toLocaleString()} order(s)`}
             tone="info"
-          />
-        ) : (
-          <SummaryCard
-            title="Due in 7 days"
-            icon={CalendarClock}
-            value={orders.due_this_week.length.toLocaleString()}
-            footnote="Open orders with a deadline this week"
-            tone="warning"
-          />
-        )}
-        {canSeeMoney ? (
-          <SummaryCard
-            title="Received this month"
-            icon={PhilippinePeso}
-            value={peso(thisMonth?.amount ?? 0)}
-            footnote={thisMonth ? `Payments recorded in ${monthLabel(thisMonth.month)}` : 'No payments yet'}
-            tone="success"
-          />
-        ) : (
-          <SummaryCard
-            title="Overdue orders"
-            icon={AlarmClock}
-            value={orders.overdue.length.toLocaleString()}
-            footnote="Open orders past their deadline"
-            tone={orders.overdue.length ? 'danger' : 'success'}
           />
         )}
         <SummaryCard
-          title="Low-stock items"
+          title="Needs restocking"
           icon={PackageX}
           value={inventory.restock.length.toLocaleString()}
-          footnote={`${inventory.summary.out_of_stock.toLocaleString()} out of stock · at or below the alert level`}
-          tone={inventory.restock.length ? 'warning' : 'success'}
+          footnote={`${inventory.summary.out_of_stock.toLocaleString()} out of stock`}
+          tone={inventory.restock.length ? 'danger' : 'success'}
         />
       </section>
 
       <div className="grid min-w-0 grid-cols-1 gap-6 xl:grid-cols-2">
         <OrdersTableCard
           title="Overdue"
+          icon={AlarmClock}
           description="Open orders past their deadline, oldest first."
           empty="Nothing is overdue."
           orders={orders.overdue}
@@ -246,7 +238,7 @@ export function DashboardScreen() {
       </div>
 
       {/* Restock list (suggested amounts are the server's: back to twice the alert level) */}
-      <Card id="restock-list" className="min-w-0 scroll-mt-32">
+      <Card id="restock-list" className="min-w-0 scroll-mt-[calc(var(--shell-offset,0px)+6rem)]">
         <CardHeader className="min-w-0">
           <CardTitle className="truncate">Restock list</CardTitle>
           <CardDescription className="truncate">Suggested amount brings free stock back to twice its low-stock alert.</CardDescription>

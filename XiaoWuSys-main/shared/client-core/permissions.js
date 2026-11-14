@@ -12,3 +12,15 @@ export const NO_ORDER_ACTIONS = Object.freeze({
 });
 
 export const orderActions = (detail) => ({ ...NO_ORDER_ACTIONS, ...(detail && detail.allowed_actions) });
+
+// What each role may do, in plain words for the Accounts screen. Display text only, keyed by the
+// role names the server sends in "assignable_roles"; it never decides who may do what.
+export const ROLE_HELP = Object.freeze({
+  Owner: 'Everything, including approving job orders and managing Owners',
+  Admin: 'Everything except approving job orders; manages non-Owner accounts',
+  Production: 'Catalog, stock and orders (no account management)',
+  Staff: 'View the catalog and orders only'
+});
+
+/** Plain-words description of a role from the server, or '' for a role this version doesn't know. */
+export const roleHelp = (role) => (role && Object.hasOwn(ROLE_HELP, role) ? ROLE_HELP[role] : '');

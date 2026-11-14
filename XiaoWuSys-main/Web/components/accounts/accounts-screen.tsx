@@ -12,9 +12,14 @@
 // yourself) and its message is shown as is. Which rows offer actions is read from the server's
 // answer, never from role names: "assignable_roles" lists the roles this account may manage
 // (it includes Owner only for an Owner), and your own row is matched by user_id.
+// Account changes are online only (503 otherwise), so writes are switched off while the list
+// came from this computer's copy or the connection bar says the cloud or server is unreachable.
+// Every server answer (success or refusal) ends in a ResultDialog.
 import { useCallback, useEffect, useState } from 'react';
 import { CloudOff, KeyRound, RefreshCw, UserCheck, UserPlus, Users, UserX } from 'lucide-react';
 import { formatDateTime } from '@xiaowu/client-core/format';
+import { roleHelp } from '@xiaowu/client-core/permissions';
+import { useConnection } from '@/components/connection/connection-provider';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { Field, FormProblem } from '@/components/forms/form-bits';
@@ -53,14 +58,6 @@ interface AccountList {
   assignable_roles: string[];
 }
 
-// What each role can do, in plain words (display only, keyed by the server's role name)
-const ROLE_HELP: Record<string, string> = {
-  Owner: 'Everything, including approving job orders and managing Owners',
-  Admin: 'Everything except approving job orders; manages non-Owner accounts',
-  Production: 'Catalog, stock and orders (no account management)',
-  Staff: 'View the catalog and orders only',
-};
-
 const PASSWORD_HINT = 'At least 8 characters, with a letter and a number.';
 
 // The ⋯ column stays visible when the table scrolls sideways (same as the Catalog)
@@ -71,6 +68,7 @@ type Loaded = { key: string; list: AccountList | null; error: string };
 export function AccountsScreen() {
   const api = useApi();
   const { user: me } = useSession();
+  const { state: connection } = useConnection();
   const [tick, setTick] = useState(0);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [busy, setBusy] = useState(false);
@@ -100,7 +98,7 @@ export function AccountsScreen() {
   const loading = !loaded || loaded.key !== requestKey;
   const list = loaded?.list ?? null;
   const error = loaded && loaded.key === requestKey ? loaded.error : '';
-  const offline = list?.source === 'local';
+  const offline = list?.source === 'local' || connection === 'offline_local' || connection === 'server_down';
   const assignable = list?.assignable_roles ?? [];
 
   /** Rows this account may act on (the server checks again on every request) */
@@ -266,6 +264,7 @@ export function AccountsScreen() {
         <CreateAccountDialog
           roles={assignable}
           onClose={() => setCreating(false)}
+          onResult={setResult}
           onDone={(r) => {
             setCreating(false);
             setResult(r);
@@ -277,6 +276,7 @@ export function AccountsScreen() {
         <ResetPasswordDialog
           account={resetFor}
           onClose={() => setResetFor(null)}
+          onResult={setResult}
           onDone={(r) => {
             setResetFor(null);
             setResult(r);
@@ -307,7 +307,15 @@ export function AccountsScreen() {
 }
 
 // ---------------------------------------------------------------------------------------------
-function CreateAccountDialog({ roles, onClose, onDone }: { roles: string[]; onClose: () => void; onDone: (r: ResultMessage) => void }) {
+interface AccountDialogProps {
+  onClose: () => void;
+  /** a refusal: shown in the screen's ResultDialog while this form stays open with its input */
+  onResult: (r: ResultMessage) => void;
+  /** success: close this form, show the result and reload the list */
+  onDone: (r: ResultMessage) => void;
+}
+
+function CreateAccountDialog({ roles, onClose, onResult, onDone }: AccountDialogProps & { roles: string[] }) {
   const api = useApi();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -326,7 +334,7 @@ function CreateAccountDialog({ roles, onClose, onDone }: { roles: string[]; onCl
     const { ok, data } = await api<{ message?: string }>('POST', '/auth/register', { username: username.trim(), password, role });
     setBusy(false);
     if (!ok) {
-      setProblem(errorMessage(data, 'The account was not created.'));
+      onResult({ type: 'error', title: 'Account not created', message: errorMessage(data, 'The account was not created.') });
       return;
     }
     onDone({ type: 'success', title: 'Account created', message: data.message ?? 'The account was created.' });
@@ -370,7 +378,7 @@ function CreateAccountDialog({ roles, onClose, onDone }: { roles: string[]; onCl
               onChange={(e) => setPassword(e.target.value)}
             />
           </Field>
-          <Field id="new-role" label="Role *" hint={role ? ROLE_HELP[role] : 'What this person may do.'}>
+          <Field id="new-role" label="Role *" hint={roleHelp(role) || 'What this person may do.'}>
             <Select value={role} onValueChange={setRole}>
               <SelectTrigger id="new-role" className="w-full">
                 <SelectValue placeholder="Choose a role…" />
@@ -399,22 +407,20 @@ function CreateAccountDialog({ roles, onClose, onDone }: { roles: string[]; onCl
 }
 
 // ---------------------------------------------------------------------------------------------
-function ResetPasswordDialog({ account, onClose, onDone }: { account: Account; onClose: () => void; onDone: (r: ResultMessage) => void }) {
+function ResetPasswordDialog({ account, onClose, onResult, onDone }: AccountDialogProps & { account: Account }) {
   const api = useApi();
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState('');
 
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    setProblem('');
     setBusy(true);
     const { ok, data } = await api<{ message?: string }>('POST', `/auth/users/${encodeURIComponent(account.user_id)}/reset-password`, {
       new_password: password,
     });
     setBusy(false);
     if (!ok) {
-      setProblem(errorMessage(data, 'The password was not reset.'));
+      onResult({ type: 'error', title: 'Password not reset', message: errorMessage(data, 'The password was not reset.') });
       return;
     }
     onDone({ type: 'success', title: 'Password reset', message: data.message ?? 'The password was reset.' });
@@ -431,7 +437,6 @@ function ResetPasswordDialog({ account, onClose, onDone }: { account: Account; o
           <DialogDescription>Tell the person their new password in person or by private message. They will be signed out everywhere.</DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="max-w-full min-w-0 space-y-4">
-          <FormProblem message={problem} />
           <Field id="reset-password" label="New password *" hint={PASSWORD_HINT}>
             <Input
               id="reset-password"

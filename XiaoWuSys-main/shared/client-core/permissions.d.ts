@@ -35,3 +35,9 @@ export interface OrderActions {
 export const NO_ORDER_ACTIONS: Readonly<OrderActions>;
 
 export function orderActions(detail: { allowed_actions?: Partial<OrderActions> } | null | undefined): OrderActions;
+
+/** Display text for the Accounts screen, keyed by the server's role names. Never used to decide. */
+export const ROLE_HELP: Readonly<Record<string, string>>;
+
+/** Plain-words description of a role from the server, or '' for an unknown role. */
+export function roleHelp(role: string | null | undefined): string;

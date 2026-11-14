@@ -4,7 +4,7 @@
 //
 // The gate is cosmetic (steering §2.3): no token -> /login. Every real check is Express's
 // 401/403, and a 401 on any request wipes the session (lib/api.ts), which lands here too.
-import { useEffect } from 'react';
+import { useCallback, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { Loader } from 'lucide-react';
 import { ConnectionBar } from '@/components/connection/connection-bar';
@@ -22,8 +22,29 @@ function FullPageWait({ text }: { text: string }) {
   );
 }
 
+/**
+ * Publishes the sticky header block's height as the CSS variable --shell-offset, so a page-level
+ * pin (the Dashboard's low-stock warning, PB 17) can stick just below it instead of under it.
+ * Layout measurement only; it follows the header as it wraps on narrow screens.
+ */
+function useShellOffset() {
+  return useCallback((node: HTMLDivElement | null) => {
+    if (!node) return undefined;
+    const root = document.documentElement;
+    const publish = () => root.style.setProperty('--shell-offset', `${node.offsetHeight}px`);
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+      root.style.removeProperty('--shell-offset');
+    };
+  }, []);
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { status } = useSession();
+  const shellRef = useShellOffset();
   const router = useRouter();
   const pathname = usePathname();
 
@@ -42,7 +63,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               The bar's tint is translucent (e.g. bg-success at 10%), so without the opaque bg-background here the
               page scrolled underneath (search, filters) showed through it; and one block needs no
               hard-coded offset for the header's height. */}
-          <div className="sticky top-0 z-40 flex flex-col bg-background shadow-xs">
+          <div ref={shellRef} className="sticky top-0 z-40 flex flex-col bg-background shadow-xs">
             <AppHeader />
             <ConnectionBar />
           </div>

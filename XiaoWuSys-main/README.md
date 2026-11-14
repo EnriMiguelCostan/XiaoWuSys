@@ -24,25 +24,37 @@ Inventory and order management for **XiaoMei Printshop** (Agdao, Davao City). It
 
 ## Quick start
 
-You need **Node.js 22 or newer**.
+You need **Node.js 22 or newer**. The system is two programs on the shop computer:
+
+| Program | Folder | Address | What it does |
+|---|---|---|---|
+| API | `Backend/` | port **5000** | Express: every rule, the databases, sync, real-time updates |
+| Screens | `Web/` | port **3000** | Next.js: the pages staff use (no data or secrets of its own) |
+
+Staff open **http://localhost:3000** on the shop computer.
+
+### Once per computer
+
+```bash
+cd Backend && npm ci
+cd ../Web && npm ci
+```
 
 ### Option A: demo mode (no Neon account needed)
 
-```bash
-cd Backend
-npm install
-npm run demo          # creates demo_cache.db with sample data and starts the API
+Windows: double-click `scripts\start-shop.cmd` after adding `-Demo`, or run in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start-shop.ps1 -Demo
 ```
 
-In a second terminal:
+macOS / Linux:
 
 ```bash
-cd Frontend
-npm install
-npm run dev           # open the address it prints (usually http://localhost:5173)
+scripts/start-shop.sh --demo
 ```
 
-Log in as `owner`, `admin`, `production` or `staff`. The password for all of them is **`XiaoMei2026`**.
+The script builds the screens the first time, starts both programs, waits until both answer and opens the browser. Log in as `owner`, `admin`, `production` or `staff`. The password for all of them is **`XiaoMei2026`**.
 
 Demo mode runs fully offline, on its own database file that is never synced. Actions that must reach every branch (approving, status changes, permanent delete, account changes) show the "needs the internet" message.
 
@@ -50,8 +62,7 @@ Demo mode runs fully offline, on its own database file that is never synced. Act
 
 1. Create a free project at [neon.tech](https://neon.tech) and run `Backend/schema.sql` in its SQL Editor.
 2. `cd Backend`, then copy `.env.example` to `.env` and fill in `DATABASE_URL`, `PG_LISTEN_URL` and a long random `JWT_SECRET`.
-3. Run `npm install`.
-4. Create the first account:
+3. Create the first account:
    ```bash
    ADMIN_USERNAME=owner ADMIN_PASSWORD='YourPassw0rd' ADMIN_ROLE=Owner npm run create-admin
    ```
@@ -59,9 +70,37 @@ Demo mode runs fully offline, on its own database file that is never synced. Act
    ```powershell
    $env:ADMIN_USERNAME="owner"; $env:ADMIN_PASSWORD="YourPassw0rd"; $env:ADMIN_ROLE="Owner"; npm run create-admin
    ```
-5. `npm start`. Pending database migrations are applied automatically on start.
-6. Optional: run `npm run seed-inventory` to add the October 8, 2026 delivery.
-7. Start the frontend as in Option A. If the API isn't on `localhost:5000`, copy `Frontend/.env.example` to `Frontend/.env` and set `VITE_API_URL`.
+4. Optional: run `npm run seed-inventory` to add the October 8, 2026 delivery.
+5. Start the shop: double-click `scripts\start-shop.cmd` (Windows) or run `scripts/start-shop.sh` (macOS / Linux). Pending database migrations are applied automatically when the API starts.
+
+Keep the start-up window open while the shop is working; closing it (or Ctrl+C) stops both programs. After updating the code, start once with `-Rebuild` (`--rebuild`) so the screens are rebuilt.
+
+**Starting the two programs by hand** (what the script does):
+
+```bash
+cd Backend && npm start          # or: npm run demo        -> API on http://0.0.0.0:5000
+cd Web && npm run build          # once, and after every update
+cd Web && npm run start          # screens on http://0.0.0.0:3000
+```
+
+Then open http://localhost:3000. For screen development use `npm run dev` in `Web/` instead of `build` + `start`.
+
+### Tablets on the shop Wi-Fi
+
+Both programs listen on every network address of the shop computer, so tablets and phones on the same Wi-Fi can use the system:
+
+1. Give the shop computer a fixed address on the router (a "DHCP reservation"), e.g. `192.168.1.20`. Otherwise its address can change and tablets lose the connection.
+2. In `Backend/.env`, add the tablet address of the screens to `CORS_ORIGINS` (comma-separated, no spaces), then restart:
+   ```
+   CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://192.168.1.20:3000
+   ```
+   When the API starts it prints the exact entries to add for each network address it has.
+3. On the tablet, open `http://192.168.1.20:3000`. The screens find the API at port 5000 of the same address by themselves.
+4. If Windows asks, allow Node.js through the firewall on **private** networks.
+
+### The old screens (`Frontend/`)
+
+`Frontend/` is the earlier Vite + React version of the screens (MVP/Beta). It is **frozen** (bug fixes only) and kept for **one release** as a fallback, then removed. If you need it: `cd Frontend && npm ci && npm run dev`, then open http://localhost:5173 (the API allows that address by default). New features are built only in `Web/`.
 
 ## Tests
 
@@ -78,7 +117,14 @@ There are 98 automated tests in `Backend/tests/`. Most start the real API on a t
 TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/xiaowusys_test npm test
 ```
 
-**CI:** every push runs the backend tests (with a PostgreSQL 16 service for the migration tests) and the frontend lint and build on GitHub Actions (`.github/workflows/ci.yml`).
+**CI:** every push runs the backend tests (with a PostgreSQL 16 service for the migration tests), the `Web/` checks (shared client code tests, the rules guard, lint, type check and build) and the frozen `Frontend/` lint and build on GitHub Actions (`.github/workflows/ci.yml`).
+
+The same checks for the screens, by hand:
+
+```bash
+cd shared/client-core && npm test
+cd Web && npm run check-rules && npm run check-rules:test && npm run lint && npm run typecheck && npm run build
+```
 
 They cover:
 - login security: lockout after 5 wrong passwords, forged and expired tokens, deactivated accounts;
@@ -121,10 +167,16 @@ Backend/   Node.js + Express 5 API, PostgreSQL (Neon) + SQLite offline cache, So
     domain/        business rules with no HTTP or SQL: permissions, order lifecycle, stock check, payments
   migrations/      numbered, idempotent SQL changes (applied automatically)
   tests/           automated tests + fixture data
-Frontend/  React 19 + Vite (inline styles): the MVP/Beta client. It moves to Next.js + Tailwind CSS and
-           a mobile app at the end of the project (docs/sprint-12-steering.md §3)
-  src/lib/         plain-JS helpers with no React (reused by the future clients)
-docs/      sprint and audit notes
+Web/       Next.js + TypeScript + Tailwind CSS + shadcn/ui: the screens (port 3000). UI only: no API
+           routes, no database, no secrets; every decision comes from the API
+  app/             one route per section: /login, /dashboard, /catalog, /orders, /orders/new, /accounts
+  scripts/         check-rules.mjs: the CI guard that keeps business rules out of the screens
+shared/client-core/  plain-JS helpers with no React (API client, formatting, permissions, receipts),
+           used by Web/, Frontend/ and the future mobile app
+scripts/   start-shop.ps1 / start-shop.cmd (Windows) and start-shop.sh (macOS / Linux)
+Frontend/  React 19 + Vite (inline styles): the MVP/Beta screens, frozen and kept one release as a
+           fallback (docs/nextjs-migration-steering.md)
+docs/      sprint, audit and migration notes (docs/migration/)
 ```
 
 - **Source of truth:** Neon PostgreSQL. Writes go to the cloud first. If the cloud is unreachable they are saved to SQLite and synced later, pushing only the changed fields, with conflict detection.
@@ -150,4 +202,7 @@ docs/      sprint and audit notes
 | `Neon closed the idle real-time connection` | Normal: Neon sleeps when idle and the app reconnects by itself. |
 | Forgot a password | An Owner/Admin uses **Accounts → Reset password**. If nobody can log in, run `npm run create-admin` with a new username. |
 | "Too many wrong passwords" | Wait 15 minutes, or restart the backend. |
-| The browser can't reach the API | Check that the backend is running, `VITE_API_URL` in `Frontend/.env`, and `CORS_ORIGINS` in `Backend/.env`. |
+| The browser can't reach the API ("Can't reach the shop server") | Check that the API window is still open and that the address you opened (e.g. `http://192.168.1.20:3000`) is listed in `CORS_ORIGINS` in `Backend/.env`. |
+| `Something is already using port 5000` / `3000` | The system is probably already open in another window. Close it, or the other program using that port. |
+| The screens look out of date after an update | Start once with `-Rebuild` (Windows) or `--rebuild` (macOS / Linux). |
+| `Web/ must not receive backend secrets (DATABASE_URL ...)` | The screens must never see the database settings. Remove those variables from the system environment; they belong only in `Backend/.env`. |

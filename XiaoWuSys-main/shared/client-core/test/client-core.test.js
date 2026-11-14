@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import * as core from '../index.js';
 import { resolveApiBase, socketUrlFor } from '../config.js';
 import { createApi, errorText } from '../api.js';
-import { can, orderActions, NO_ORDER_ACTIONS } from '../permissions.js';
+import { can, orderActions, NO_ORDER_ACTIONS, roleHelp } from '../permissions.js';
 import { receiptHtml } from '../receipt.js';
 
 describe('package surface', () => {
@@ -14,7 +14,7 @@ describe('package surface', () => {
       'can', 'orderActions', 'NO_ORDER_ACTIONS', 'orderNumber', 'hasOrderNumber', 'normalizeOrderNumber',
       'shortfallLines', 'NUMBER_AFTER_SYNC', 'deriveConnectionState', 'connectionText', 'pendingText',
       'syncDisabledReason', 'syncResultMessage', 'escapeHtml', 'receiptHtml', 'receiptText', 'receiptLines',
-      'resolveApiBase', 'socketUrlFor'
+      'resolveApiBase', 'socketUrlFor', 'ROLE_HELP', 'roleHelp'
     ]) assert.ok(name in core, `missing export ${name}`);
   });
 
@@ -84,6 +84,13 @@ describe('permissions only read what the server decided', () => {
   it('orderActions() defaults to nothing allowed', () => {
     assert.deepEqual(orderActions(null), { ...NO_ORDER_ACTIONS });
     assert.equal(orderActions({ allowed_actions: { record_payment: true, max_payment: 250 } }).max_payment, 250);
+  });
+
+  it('roleHelp() is display text for server role names, empty for unknown ones', () => {
+    assert.match(roleHelp('Staff'), /View the catalog/);
+    assert.equal(roleHelp('Cashier'), '');
+    assert.equal(roleHelp(''), '');
+    assert.equal(roleHelp('toString'), '');
   });
 });
 
