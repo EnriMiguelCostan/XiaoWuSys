@@ -87,6 +87,10 @@ describe('permissions only read what the server decided', () => {
     assert.deepEqual([NO_ORDER_ACTIONS.generate_quote, NO_ORDER_ACTIONS.apply_discount, NO_ORDER_ACTIONS.print_quote], [false, false, false]);
     assert.equal(orderActions({ allowed_actions: { generate_quote: true } }).apply_discount, false);
     assert.equal(orderActions({ allowed_actions: { record_payment: true, max_payment: 250 } }).max_payment, 250);
+    // PB 23 / PB 18: void and misprint buttons stay hidden unless the server says otherwise
+    assert.deepEqual([NO_ORDER_ACTIONS.void_payment, NO_ORDER_ACTIONS.log_loss], [false, false]);
+    assert.equal(orderActions({ allowed_actions: { record_payment: true } }).void_payment, false);
+    assert.equal(orderActions({ allowed_actions: { void_payment: true } }).void_payment, true);
   });
 
   it('roleHelp() is display text for server role names, empty for unknown ones', () => {

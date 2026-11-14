@@ -22,6 +22,8 @@ export const TEXT_MAX = {
   search: 100, // GET /inventory?search=
   orderNumber: 20, // XM-2026-0123 (normalizeOrderNumber accepts up to 9 digits)
   note: 200, // loss note (sent inside loss_reason, max 1000)
+  reason: 1000, // cancellation_reason, void reason (routes/orders.js CANCEL_REASON_MAX / VOID_REASON_MAX)
+  expenseDescription: 500, // overhead_expenses.description (routes/reports.js DESCRIPTION_MAX)
   username: 100, // users.username VARCHAR(100), routes/auth.js MAX_USERNAME_LENGTH
   password: 72, // bcrypt reads at most 72 bytes (routes/auth.js MAX_PASSWORD_BYTES)
 } as const;

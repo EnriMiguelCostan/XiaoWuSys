@@ -5,6 +5,8 @@
 //   subtract, taken/used   POST /api/inventory/:id/adjust { action: 'subtract' }
 //   subtract, lost         POST /api/inventory/:id/loss   (records the material loss and its cost)
 // "Not enough stock" is decided by the server (409 INSUFFICIENT_STOCK) and shown in the form.
+// PB 18: a loss needs one of the server's standard reasons (LOSS_REASONS); the server diagnoses
+// the cause and may warn that no free stock is left (replacement_warning). Both are shown as sent.
 import { useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
 import { Field, FormProblem } from '@/components/forms/form-bits';
@@ -26,6 +28,7 @@ import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@
 import { useApi } from '@/hooks/use-api';
 import { errorMessage } from '@/lib/api';
 import { offlineNote, toNumberInput, type InventoryItem } from '@/lib/inventory';
+import { LOSS_REASONS, type LossResponse } from '@/lib/orders';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
 import { TEXT_MAX, WHOLE_NUMBER_MAX } from '@/lib/input-limits';
@@ -38,7 +41,7 @@ const REASONS: Record<SubtractReason, string> = {
   lost: 'Lost / damaged (records material loss)',
 };
 
-interface StockResponse {
+interface StockResponse extends Omit<LossResponse, 'item'> {
   message?: string;
   source?: string;
   item?: InventoryItem;
@@ -63,6 +66,7 @@ export function StockDialog({
   const [reason, setReason] = useState<SubtractReason>('taken');
   const [quantity, setQuantity] = useState('');
   const [note, setNote] = useState('');
+  const [reasonCode, setReasonCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
 
@@ -81,13 +85,18 @@ export function StockDialog({
       setProblem('Enter how many, as a number.');
       return;
     }
+    if (recordsLoss && !reasonCode) {
+      setProblem('Choose what happened to the lost or damaged stock.');
+      return;
+    }
 
     setBusy(true);
     const id = encodeURIComponent(item.inventory_id);
     const { ok, data } = recordsLoss
       ? await api<StockResponse>('POST', `/inventory/${id}/loss`, {
           quantity_lost: qty,
-          loss_reason: note.trim() ? `Lost / damaged: ${note.trim()}` : 'Lost / damaged (manual stock count)',
+          reason_code: reasonCode,
+          loss_reason: note.trim() || undefined,
         })
       : await api<StockResponse>('POST', `/inventory/${id}/adjust`, {
           action,
@@ -101,13 +110,16 @@ export function StockDialog({
       return;
     }
     const now = data.item?.quantity_available;
+    const cause = recordsLoss && data.loss ? `\nCause: ${data.loss.category_label}. ${data.diagnosis?.note ?? ''}` : '';
     onDone({
-      type: 'success',
+      type: data.replacement_warning ? 'warning' : 'success',
       title: action === 'add' ? 'Stock added' : recordsLoss ? 'Loss recorded' : 'Stock subtracted',
       message:
         `${action === 'add' ? 'Added' : 'Subtracted'} ${qty} ${action === 'add' ? 'to' : 'from'} "${item.item_name}".` +
         (now !== undefined ? ` Now ${now.toLocaleString()} in stock.` : '') +
         (recordsLoss ? '\nThe loss and its cost were recorded.' : '') +
+        cause +
+        (data.replacement_warning ? `\n${data.replacement_warning.message}` : '') +
         offlineNote(data),
     });
   };
@@ -196,9 +208,25 @@ export function StockDialog({
           </div>
 
           {recordsLoss && (
-            <Field id="stock-note" label="What happened? (optional)">
-              <Input id="stock-note" maxLength={TEXT_MAX.note} placeholder="e.g. misprint, water damage" value={note} onChange={(e) => setNote(e.target.value)} />
-            </Field>
+            <>
+              <Field id="stock-loss-code" label="What happened? *">
+                <Select value={reasonCode} onValueChange={setReasonCode}>
+                  <BoundedSelectTrigger id="stock-loss-code">
+                    <SelectValue placeholder="Choose a reason…" />
+                  </BoundedSelectTrigger>
+                  <BoundedSelectContent>
+                    {LOSS_REASONS.map((r) => (
+                      <BoundedSelectItem key={r.code} value={r.code} label={r.label}>
+                        {r.label}
+                      </BoundedSelectItem>
+                    ))}
+                  </BoundedSelectContent>
+                </Select>
+              </Field>
+              <Field id="stock-note" label="Notes (optional)">
+                <Input id="stock-note" maxLength={TEXT_MAX.note} placeholder="e.g. found during the stock count" value={note} onChange={(e) => setNote(e.target.value)} />
+              </Field>
+            </>
           )}
 
           {item && (

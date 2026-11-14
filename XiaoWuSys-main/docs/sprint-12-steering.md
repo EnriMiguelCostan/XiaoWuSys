@@ -94,12 +94,12 @@ Code status was checked against the UAC on 2026-10-29.
 | 16 | 11 | Flag expiring deadline | Done (Batch 3 / M6) | — |
 | 15 | **12** | Deduct consumables | Done (Batch M6 part 2, migration 011) | The shop enters its consumables and usage rates in the Catalog (§5 "As built") |
 | 17 | **12** | Notify low stock | Done (Batch 1) | Consumables join the warning with PB 15 |
-| 18 | 13 | Record material loss | Partly | Misprint form with reason codes (§7) |
-| 19 | 13 | Differentiate defect type | Not started | Scope to agree with adviser |
-| 20 | 13 | Log financial waste cost | Mostly | Show waste cost in reports |
+| 18 | 13 | Record material loss | Done (Batch M6 part 3) | Reason codes, order misprints, replacement warning (§7a) |
+| 19 | 13 | Differentiate defect type | Done (Batch M6 part 3) | Machine / human / product rules + 2-sigma anomaly (§7a); confirm the rules with the adviser |
+| 20 | 13 | Log financial waste cost | Done (Batch M6 part 3) | Dashboard waste card, `waste.csv` (§7a) |
 | 21 | 14 | Process payment | Done (Batch 2) | Refunds and voids are PB 23 |
-| 22 | 14 | Generate P&L report | Not started | Needs overhead entry; client's top priority |
-| 23 | 14 | Void transaction | Partly | Reason, voided payments, audit (§7) |
+| 22 | 14 | Generate P&L report | Done (Batch M6 part 3) | Overheads + Owner-only P&L, `pnl.csv`, printable (§7a) |
+| 23 | 14 | Void transaction | Mostly (Batch M6 part 3) | Cancel reason + audit, payment voids; archiving still open (§7a) |
 | 26 | 15 | QA & load testing | Partly | 100+ concurrent-request test |
 | 27 | 16 | UAT | Not started | Beta on branch devices, owner sign-off |
 
@@ -338,6 +338,16 @@ The earlier draft's designs remain valid. They now belong to these backlog items
 | General append-only `audit_log` (entity, action, before/after JSONB, performer, role), plus `GET /api/audit` for Owner/Admin | Supporting work for **PB 5** (Batch 3.5), **PB 12** (override log) and **PB 23** (cancellation reason) | Created in Batch 3 (migration `009`), where it is first needed. `inventory_audit_log` stays separate. |
 | **D4:** reporter ≠ verifier | PB 18 (only if verification is approved) | — |
 
+### 7a. As built (Batch M6 part 3, migration `012_waste_diagnostics_voids_and_pnl.sql`)
+
+- **Migration 012** (no backfill, so no row's version moves): `material_loss.reason_code` / `loss_category` / `production_stage` / `is_statistical_anomaly` (CHECKs on the code and cause lists), `order_profiles.cancellation_reason`, `payments.voids_payment_id` (FK, `ON DELETE RESTRICT`) / `void_reason` with `uq_payments_voids_once` and `payments_void_shape_check` (a void is negative, has a reason, never voids itself), and `overhead_expenses` (amount > 0, `last_modified` trigger). Mirrored in `localSchema.js`, `TABLE_EXTRA_COLUMNS`, `ENTITIES`, `SYNC_TABLES` (overheads are pushed insert-only and pruned like rates) and `EXPECTED_TRIGGERS`.
+- **PB 18:** `POST /api/inventory/:id/loss` takes `reason_code` (six codes in `services/domain/wasteDiagnostics.js`); older callers that send only `loss_reason` still work and the code is read from their words where possible. With an `order_id`, the order's status is stored as `production_stage`. **D1 as built:** the loss comes out of `quantity_available` (reservation untouched) and is refused only when it is larger than the stock on hand, as before; when no free stock is left afterwards the 201 carries a non-blocking `replacement_warning`. The earlier "refused unless free stock ≥ qty" wording was not applied: a misprint that already happened has to be recorded. `GET /api/orders/:id` returns `material_losses`; `allowed_actions.log_loss` shows the order sheet's "Log misprint / material loss" button.
+- **PB 19:** `classifyWaste`, in this order: a stated supplier defect → Product Defect; two or more losses during Printing / Pressing within 60 minutes (any order) → Machine Failure, and the earlier ones are re-marked in the same transaction; the item's total loss above mean + 2 sample SD of the other items' totals (at least 3 of them, exact integer maths) → Product Defect with `is_statistical_anomaly`; an order that left Printing in under 5 minutes → Human Error; otherwise the code's own cause; otherwise "Not classified". Diagnoses are taken one at a time (a transaction-level advisory lock) so two losses at the same moment still find each other. The flag is only set by the statistics, never by a code alone.
+- **PB 20:** the dashboard's `waste` (this month by cause, anomalies, latest losses; costs only for `view_finance`) and `GET /api/reports/export/waste.csv` (Owner, Admin).
+- **PB 23:** `PATCH /status` to Cancelled accepts `cancellation_reason` (the screen requires it; older callers may omit it) and always writes `audit_log` `order_voided` with the released stock. `POST /api/orders/:id/payments/:payment_id/void` (Owner, online only) adds a negative reversing payment with its own AR number and `audit_log` `payment_voided`; `409 VOID_BREAKS_DOWNPAYMENT` for an order in Approved / Printing / Pressing unless `confirm_break_downpayment`. Each payment in the order detail says `voided`, `is_void` and `can_void`; `allowed_actions.void_payment` is the Owner's. **Still open:** archiving orders and customers (D2).
+- **PB 22:** `GET` / `POST /api/reports/overheads` (Owner, Admin; POST also works offline) and `DELETE /api/reports/overheads/:id` (Owner, online only, audited). `GET /api/reports/pnl` and `/export/pnl.csv` are **Owner only** (403 for everyone else); `services/domain/pnl.js` adds up, in centavos, payments after voids, blanks of orders completed in the period, consumables taken in the period, waste by cause and overheads by category. Costs use today's catalog unit cost (no cost history).
+- **Tests:** `tests/m6-part3-rules.test.js`, `tests/m6-part3.test.js` (offline), `tests/m6-part3.pg.test.js` (real PostgreSQL: migration, constraints, clusters also at the same moment, anomaly, cancel audit, voids also at the same moment, overheads, P&L).
+
 ---
 
 ## 8. Open questions (answer before the matching batch)
@@ -349,12 +359,12 @@ The earlier draft's designs remain valid. They now belong to these backlog items
 5. ~~**Batch 2.3:** Is "payment acknowledgement receipt" (not a BIR OR) acceptable? What should happen when two offline branches together overpay?~~ **D1:** yes, a printable "Payment Acknowledgement" that says it is not an Official Receipt. **D2:** every payment is accepted when it syncs; the order shows "Overpaid" and the Owner refunds by hand (voids/refunds are PB 23).
 6. ~~**Batch 3.1:** Can orders skip Pressing (e.g. mugs), going Printing → Completed?~~ **Yes** (answered 2026-11-12): Pressing is optional.
 7. ~~**PB 15:** Consumable list, usage rates, and the "never block a status change" rule.~~ **Never block** (Batch M6 part 2): a shortfall clamps the stock at 0 and is recorded. The consumable list and the rates are data the shop enters in the Catalog ("Usage rates").
-8. **PB 18:** Immediate deduction (UAC), or a report → verify flow?
+8. ~~**PB 18:** Immediate deduction (UAC), or a report → verify flow?~~ **Immediate deduction** (Batch M6 part 3, as the UAC says). A verify step (D4) can still be added if Ana Marie asks for it.
 9. **Branches:** 2 (SIA 1) or 3 (SoftEng proposal, UAT)? This affects UAT device count and deployment.
 
 ## 9. Out of scope for this sprint
 
 - The Next.js / Tailwind / mobile migration itself (§3 only sets the rules).
-- PB 18–23 and 26–27 feature work, except the remediation listed in §2 (PB 11, 12 and 16 were built in Batch M6).
+- PB 21 refunds outside voids, and PB 26–27 feature work (PB 11, 12, 16, 18–20, 22 and most of 23 were built in Batch M6).
 - Hard deletion of anything except inventory items through the existing Recycle Bin.
 - Photo upload for evidence. Use Google Drive links.

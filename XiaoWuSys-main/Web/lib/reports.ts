@@ -58,6 +58,81 @@ export interface Dashboard {
     summary: { total_items: number; in_stock: number; low_stock: number; out_of_stock: number; recycle_bin: number; stock_value: number };
     restock: RestockItem[];
   };
+  /** PB 20 (absent on an older server). Costs are null unless costs_visible (view_finance). */
+  waste?: WasteSummary;
+}
+
+/** One loss in the dashboard waste card (wasteReport.js "brief") */
+export interface WasteLoss {
+  loss_id: string;
+  date_recorded: string;
+  item_name: string;
+  unit: string | null;
+  quantity_lost: number;
+  reason_label: string;
+  category_label: string;
+  production_stage: string | null;
+  is_statistical_anomaly: boolean;
+  order_label: string | null;
+  financial_cost: number | null;
+  sync_status: string;
+}
+
+export interface WasteSummary {
+  /** 'YYYY-MM', shop time */
+  month: string;
+  costs_visible: boolean;
+  total_cost_this_month: number | null;
+  total_items_this_month: number;
+  count_this_month: number;
+  by_category: { category: string; count: number; quantity: number; cost: number | null }[];
+  anomalies: WasteLoss[];
+  recent: WasteLoss[];
+}
+
+/** PB 22: GET /api/reports/overheads */
+export interface OverheadExpense {
+  expense_id: string;
+  /** a shop day at 00:00 (Manila wall time, not UTC) */
+  expense_date: string;
+  category: string;
+  description: string;
+  amount: number;
+  recorded_by_name: string;
+  sync_status: string;
+  /** the server allows removing it (Owner, synced) */
+  can_delete: boolean;
+}
+export interface OverheadList {
+  source: 'cloud' | 'local';
+  period: { from: string; to: string };
+  expenses: OverheadExpense[];
+  total: number;
+  by_category: { category: string; amount: number }[];
+  categories: string[];
+  can_delete: boolean;
+}
+
+/** PB 22: GET /api/reports/pnl (Owner only). Every figure is the server's (services/domain/pnl.js). */
+export interface ProfitAndLoss {
+  source: 'cloud' | 'local';
+  generated_at: string;
+  period: { from: string; to: string };
+  gross_income: number;
+  voids_in_period: number;
+  discounts_given: number;
+  cogs_blanks: number;
+  cogs_consumables: number;
+  total_cogs: number;
+  waste_cost: number;
+  waste_by_category: { category: string; amount: number }[];
+  overhead_cost: number;
+  overhead_by_category: { category: string; amount: number }[];
+  total_expenses: number;
+  net_profit: number;
+  profitable: boolean;
+  counts: { payments: number; orders_completed: number; losses: number };
+  notes: string[];
 }
 
 /** '2026-11' -> 'Nov 2026' (display only) */

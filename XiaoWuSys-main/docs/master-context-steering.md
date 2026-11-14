@@ -13,7 +13,7 @@ Here is the master context steering file for the XiaoWuSys repository. Please re
 
 
 main is at **805a619**: the merge of **PR #16 (Batch 2)**, on top of **PR #15 (Batch 1)**. Check with git log --oneline -5.
-Migrations 001–011 exist. **Never edit them.** 009 and 010 are Batch 3 (built in Batch M6, see sprint-12-steering.md §2 "As built"); 011 is Batch M6 part 2 (PB 15 consumables, PB 11 / PB 12 quotes and discounts, see sprint-12-steering.md §5 "As built"). The next one is 012.
+Migrations 001–012 exist. **Never edit them.** 009 and 010 are Batch 3 (built in Batch M6, see sprint-12-steering.md §2 "As built"); 011 is Batch M6 part 2 (PB 15 consumables, PB 11 / PB 12 quotes and discounts, see sprint-12-steering.md §5 "As built"); 012 is Batch M6 part 3 (PB 18–20 waste diagnostics, PB 23 voids, PB 22 overheads and P&L, see sprint-12-steering.md §7a). The next one is 013.
 CI (.github/workflows/ci.yml) was green at the end of Batch 2:
   - Backend: npm ci && npm test with a PostgreSQL 16 service and TEST_DATABASE_URL. **115 tests pass, 0 are skipped**, including two real-PostgreSQL suites.
   - Frontend: npm ci, npm run lint and npm run build.
@@ -24,9 +24,7 @@ Next is **Batch 3** (migration 009, see sprint-12-steering.md §2):
 After Batch 3 comes PB 15 (consumables, including the **inventory units refactor**, postponed there on purpose).
 **Not built yet, by team decision:**
   - dark mode (waits for the Next.js + Tailwind move; the theme stays hard-coded light);
-  - refunds and voids (PB 23);
-  - P&L (PB 22);
-  - quotes and discounts (PB 11/12).
+  - archiving orders and customers (PB 23, D2). Payment voids, the cancellation reason, the P&L (PB 22) and quotes / discounts (PB 11/12) are built (Batch M6).
 
 
 ---
@@ -326,7 +324,6 @@ Every value is escaped.
 **Open questions** (sprint-12-steering.md §8):
   - Can orders skip Pressing (Printing → Completed)?
   - PB 15: the consumables list and usage rates.
-  - PB 18: immediate deduction, or report → verify?
   - Number of branches: 2 or 3?
 
 

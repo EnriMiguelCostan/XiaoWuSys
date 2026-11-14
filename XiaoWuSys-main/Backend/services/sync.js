@@ -59,7 +59,7 @@ const SYNC_TABLES = [
     // subtotal_amount / discount_amount / discount_reason (migration 011): the quote's breakdown
     columns: ['order_id', 'customer_id', 'date_created', 'production_deadline', 'production_status', 'design_drive_link', 'total_quote_amount',
               'stock_reserved', 'approved_by', 'approved_at', 'tracking_no', 'last_edited_by', 'last_edited_role',
-              'subtotal_amount', 'discount_amount', 'discount_reason'],
+              'subtotal_amount', 'discount_amount', 'discount_reason', 'cancellation_reason'],
     // Given by the cloud database (migration 007 trigger): never pushed, copied back after a push
     cloudOwned: ['tracking_no']
   },
@@ -73,13 +73,24 @@ const SYNC_TABLES = [
     id: 'payment_id',
     // D2: offline payments are pushed as they are, with no balance cap, so a payment is never
     // dropped. received_by is pushed; the receipt number is given by the cloud (migration 008).
-    columns: ['payment_id', 'order_id', 'amount', 'payment_date', 'payment_type', 'received_by', 'receipt_no'],
+    // voids_payment_id / void_reason (migration 012): voids need the cloud, so offline rows never set them
+    columns: ['payment_id', 'order_id', 'amount', 'payment_date', 'payment_type', 'received_by', 'receipt_no', 'voids_payment_id', 'void_reason'],
     cloudOwned: ['receipt_no']
   },
   {
     table: 'material_loss',
     id: 'loss_id',
-    columns: ['loss_id', 'order_id', 'inventory_id', 'quantity_lost', 'loss_reason', 'date_recorded', 'financial_cost']
+    // reason_code / loss_category / production_stage / is_statistical_anomaly: diagnostics (migration 012)
+    columns: ['loss_id', 'order_id', 'inventory_id', 'quantity_lost', 'loss_reason', 'date_recorded', 'financial_cost',
+              'reason_code', 'loss_category', 'production_stage', 'is_statistical_anomaly']
+  },
+  {
+    // PB 22 overheads (migration 012): recorded online or offline (pushed insert-only), deleted
+    // by the Owner online only. Rows deleted in the cloud are removed here too (prune).
+    table: 'overhead_expenses',
+    id: 'expense_id',
+    columns: ['expense_id', 'expense_date', 'category', 'description', 'amount', 'recorded_by'],
+    prune: true
   },
   {
     // Backend-only audit trail: pushed (insert-only) but never refreshed back into the cache
@@ -123,7 +134,7 @@ const SYNC_TABLES = [
 // Tables copied Neon -> SQLite (parents first) so offline writes satisfy foreign keys
 // M10: children are refreshed too, so offline reads show the same items/payments/losses.
 const REFRESH_TABLES = ['users', 'customers', 'inventory_items', 'consumable_rates', 'order_profiles', 'order_items', 'payments',
-  'material_loss', 'order_status_history', 'order_consumables_log'];
+  'material_loss', 'order_status_history', 'order_consumables_log', 'overhead_expenses'];
 
 const specFor = (table) => SYNC_TABLES.find((t) => t.table === table);
 const updatableColumns = (spec) => spec.columns.filter((c) => c !== spec.id);
@@ -513,8 +524,9 @@ const pruneDeletedInventory = async (pgPool, localDb) => {
   );
 };
 
-// Pull-only tables whose rows can be deleted in the cloud (spec.prune): local copies of rows
-// that are gone are removed, so this computer never applies a usage rate that no longer exists.
+// Tables whose rows can be deleted in the cloud (spec.prune): local copies of rows that are gone
+// are removed, so this computer never applies a usage rate (or counts an overhead) that no longer
+// exists. Rows still waiting to sync are never touched.
 const prunePulledTable = async (pgPool, localDb, spec) => {
   const { rows } = await pgPool.query(`SELECT ${spec.id} AS id FROM ${spec.table}`);
   return sqliteRun(

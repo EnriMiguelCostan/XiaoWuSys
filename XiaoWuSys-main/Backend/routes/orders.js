@@ -22,11 +22,14 @@ const { computeQuote, quoteBreakdown, quoteLines, manualQuoteColumns, DISCOUNT_R
 const { planConsumables, applyConsumables, consumablesSentence, loadOrderConsumables } = require('../services/consumables');
 const { needsReservation, stockNeeds, buildStockCheck } = require('../services/domain/stockCheck');
 const {
-  paymentSummary, runningTotals, checkPayment, downpaymentWarnings, toCentavos, toPesos, pesoText
+  paymentSummary, runningTotals, checkPayment, downpaymentWarnings, toCentavos, toPesos, pesoText, checkPaymentVoid, voidStatusOf
 } = require('../services/domain/payments');
+const { loadOrderLosses } = require('../services/waste');
 
 const VERSION_SQL = `to_char(last_modified, '${PG_VERSION_FORMAT}')`;
 const READ_ROLES = rolesWith('view_orders');
+const CANCEL_REASON_MAX = 1000; // PB 23
+const VOID_REASON_MAX = 1000;
 const WRITE_ROLES = rolesWith('edit_order');
 const APPROVE_ROLES = rolesWith('approve_order'); // PB 13: only an Owner may approve a job order (§4.3)
 
@@ -201,11 +204,13 @@ const loadPaymentView = async (req, order) => {
   const payments = [...list.records].sort(byPaymentDate);
   const names = await userNames(req, payments.map((p) => p.received_by));
   const running = runningTotals({ quote: order.total_quote_amount, payments });
+  const voids = voidStatusOf(payments); // PB 23: voided / is_void / can_void per payment
   return {
     source: list.source,
     summary: paymentSummary({ quote: order.total_quote_amount, payments }),
     payments: payments.map((p, i) => ({
       ...p,
+      ...voids.get(p.payment_id),
       received_by_name: (p.received_by && names.get(p.received_by)) || NOT_RECORDED,
       paid_to_date: running[i].paid_to_date,
       remaining_after: running[i].remaining_after,
@@ -346,6 +351,9 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
 //                    line_total }] | null (null when the item prices do not add up to the subtotal) }
 //   consumables_deducted (PB 15): [{ log_id, trigger_status, consumable_inventory_id, item_name, unit,
 //                    quantity_deducted, shortfall, deducted_at }] what its status changes took from stock
+//   material_losses (PB 18): misprints / losses recorded against this order, newest first, each
+//                    with item_name, reason_label, category_label and is_statistical_anomaly
+//   payments[] (PB 23): each also says voided, is_void, voids_receipt_no, voided_by_receipt_no, can_void
 //   order.deadline_flag (PB 16): 'overdue' | 'urgent_24h' | 'warning_72h' | 'normal' | null (closed)
 //   status_history (PB 14): [{ history_id, from_status, to_status, changed_by_name, changed_role, changed_at }]
 //                    oldest first; changed_at is UTC like date_created
@@ -365,9 +373,10 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
     const view = await loadPaymentView(req, order);
     const timeline = await loadStatusHistory(req, order_id);
     const used = await loadOrderConsumables(req, order_id);
+    const losses = await loadOrderLosses(req, order_id);
     const needs = needsReservation(order) ? stockNeeds(items.records) : [];
     const evaluation = needs.length > 0 ? await evaluateCapacity(req, needs) : null;
-    const sources = [source, items.source, view.source, timeline.source, used.source, evaluation && evaluation.source];
+    const sources = [source, items.source, view.source, timeline.source, used.source, losses.source, evaluation && evaluation.source];
 
     res.status(200).json({
       source: sources.includes('local') ? 'local' : 'cloud',
@@ -383,7 +392,8 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
       allowed_actions: allowedActions(order, req.user.role, view.summary),
       stock_check: buildStockCheck(order, items.records, evaluation),
       quote: { ...quoteBreakdown(order), lines: quoteLines(items.records, quoteBreakdown(order)) },
-      consumables_deducted: used.consumables
+      consumables_deducted: used.consumables,
+      material_losses: losses.losses
     });
   } catch (err) {
     sendDbError(res, err, 'reading order');
@@ -546,7 +556,7 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 
 // ==========================================
 // CHANGE ORDER STATUS (Orders tab)
-// PATCH /api/orders/:order_id/status   Body: { status, expected_version? }
+// PATCH /api/orders/:order_id/status   Body: { status, expected_version?, cancellation_reason? }
 //   The allowed moves are STATUS_TRANSITIONS in services/domain/orderLifecycle.js:
 //   Pending  -> Cancelled             (Pending -> Approved only via POST /:order_id/approve, Owner)
 //   Approved -> Printing | Cancelled
@@ -555,6 +565,8 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 //   Delayed  -> Pending (reserves stock now; 409 INSUFFICIENT_INVENTORY if short) | Cancelled
 //   Completed / Cancelled are final.
 // PB 2: Cancelled is a void, so only the Owner may send it (403 VOID_OWNER_ONLY otherwise).
+// PB 23: the reason (cancellation_reason, optional for older screens) is saved on the order, and
+// every cancel writes audit_log 'order_voided' (reason, what was released) in the same transaction.
 // PB 13: Printing is only reachable through Approved, so production can never start without
 // the Owner's approval and the 50% downpayment check.
 // Stock effects (same transaction): Cancelled releases the reservation; Completed consumes it
@@ -579,7 +591,16 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
     v.errors.push({ field: 'expected_version', message: 'expected_version must be the string returned as "version".' });
   }
   if (v.failed()) return v.send(res);
+  const cancellation_reason = v.optionalString(body.cancellation_reason, 'cancellation_reason', CANCEL_REASON_MAX);
+  if (v.failed()) return v.send(res);
   if (status === 'Cancelled' && !can(req.user.role, capabilityForTransition(status))) return voidOwnerOnly(res);
+  if (cancellation_reason && status !== 'Cancelled') {
+    return res.status(400).json({
+      error: 'VALIDATION_FAILED',
+      message: 'A reason for cancelling is only saved when the order is being cancelled.',
+      details: [{ field: 'cancellation_reason', message: 'Only send a reason when cancelling.' }]
+    });
+  }
   const expected_version = body.expected_version || null;
 
   try {
@@ -684,10 +705,26 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
       changedIds = [...new Set([...stockChanges.map((c) => c.inventory_id), ...consumables.map((c) => c.consumable_inventory_id)])];
 
       const updated = await client.query(
-        `UPDATE order_profiles SET production_status = $2, stock_reserved = $3, last_edited_by = $4, last_edited_role = $5
+        `UPDATE order_profiles SET production_status = $2::text, stock_reserved = $3, last_edited_by = $4, last_edited_role = $5,
+                cancellation_reason = CASE WHEN $2::text = 'Cancelled' THEN $6::text ELSE cancellation_reason END
           WHERE order_id = $1 RETURNING ${selectList('order_profiles', 'pg')}`,
-        [order_id, status, stockReserved, ...editorOf(req)]);
+        [order_id, status, stockReserved, ...editorOf(req), cancellation_reason]);
       await recordStatusChange(client, req, order_id, from, status);
+      if (status === 'Cancelled') {
+        // PB 23: the void's own trail (the payments stay as they are; they are voided one by one)
+        await writeAudit(client, {
+          entity: 'order_profiles',
+          entity_id: order_id,
+          action: 'order_voided',
+          actor: req.user,
+          details: {
+            from_status: from,
+            reason: cancellation_reason,
+            tracking_no: order.tracking_no,
+            released: stockChanges.filter((c) => c.released).map((c) => ({ inventory_id: c.inventory_id, item_name: c.item_name, quantity: c.released }))
+          }
+        });
+      }
       return { order: serialize('order_profiles', updated.rows[0]), stockChanges, consumables, from };
     });
 
@@ -1039,7 +1076,7 @@ router.get('/:order_id/payments', requireRole(WRITE_ROLES), async (req, res) => 
   }
 });
 
-const SERVER_FILLED_PAYMENT_FIELDS = ['received_by', 'receipt_no'];
+const SERVER_FILLED_PAYMENT_FIELDS = ['received_by', 'receipt_no', 'voids_payment_id', 'void_reason'];
 
 router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), async (req, res) => {
   const { order_id } = req.params;
@@ -1164,6 +1201,134 @@ router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), asy
   } catch (err) {
     if (err instanceof Rejected) return res.status(err.status).json(err.body);
     sendDbError(res, err, 'recording payment');
+  }
+});
+
+// ==========================================
+// VOID A PAYMENT (PB 23, D3: payments are never edited or deleted, only reversed)
+// POST /api/orders/:order_id/payments/:payment_id/void
+//   Body: { reason, confirm_break_downpayment? }
+// Owner only (void_order), online only. One transaction: the order is locked FOR UPDATE, the
+// payment is checked (belongs to the order, positive, not voided yet) and a NEGATIVE reversing
+// payment is added (same type, received_by = the Owner, voids_payment_id, void_reason). It gets
+// its own AR-YYYY-NNNN number from the cloud. audit_log 'payment_voided' in the same transaction.
+// An order in production (Approved / Printing / Pressing) must keep its 50% downpayment:
+// 409 VOID_BREAKS_DOWNPAYMENT unless confirm_break_downpayment is true (or the order is
+// cancelled first).
+// -> 201 { message, payment (the reversal), voided_payment_id, totals, allowed_actions }
+//    400 VALIDATION_FAILED | 403 FORBIDDEN | 404 ORDER_NOT_FOUND / PAYMENT_NOT_FOUND
+//    409 PAYMENT_NOT_VOIDABLE / PAYMENT_ALREADY_VOIDED / VOID_BREAKS_DOWNPAYMENT / ORDER_NOT_SYNCED
+//    503 VOID_REQUIRES_CLOUD / COMMIT_UNKNOWN
+// ==========================================
+const VOID_REQUIRES_CLOUD = {
+  error: 'VOID_REQUIRES_CLOUD',
+  message: 'Voiding a payment needs the cloud connection, so every branch sees the same totals. Try again when online.'
+};
+
+router.param('payment_id', (req, res, next, value) => {
+  const v = createValidator();
+  v.id(value, 'payment_id');
+  if (v.failed()) return v.send(res);
+  next();
+});
+
+router.post('/:order_id/payments/:payment_id/void', requireRole(rolesWith('void_order')), requireOrderEditAccess, async (req, res) => {
+  const { order_id, payment_id } = req.params;
+  const body = req.body || {};
+  const v = createValidator();
+  const reason = v.requiredString(body.reason, 'void_reason', VOID_REASON_MAX);
+  if (body.confirm_break_downpayment !== undefined && typeof body.confirm_break_downpayment !== 'boolean') {
+    v.errors.push({ field: 'confirm_break_downpayment', message: 'Confirmation must be true or false.' });
+  }
+  if (v.failed()) return v.send(res);
+  const confirmBreak = body.confirm_break_downpayment === true;
+  const reversal_id = crypto.randomUUID();
+
+  try {
+    const located = await locateRecord(req, 'order_profiles', order_id);
+    if (!located.location) return notFound(res, 'Order', order_id);
+    if (!located.cloudReachable) return res.status(503).json(VOID_REQUIRES_CLOUD);
+    if (located.location === 'local') {
+      return res.status(409).json({
+        error: 'ORDER_NOT_SYNCED',
+        message: 'This order was saved offline and is not in the cloud yet. Sync first, then void the payment.'
+      });
+    }
+
+    const result = await withPgTransaction(req.pgPool, async (client) => {
+      const ord = await client.query(
+        'SELECT production_status, tracking_no, total_quote_amount::text AS quote FROM order_profiles WHERE order_id = $1 FOR UPDATE',
+        [order_id]);
+      if (ord.rowCount === 0) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
+      const target = await client.query(
+        `SELECT ${selectList('payments', 'pg')} FROM payments WHERE payment_id = $1 AND order_id = $2 FOR UPDATE`, [payment_id, order_id]);
+      if (target.rowCount === 0) {
+        throw new Rejected(404, {
+          error: 'PAYMENT_NOT_FOUND',
+          message: 'We could not find this payment on this order. If it was saved offline, sync first, then try again.'
+        });
+      }
+      const payment = serialize('payments', target.rows[0]);
+      const already = await client.query('SELECT 1 FROM payments WHERE voids_payment_id = $1', [payment_id]);
+      const paid = await client.query(
+        'SELECT COALESCE(ROUND(SUM(amount) * 100), 0)::bigint AS paid_centavos FROM payments WHERE order_id = $1', [order_id]);
+      const problem = checkPaymentVoid({
+        status: ord.rows[0].production_status,
+        quote: Number(ord.rows[0].quote || 0),
+        paidSynced: toPesos(Number(paid.rows[0].paid_centavos)),
+        payment: { amount: payment.amount, voided: already.rowCount > 0 },
+        confirmBreak
+      });
+      if (problem) throw new Rejected(problem.status, problem.body);
+
+      const inserted = await client.query(
+        `INSERT INTO payments (payment_id, order_id, amount, payment_type, received_by, voids_payment_id, void_reason)
+         VALUES ($1, $2, -($3::numeric), $4, $5, $6, $7)
+         RETURNING ${selectList('payments', 'pg')}`,
+        [reversal_id, order_id, payment.amount, payment.payment_type, req.user.user_id, payment_id, reason]);
+      const reversal = serialize('payments', inserted.rows[0]);
+      await writeAudit(client, {
+        entity: 'payments',
+        entity_id: payment_id,
+        action: 'payment_voided',
+        actor: req.user,
+        details: {
+          order_id,
+          tracking_no: ord.rows[0].tracking_no,
+          receipt_no: payment.receipt_no,
+          amount: payment.amount,
+          payment_type: payment.payment_type,
+          reason,
+          reversal_payment_id: reversal_id,
+          reversal_receipt_no: reversal.receipt_no,
+          production_status: ord.rows[0].production_status,
+          confirmed_below_downpayment: confirmBreak
+        }
+      });
+      return { reversal, original: payment };
+    });
+
+    const { record: order } = await getRecord(req, 'order_profiles', order_id);
+    const view = await loadPaymentView(req, order);
+    console.log(`↩️  Payment ${payment_id} on order ${order_id} voided by ${req.user.user_id}`);
+    pushOrderChange(req, order);
+    const label = result.original.receipt_no ? `Payment ${result.original.receipt_no}` : 'The payment';
+    res.status(201).json({
+      message: `${label} was voided. A reversing entry of ${pesoText(-result.reversal.amount)} was recorded`
+        + (result.reversal.receipt_no ? ` as ${result.reversal.receipt_no}.` : '.'),
+      source: 'cloud',
+      payment: view.payments.find((p) => p.payment_id === reversal_id) || result.reversal,
+      voided_payment_id: payment_id,
+      totals: paymentTotals(order, view.summary),
+      allowed_actions: allowedActions(order, req.user.role, view.summary)
+    });
+  } catch (err) {
+    if (err instanceof Rejected) return res.status(err.status).json(err.body);
+    if (err && err.code === '23505') {
+      return res.status(409).json({ error: 'PAYMENT_ALREADY_VOIDED', message: 'This payment was already voided.' });
+    }
+    if (isConnectionError(err)) return res.status(503).json(err.commitUnknown ? COMMIT_UNKNOWN : VOID_REQUIRES_CLOUD);
+    sendDbError(res, err, 'voiding payment');
   }
 });
 

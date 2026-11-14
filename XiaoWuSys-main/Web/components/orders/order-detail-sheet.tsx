@@ -15,6 +15,8 @@
 // timeline shows what the server recorded.
 // M6 part 2: the quote panel and the official quotation (PB 11 / PB 12), the consumables the
 // status changes took from stock (PB 15) and the roster import (PB 7, in the materials section).
+// M6 part 3: misprints logged against the order (PB 18 / PB 19), payment voids (PB 23, in the
+// payments section) and the reason the Owner gives when cancelling (PB 23, saved and audited).
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CircleCheck, CircleX, Copy, Flame, Lock, Printer, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
@@ -35,6 +37,7 @@ import {
 import { useOrderLocks } from '@/components/providers/order-locks-provider';
 import { PaymentsSection } from '@/components/orders/payments-section';
 import { ConsumablesUsed, QuoteSection } from '@/components/orders/pricing-section';
+import { MaterialLossesSection } from '@/components/orders/waste-section';
 import { ShortageTable } from '@/components/orders/shortage-table';
 import { OrderStatusBadge } from '@/components/orders/status-badges';
 import { Button } from '@/components/ui/button';
@@ -46,6 +49,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -54,6 +58,7 @@ import { useOrderEditLock } from '@/hooks/use-order-edit-lock';
 import { useSocketEvent } from '@/hooks/use-socket-event';
 import { errorMessage } from '@/lib/api';
 import { AWAITING_APPROVAL, type Customer, type OrderDetail, type OrderUpdated, type Payment, type Shortage } from '@/lib/orders';
+import { TEXT_MAX } from '@/lib/input-limits';
 import { copyText, messengerSummary, printJobOrder, printOfficialQuote, printReceipt } from '@/lib/print';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
@@ -102,6 +107,7 @@ export function OrderDetailSheet({
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ResultMessage | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
   const [confirmApprove, setConfirmApprove] = useState(false);
   const [shortage, setShortage] = useState<{ title: string; message: string; shortages: Shortage[] } | null>(null);
   // PB 5: which edit forms are open (the lock is held while any is), and a counter that
@@ -200,16 +206,17 @@ export function OrderDetailSheet({
   };
 
   // ---- Status change (PATCH /status): stock moves on the server in the same transaction ----
-  const changeStatus = async (to: string) => {
+  const changeStatus = async (to: string, cancellation_reason?: string) => {
     if (!order) return;
     setBusy(true);
     const { ok, data } = await api<{ message?: string; shortages?: Shortage[]; error?: string }>(
       'PATCH',
       `/orders/${encodeURIComponent(order.order_id)}/status`,
-      { status: to, expected_version: order.version || undefined }
+      { status: to, expected_version: order.version || undefined, ...(cancellation_reason ? { cancellation_reason } : {}) }
     );
     setBusy(false);
     setConfirmCancel(false);
+    setCancelReason('');
     if (!ok && data.shortages?.length) {
       setShortage({ title: 'Not enough stock to resume', message: errorMessage(data, 'There is not enough free stock.'), shortages: data.shortages });
     } else {
@@ -383,6 +390,11 @@ export function OrderDetailSheet({
                   </p>
                 )}
                 <OrderInfo detail={detail} customer={customer} />
+                {order.production_status === 'Cancelled' && order.cancellation_reason && (
+                  <p className={cn('rounded-md border p-3 text-sm wrap-anywhere', TONE_CLASSES.danger.banner)}>
+                    <strong>Reason for cancelling:</strong> {order.cancellation_reason}
+                  </p>
+                )}
                 <div className="flex flex-col gap-3">
                   <DetailsEditor
                     key={`details-${order.version}-${formsEpoch}`}
@@ -403,6 +415,7 @@ export function OrderDetailSheet({
                 <QuoteSection key={`pricing-${order.version}`} detail={detail} actions={actions} onResult={sectionResult} onPrintQuote={printQuote} />
                 <Separator />
                 <MaterialsSection key={`materials-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportMaterials} />
+                <MaterialLossesSection detail={detail} actions={actions} onResult={sectionResult} />
                 <Separator />
                 <PaymentsSection detail={detail} actions={actions} onPrintReceipt={printPayment} onResult={sectionResult} />
                 <Separator />
@@ -456,20 +469,50 @@ export function OrderDetailSheet({
         </SheetContent>
       </Sheet>
 
-      <ConfirmDialog
-        open={confirmCancel}
-        title="Cancel this order?"
-        message={
-          order?.stock_reserved
-            ? 'The order will be marked Cancelled and its reserved materials returned to stock.'
-            : 'The order will be marked Cancelled.'
-        }
-        confirmLabel="Cancel order"
-        danger
-        busy={busy}
-        onConfirm={() => changeStatus('Cancelled')}
-        onCancel={() => setConfirmCancel(false)}
-      />
+      {/* PB 23: cancelling is a void, so the Owner gives a reason; the server saves it with an audit row */}
+      <Dialog open={confirmCancel} onOpenChange={(next) => !next && !busy && setConfirmCancel(false)}>
+        <DialogContent className="min-w-0 sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Cancel this order?</DialogTitle>
+            <DialogDescription>
+              {order?.stock_reserved
+                ? 'The order will be marked Cancelled and its reserved materials returned to stock.'
+                : 'The order will be marked Cancelled.'}{' '}
+              Payments stay on record; void them one by one if money is returned.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            className="max-w-full min-w-0 space-y-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (cancelReason.trim()) void changeStatus('Cancelled', cancelReason.trim());
+            }}
+          >
+            <div className="min-w-0 space-y-1.5">
+              <Label htmlFor="cancel-reason">Reason for cancelling *</Label>
+              <textarea
+                id="cancel-reason"
+                rows={3}
+                required
+                maxLength={TEXT_MAX.reason}
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                disabled={busy}
+                placeholder="e.g. customer backed out, design was not approved"
+                className="w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm shadow-xs focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+              />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setConfirmCancel(false)} disabled={busy}>
+                Keep order
+              </Button>
+              <Button type="submit" variant="destructive" disabled={busy || !cancelReason.trim()}>
+                <CircleX aria-hidden /> {busy ? 'Cancelling…' : 'Cancel order'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
       <ConfirmDialog
         open={confirmApprove}
         title="Approve this job order?"

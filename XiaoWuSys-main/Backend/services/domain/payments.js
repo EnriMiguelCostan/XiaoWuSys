@@ -128,6 +128,66 @@ const downpaymentWarnings = ({ status, quote, paidTotal, paidSynced }) => {
   return [];
 };
 
+// ---------- PB 23: voiding a payment (D3: never edited or deleted, only reversed) ----------
+// Production has started on the strength of the downpayment in these statuses
+const DOWNPAYMENT_LOCKED_STATUSES = ['Approved', 'Printing', 'Pressing'];
+
+// May this payment be voided now? Amounts in pesos; paidSynced = what the cloud holds for the
+// order now (voids included), quote = the order's quote.
+//   payment: { amount, voided } (voided: a reversal for it already exists)
+// -> null (allowed) | { status, body }
+const checkPaymentVoid = ({ status, quote, paidSynced, payment, confirmBreak = false }) => {
+  const amountC = toCentavos(payment.amount);
+  if (amountC <= 0) {
+    return {
+      status: 409,
+      body: { error: 'PAYMENT_NOT_VOIDABLE', message: 'This entry is itself a void, so it cannot be voided.' }
+    };
+  }
+  if (payment.voided) {
+    return {
+      status: 409,
+      body: { error: 'PAYMENT_ALREADY_VOIDED', message: 'This payment was already voided.' }
+    };
+  }
+  if (DOWNPAYMENT_LOCKED_STATUSES.includes(status) && !confirmBreak) {
+    const requiredC = Math.ceil(Math.max(0, toCentavos(quote)) / 2);
+    const afterC = toCentavos(paidSynced) - amountC;
+    if (afterC < requiredC) {
+      return {
+        status: 409,
+        body: {
+          error: 'VOID_BREAKS_DOWNPAYMENT',
+          message: `This order is already in production. Voiding this payment leaves ${pesoText(toPesos(afterC))} paid, below the `
+            + `50% downpayment of ${pesoText(toPesos(requiredC))}. Cancel the order first, or confirm that you want to void it anyway.`,
+          required: toPesos(requiredC),
+          paid_after: toPesos(afterC)
+        }
+      };
+    }
+  }
+  return null;
+};
+
+// Which payments may still be voided, and which entries are voids -> per payment_id
+//   { voided, voided_by_receipt_no, is_void, voids_receipt_no, can_void }
+// Only cloud payments can be voided (voiding needs the cloud, and the receipt number).
+const voidStatusOf = (payments = []) => {
+  const byId = new Map(payments.map((p) => [p.payment_id, p]));
+  const reversalOf = new Map(payments.filter((p) => p.voids_payment_id).map((p) => [p.voids_payment_id, p]));
+  return new Map(payments.map((p) => {
+    const reversal = reversalOf.get(p.payment_id);
+    const isVoid = Boolean(p.voids_payment_id);
+    return [p.payment_id, {
+      voided: Boolean(reversal),
+      voided_by_receipt_no: reversal ? reversal.receipt_no || null : null,
+      is_void: isVoid,
+      voids_receipt_no: isVoid ? (byId.get(p.voids_payment_id) || {}).receipt_no || null : null,
+      can_void: !isVoid && !reversal && toCentavos(p.amount) > 0 && (!p.sync_status || p.sync_status === 'synced')
+    }];
+  }));
+};
+
 // Why the payment form is hidden for this order, in plain words (null = it is shown)
 const paymentBlockedReason = (order, summary) => {
   if (!order) return null;
@@ -146,5 +206,8 @@ module.exports = {
   runningTotals,
   checkPayment,
   downpaymentWarnings,
-  paymentBlockedReason
+  paymentBlockedReason,
+  DOWNPAYMENT_LOCKED_STATUSES,
+  checkPaymentVoid,
+  voidStatusOf
 };

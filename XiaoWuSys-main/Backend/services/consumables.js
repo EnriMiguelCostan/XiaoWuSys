@@ -154,4 +154,4 @@ const consumablesSentence = (taken) => {
     : '');
 };
 
-module.exports = { loadRates, loadOrderConsumables, planConsumables, applyConsumables, consumablesSentence, REMOVED_ITEM };
+module.exports = { loadRates, loadOrderConsumables, planConsumables, applyConsumables, consumablesSentence, REMOVED_ITEM, readBoth };

@@ -4,14 +4,18 @@
 // The server decides everything: whether payments are allowed (allowed_actions.record_payment
 // and payment_blocked_reason), the most the order can take (max_payment), the receipt number,
 // and the totals after each payment. This form only checks that the amount is a number.
+// PB 23: the Owner voids a payment with a reason (allowed_actions.void_payment and the payment's
+// own can_void). The server adds a negative reversing entry, never edits or deletes the payment,
+// and refuses a void that breaks the downpayment of an order in production unless confirmed.
 import { useState } from 'react';
-import { Printer, TriangleAlert, Wallet } from 'lucide-react';
+import { Ban, Printer, TriangleAlert, Wallet } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { PaymentStatusBadge } from '@/components/orders/status-badges';
 import { FormProblem } from '@/components/forms/form-bits';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -21,7 +25,7 @@ import { errorMessage } from '@/lib/api';
 import { PAYMENT_TYPES, RECEIPT_AFTER_SYNC, type OrderDetail, type OrderTotals, type Payment } from '@/lib/orders';
 import { lookFor, PAYMENT_STATUS, TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
-import { MONEY_INPUT_MAX } from '@/lib/input-limits';
+import { MONEY_INPUT_MAX, TEXT_MAX } from '@/lib/input-limits';
 import type { OrderActions } from '@xiaowu/client-core/permissions';
 
 interface PaymentResponse {
@@ -51,7 +55,9 @@ export function PaymentsSection({
   const [type, setType] = useState<string>(PAYMENT_TYPES[0]);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
+  const [voiding, setVoiding] = useState<Payment | null>(null);
   const balanceTone = lookFor(PAYMENT_STATUS, totals.payment_status).tone;
+  const showVoid = Boolean(actions.void_payment);
 
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -121,9 +127,9 @@ export function PaymentsSection({
                 <TableHead className="hidden sm:table-cell">Type</TableHead>
                 <TableHead className="hidden md:table-cell">Received by</TableHead>
                 <TableHead className="text-right">Amount</TableHead>
-                {actions.print_receipt && (
+                {(actions.print_receipt || showVoid) && (
                   <TableHead>
-                    <span className="sr-only">Print</span>
+                    <span className="sr-only">Actions</span>
                   </TableHead>
                 )}
               </TableRow>
@@ -138,6 +144,17 @@ export function PaymentsSection({
                         offline
                       </Badge>
                     )}
+                    {p.voided && (
+                      <Badge variant="outline" className={cn('ml-1', TONE_CLASSES.danger.badge)} title={p.voided_by_receipt_no ? `Reversed by ${p.voided_by_receipt_no}` : undefined}>
+                        Voided
+                      </Badge>
+                    )}
+                    {p.is_void && (
+                      <span className="block text-xs text-muted-foreground wrap-anywhere">
+                        Void of {p.voids_receipt_no ?? 'a payment'}
+                        {p.void_reason ? `: ${p.void_reason}` : ''}
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell>
                     {p.receipt_no ? <code className="font-mono text-xs">{p.receipt_no}</code> : <span className="text-muted-foreground">{RECEIPT_AFTER_SYNC}</span>}
@@ -145,8 +162,14 @@ export function PaymentsSection({
                   <TableCell className="hidden sm:table-cell">{p.payment_type}</TableCell>
                   <TableCell className="hidden max-w-40 whitespace-normal wrap-anywhere md:table-cell">{p.received_by_name || 'Not recorded'}</TableCell>
                   <TableCell className="text-right tabular-nums">{peso(p.amount)}</TableCell>
-                  {actions.print_receipt && (
-                    <TableCell className="text-right">
+                  {(actions.print_receipt || showVoid) && (
+                    <TableCell className="text-right whitespace-nowrap">
+                      {showVoid && p.can_void && (
+                        <Button variant="ghost" size="icon-sm" onClick={() => setVoiding(p)} aria-label={`Void the payment of ${peso(p.amount)}`} title="Void this payment">
+                          <Ban aria-hidden />
+                        </Button>
+                      )}
+                      {actions.print_receipt && (
                       <Button
                         variant="ghost"
                         size="icon-sm"
@@ -156,6 +179,7 @@ export function PaymentsSection({
                       >
                         <Printer aria-hidden />
                       </Button>
+                      )}
                     </TableCell>
                   )}
                 </TableRow>
@@ -224,6 +248,128 @@ export function PaymentsSection({
       ) : (
         actions.payment_blocked_reason && <p className="text-sm text-muted-foreground">{actions.payment_blocked_reason}</p>
       )}
+      {voiding && (
+        <VoidPaymentDialog
+          orderId={order.order_id}
+          payment={voiding}
+          onClose={() => setVoiding(null)}
+          onDone={(r) => {
+            setVoiding(null);
+            onResult(r, true);
+          }}
+        />
+      )}
     </section>
+  );
+}
+
+interface VoidResponse {
+  message?: string;
+  error?: string;
+  totals?: OrderTotals;
+}
+
+function VoidPaymentDialog({
+  orderId,
+  payment,
+  onClose,
+  onDone,
+}: {
+  orderId: string;
+  payment: Payment;
+  onClose: () => void;
+  onDone: (result: ResultMessage) => void;
+}) {
+  const api = useApi();
+  const [reason, setReason] = useState('');
+  const [problem, setProblem] = useState('');
+  // The server said this void breaks the downpayment: the Owner may confirm and send again
+  const [needsConfirm, setNeedsConfirm] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const send = async (confirmBreak: boolean) => {
+    setProblem('');
+    if (!reason.trim()) {
+      setProblem('Write why this payment is being voided.');
+      return;
+    }
+    setBusy(true);
+    const { ok, data } = await api<VoidResponse>(
+      'POST',
+      `/orders/${encodeURIComponent(orderId)}/payments/${encodeURIComponent(payment.payment_id)}/void`,
+      { reason: reason.trim(), ...(confirmBreak ? { confirm_break_downpayment: true } : {}) }
+    );
+    setBusy(false);
+    if (!ok) {
+      if (data.error === 'VOID_BREAKS_DOWNPAYMENT') {
+        setNeedsConfirm(errorMessage(data, 'This void breaks the downpayment.'));
+        return;
+      }
+      setProblem(errorMessage(data, 'The payment was not voided.'));
+      return;
+    }
+    onDone({
+      type: 'success',
+      title: 'Payment voided',
+      message: [data.message, data.totals ? `Payment status: ${data.totals.payment_status}. Remaining balance: ${peso(data.totals.remaining)}.` : null]
+        .filter(Boolean)
+        .join('\n'),
+    });
+  };
+
+  return (
+    <Dialog open onOpenChange={(next) => !next && !busy && onClose()}>
+      <DialogContent className="min-w-0 sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Void payment {payment.receipt_no ?? ''}</DialogTitle>
+          <DialogDescription>
+            {peso(payment.amount)} ({payment.payment_type}). The payment stays on record; a reversing entry with its own receipt number is added.
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="max-w-full min-w-0 space-y-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void send(false);
+          }}
+        >
+          <FormProblem message={problem} />
+          <div className="min-w-0 space-y-1.5">
+            <Label htmlFor="void-reason">Reason for voiding *</Label>
+            <textarea
+              id="void-reason"
+              rows={3}
+              maxLength={TEXT_MAX.reason}
+              required
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              disabled={busy}
+              placeholder="e.g. refunded to the customer, wrong GCash account"
+              className="w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm shadow-xs focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+            />
+          </div>
+          {needsConfirm && (
+            <p role="alert" className={cn('flex gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.warning.banner)}>
+              <TriangleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
+              <span className="wrap-anywhere">{needsConfirm}</span>
+            </p>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
+              Keep payment
+            </Button>
+            {needsConfirm ? (
+              <Button type="button" variant="destructive" onClick={() => void send(true)} disabled={busy}>
+                <Ban aria-hidden /> {busy ? 'Voiding…' : 'Void anyway'}
+              </Button>
+            ) : (
+              <Button type="submit" variant="destructive" disabled={busy}>
+                <Ban aria-hidden /> {busy ? 'Voiding…' : 'Void payment'}
+              </Button>
+            )}
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

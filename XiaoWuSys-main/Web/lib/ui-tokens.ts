@@ -12,13 +12,16 @@ import {
   CircleDot,
   CircleX,
   Clock,
+  Cog,
   Flame,
   HardDrive,
+  PackageX,
   Loader,
   Printer,
   ServerCrash,
   ShieldCheck,
   TriangleAlert,
+  UserRound,
   Wifi,
 } from 'lucide-react';
 import type { ConnectionState } from '@xiaowu/client-core/connection';
@@ -102,6 +105,14 @@ export const DEADLINE_FLAG: Record<string, StateLook & { label: string }> = {
   overdue: { tone: 'danger', icon: TriangleAlert, label: 'Overdue' },
   urgent_24h: { tone: 'danger', icon: AlarmClock, label: 'Due today or tomorrow' },
   warning_72h: { tone: 'warning', icon: Clock, label: 'Due in 2 to 3 days' },
+};
+
+// PB 19: the cause the server diagnosed for a material loss (services/domain/wasteDiagnostics.js)
+export const LOSS_CATEGORY: Record<string, StateLook> = {
+  'Machine Failure': { tone: 'danger', icon: Cog },
+  'Human Error': { tone: 'warning', icon: UserRound },
+  'Product Defect': { tone: 'info', icon: PackageX },
+  'Not classified': { tone: 'muted', icon: CircleDashed },
 };
 
 // SYNC_STATUS is added with the screen that shows it.

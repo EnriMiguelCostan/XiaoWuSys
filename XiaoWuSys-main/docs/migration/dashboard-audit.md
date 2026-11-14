@@ -71,3 +71,13 @@ Categories: **1. Presentation** (port freely) · **2. Formatting** (must call cl
 - Checked by reading the code: every value on screen comes from a response field or from `can()` on server-sent capabilities.
 - Decision flip (by reading the code): if the server returns `overpaid` rows, the panel shows for any account. If `capabilities` lacks `view_finance`, the money cards, chart and finance exports hide. If a restock item's `stock_status` changes, the badge follows the token for it.
 - **Not** checked in a browser in this batch: see the M5 parity checklist in `docs/migration/m5-parity-signoff.md`.
+
+## 6. Added in Batch M6 part 3 (new features)
+
+| Feature | What the server decides | What `Web/` does |
+|---|---|---|
+| Waste and defect card (PB 20) | `waste` in `GET /api/reports/dashboard`: this month's totals and counts by cause, anomalies, latest losses; money fields are `null` and `costs_visible` is false for accounts without `view_finance` | Renders the figures and `LossCauseBadge`s; cost columns appear only when `costs_visible`. "Waste (Excel)" downloads `waste.csv` (finance accounts; the server refuses others) |
+| Overhead expenses (PB 22) | `GET /api/reports/overheads` (default period, list, total, categories, `can_delete` per row), `POST` checks date, category, description and amount (works offline), `DELETE` is the Owner's and online only | Date pickers start from the server's period; the add form checks only that the cost is a number; the remove button shows only where `can_delete` is true, after a `ConfirmDialog` |
+| Profit and loss (PB 22) | `GET /api/reports/pnl` (Owner only, `403` for everyone else) with every line already added up in centavos, `profitable`, and plain notes; `pnl.csv` | Shown for accounts with `set_quote`. "Generate P&L" sends the chosen dates (empty = the server's default), renders the lines as sent, "Download P&L (Excel)" and "Print P&L statement" (`printPnlReport` in `lib/print.ts`, figures as sent) |
+
+Not checked in a browser for this batch.

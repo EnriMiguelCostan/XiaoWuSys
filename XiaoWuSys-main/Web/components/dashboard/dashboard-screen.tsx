@@ -8,12 +8,16 @@
 // server returns rows (it leaves the list empty for accounts without view_finance).
 // Refreshes: when stock changes anywhere ('inventory_updated'), after a sync, and every 30 s
 // ONLY while the live socket is down (useFallbackPolling).
+// M6 part 3: the waste and defect card (PB 20, costs only when the server sends them) with the
+// waste.csv download, overhead expenses (PB 22, view_finance) and the Owner's profit and loss
+// report (PB 22, shown with set_quote; the server refuses it to everyone else).
 import { useCallback, useEffect, useState } from 'react';
 import { AlarmClock, CalendarClock, CloudOff, Copy, Download, PackageX, RefreshCw, ShoppingCart, TriangleAlert, Wallet } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { can } from '@xiaowu/client-core/permissions';
 import { useConnection } from '@/components/connection/connection-provider';
 import { Cell, LowStockBanner, OrdersTableCard, SummaryCard } from '@/components/dashboard/dashboard-parts';
+import { OverheadsCard, PnlCard, WasteCard } from '@/components/dashboard/finance-sections';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { OrderStatusBadge } from '@/components/orders/status-badges';
 import { Badge } from '@/components/ui/badge';
@@ -39,6 +43,7 @@ export function DashboardScreen() {
   const api = useApi();
   const { user } = useSession();
   const canSeeMoney = can(user, 'view_finance');
+  const canSeePnl = can(user, 'set_quote');
   const { syncGeneration } = useConnection();
   const [tick, setTick] = useState(0);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
@@ -75,7 +80,7 @@ export function DashboardScreen() {
   const data = loaded?.data ?? null;
   const error = loaded && loaded.key === requestKey ? loaded.error : '';
 
-  const download = async (kind: 'inventory' | 'orders' | 'payments') => {
+  const download = async (kind: 'inventory' | 'orders' | 'payments' | 'waste') => {
     const r = await downloadFile(`/reports/export/${kind}.csv`);
     setResult(
       r.ok
@@ -121,6 +126,9 @@ export function DashboardScreen() {
             </Button>
             <Button variant="outline" onClick={() => download('payments')}>
               <Download aria-hidden /> Payments (Excel)
+            </Button>
+            <Button variant="outline" onClick={() => download('waste')}>
+              <Download aria-hidden /> Waste (Excel)
             </Button>
           </>
         )}
@@ -364,6 +372,15 @@ export function DashboardScreen() {
           </CardContent>
         </Card>
       </div>
+
+      {data.waste && <WasteCard waste={data.waste} onDownload={canSeeMoney ? () => download('waste') : undefined} />}
+
+      {(canSeePnl || canSeeMoney) && (
+        <div className="grid min-w-0 grid-cols-1 gap-6 xl:grid-cols-2">
+          {canSeePnl && <PnlCard onResult={setResult} />}
+          {canSeeMoney && <OverheadsCard onResult={setResult} />}
+        </div>
+      )}
 
       {canSeeMoney && orders.unpaid.length > 0 && (
         <OrdersTableCard

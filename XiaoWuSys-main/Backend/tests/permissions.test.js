@@ -23,12 +23,12 @@ describe('Who may do what (rules only)', () => {
     assert.deepEqual(allowedActions(pending, 'Owner'), {
       approve: true, statuses: ['Cancelled'], edit_deadline: true, edit_quote: true, generate_quote: true, apply_discount: true,
       link_design: true, add_items: true, record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true,
-      print_quote: true
+      print_quote: true, void_payment: true, log_loss: true
     });
     assert.deepEqual(allowedActions(pending, 'Admin'), {
       approve: false, statuses: [], edit_deadline: true, edit_quote: false, generate_quote: false, apply_discount: false,
       link_design: true, add_items: true, record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true,
-      print_quote: true
+      print_quote: true, void_payment: false, log_loss: true
     });
     assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Owner').print_quote, false, 'no quotation to print yet');
     assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Production').statuses, ['Pressing', 'Completed'], 'no Cancel for Production');
@@ -36,7 +36,8 @@ describe('Who may do what (rules only)', () => {
     const approved = allowedActions({ production_status: 'Approved' }, 'Owner');
     assert.deepEqual([approved.edit_quote, approved.generate_quote, approved.apply_discount], [false, false, false], 'the quote is frozen after approval');
     const closed = allowedActions({ production_status: 'Cancelled' }, 'Owner');
-    assert.deepEqual([closed.statuses, closed.edit_deadline, closed.record_payment], [[], false, false]);
+    assert.deepEqual([closed.statuses, closed.edit_deadline, closed.record_payment, closed.log_loss, closed.void_payment],
+      [[], false, false, false, true], 'a cancelled order can still have its payments voided (refunds)');
     const { print_receipt: staffPrints, print_quote: staffQuote, ...staff } = allowedActions(pending, 'Staff');
     assert.deepEqual([staffPrints, staffQuote], [true, true], 'Staff can print a payment acknowledgement and the quotation');
     assert.ok(Object.values(staff).every((v) => v === false || v === 0 || v === null || (Array.isArray(v) && v.length === 0)),

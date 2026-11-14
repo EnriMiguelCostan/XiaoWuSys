@@ -22,6 +22,8 @@ const { rolesWith, can } = require('../services/domain/permissions');
 const { CONSUMABLE_TRIGGERS, checkRateList } = require('../services/domain/consumables');
 const { loadRates } = require('../services/consumables');
 const { refreshLocalRows } = require('../services/sync');
+const { REASON_CODE_LIST, inferReasonCode, reasonLabel, replacementWarning } = require('../services/domain/wasteDiagnostics');
+const { diagnoseInCloud, escalateClusterInCloud, diagnoseLocally, shownLoss } = require('../services/waste');
 
 // Who may do what (role always comes from the JWT)
 const READ_ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
@@ -544,11 +546,20 @@ router.post('/recycle-bin/empty', requireRole(PURGE_ROLES), async (req, res) => 
 });
 
 // ==========================================
-// 2. RECORD MATERIAL LOSS (Audit fix M9)
-// Body: { quantity_lost, loss_reason, order_id?, financial_cost? }
+// 2. RECORD MATERIAL LOSS (Audit fix M9; PB 18 / PB 19 misprints and diagnostics)
+// Body: { quantity_lost, reason_code?, loss_reason?, order_id?, financial_cost? }
 // The loss record and the stock reduction are written in ONE transaction, so they either
 // both happen or neither does. financial_cost defaults to unit_cost x quantity_lost.
-// -> 201 { message, source, loss, item }
+//   reason_code (migration 012): one of REASON_CODES (services/domain/wasteDiagnostics.js).
+//     Sent: loss_reason may be left out (the code's label is stored). Left out (older screens):
+//     loss_reason is required and the code is read from its words where possible.
+//   order_id: the order's status is stored as production_stage.
+//   D1: the loss comes out of quantity_available; the order's reservation is untouched. When no
+//     free stock is left afterwards, replacement_warning says so (never blocks the loss).
+//   The cause (loss_category, is_statistical_anomaly) is diagnosed in the same transaction; a
+//     machine-step cluster also marks its earlier losses 'Machine Failure' (cloud only).
+// -> 201 { message, source, loss, item, diagnosis: { rule, note, cluster_with, escalated, baseline },
+//          replacement_warning: null | { code, message, free } }
 //    404 INVENTORY_ITEM_NOT_FOUND / ORDER_NOT_FOUND
 //    409 INSUFFICIENT_STOCK when the loss is larger than the stock on hand
 // ==========================================
@@ -558,10 +569,16 @@ router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => 
 
   const v = createValidator();
   const quantity_lost = v.positiveInt(body.quantity_lost, 'quantity_lost');
-  const loss_reason = v.requiredString(body.loss_reason, 'loss_reason', 1000);
+  const sentCode = v.oneOf(body.reason_code, 'reason_code', REASON_CODE_LIST, { required: false });
+  const typedReason = sentCode
+    ? v.optionalString(body.loss_reason, 'loss_reason', 1000)
+    : v.requiredString(body.loss_reason, 'loss_reason', 1000);
   const order_id = v.id(body.order_id, 'order_id', { required: false });
   const financial_cost = v.nonNegativeMoney(body.financial_cost, 'financial_cost', { required: false, defaultValue: null });
   if (v.failed()) return v.send(res);
+  const reason_code = sentCode || inferReasonCode(typedReason);
+  const loss_reason = typedReason || reasonLabel(sentCode);
+  const facts = { inventory_id, order_id, reason_code, quantity_lost };
 
   const loss_id = crypto.randomUUID();
   const insufficient = (available) => new Rejected(409, {
@@ -585,17 +602,22 @@ router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => 
         WHERE inventory_id = $2 RETURNING ${selectList('inventory_items', 'pg')}, unit_cost AS raw_unit_cost`,
       [quantity_lost, inventory_id]
     );
+    const { production_stage, diagnosis } = await diagnoseInCloud(client, facts);
     const loss = await client.query(
-      `INSERT INTO material_loss (loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost)
-       VALUES ($1, $2, $3, $4::int, $5, COALESCE($6::numeric, ROUND($7::numeric * $4::int, 2)))
+      `INSERT INTO material_loss (loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost,
+                                  reason_code, loss_category, production_stage, is_statistical_anomaly)
+       VALUES ($1, $2, $3, $4::int, $5, COALESCE($6::numeric, ROUND($7::numeric * $4::int, 2)), $8, $9, $10, $11)
        RETURNING ${selectList('material_loss', 'pg')}`,
-      [loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost, item.rows[0].raw_unit_cost]
+      [loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost, item.rows[0].raw_unit_cost,
+        reason_code, diagnosis.loss_category, production_stage, diagnosis.is_statistical_anomaly]
     );
+    const escalated = await escalateClusterInCloud(client, diagnosis.cluster_with);
     const record = serialize('inventory_items', item.rows[0]);
     await auditCloud(client, req.user, inventory_id, 'stock_subtracted', record.item_name, {
-      kind: 'loss', quantity: quantity_lost, previous_quantity: stock.rows[0].quantity_available, new_quantity: record.quantity_available, reason: loss_reason
+      kind: 'loss', quantity: quantity_lost, previous_quantity: stock.rows[0].quantity_available, new_quantity: record.quantity_available, reason: loss_reason,
+      reason_code, loss_category: diagnosis.loss_category, order_id
     });
-    return { source: 'cloud', loss: serialize('material_loss', loss.rows[0]), item: record };
+    return { source: 'cloud', loss: serialize('material_loss', loss.rows[0]), item: record, diagnosis: { ...diagnosis, escalated } };
   });
 
   // ---- Offline: same transaction on a dedicated SQLite connection ----
@@ -620,17 +642,22 @@ router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => 
       [quantity_lost, inventory_id]);
 
     const cost = financial_cost !== null ? financial_cost : Math.round(stock.unit_cost * quantity_lost * 100) / 100;
+    const { production_stage, diagnosis } = await diagnoseLocally(tx, facts);
     await sqliteRun(tx,
       `INSERT INTO material_loss (loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost,
+                                  reason_code, loss_category, production_stage, is_statistical_anomaly,
                                   cloud_stock_delta, sync_status, last_modified)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
-      [loss_id, order_id, inventory_id, quantity_lost, loss_reason, cost, itemIsLocalOnly ? 0 : quantity_lost]);
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+      [loss_id, order_id, inventory_id, quantity_lost, loss_reason, cost, reason_code, diagnosis.loss_category, production_stage,
+        diagnosis.is_statistical_anomaly ? 1 : 0, itemIsLocalOnly ? 0 : quantity_lost]);
 
     const record = await readLocal(tx, 'inventory_items', inventory_id);
     await auditLocal(tx, req.user, inventory_id, 'stock_subtracted', record.item_name, {
-      kind: 'loss', quantity: quantity_lost, previous_quantity: stock.quantity_available, new_quantity: record.quantity_available, reason: loss_reason
+      kind: 'loss', quantity: quantity_lost, previous_quantity: stock.quantity_available, new_quantity: record.quantity_available, reason: loss_reason,
+      reason_code, loss_category: diagnosis.loss_category, order_id
     });
-    return { source: 'local', loss: await readLocal(tx, 'material_loss', loss_id), item: record };
+    // Earlier losses of a cluster are marked in the cloud only (this copy is refreshed from it)
+    return { source: 'local', loss: await readLocal(tx, 'material_loss', loss_id), item: record, diagnosis: { ...diagnosis, escalated: [] } };
   });
 
   try {
@@ -647,11 +674,14 @@ router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => 
     const result = await cloudFirst(target, recordInCloud, recordLocally, 'recording the loss');
 
     pushStockChange(req, [inventory_id], 'material_loss');
+    const { cluster_with, escalated, rule, note, baseline } = result.diagnosis;
     res.status(201).json({
       message: result.source === 'cloud' ? 'Material loss recorded.' : 'Material loss saved locally (Offline Mode).',
       source: result.source,
-      loss: result.loss,
-      item: withAvailability(result.item)
+      loss: shownLoss(result.loss, result.item),
+      item: withAvailability(result.item),
+      diagnosis: { rule, note, cluster_with, escalated, baseline },
+      replacement_warning: replacementWarning(result.item, { forOrder: Boolean(order_id) })
     });
   } catch (err) {
     sendError(res, err, 'recording material loss');

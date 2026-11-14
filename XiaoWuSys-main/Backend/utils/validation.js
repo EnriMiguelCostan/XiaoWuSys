@@ -79,7 +79,12 @@ const FIELD_LABELS = {
   // migration 011 (PB 11 / PB 12 / PB 15)
   selling_price: 'Selling price', subtotal_amount: 'Subtotal', discount_amount: 'Discount', discount_percent: 'Discount (%)',
   discount_reason: 'Reason for the discount', quantity_per_piece: 'Amount per piece', trigger_status: 'When it is used',
-  consumable_inventory_id: 'Consumable', items: 'Items', rates: 'Usage rates', dry_run: 'Preview only'
+  consumable_inventory_id: 'Consumable', items: 'Items', rates: 'Usage rates', dry_run: 'Preview only',
+  // migration 012 (PB 18 / PB 19 / PB 22 / PB 23)
+  reason_code: 'Reason', loss_category: 'Cause', production_stage: 'Production step',
+  cancellation_reason: 'Reason for cancelling', void_reason: 'Reason for voiding', confirm_break_downpayment: 'Confirmation',
+  expense_date: 'Date', description: 'Description', from: 'Start date', to: 'End date', payment_id: 'Payment',
+  expense_id: 'Expense'
 };
 const labelOf = (field) =>
   FIELD_LABELS[field] || String(field).replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
@@ -150,6 +155,20 @@ const createValidator = () => {
       if (isMissing(value)) return required ? fail(field, 'is required. Please choose one.') : undefined;
       if (!allowed.includes(value)) return fail(field, `must be one of these: ${allowed.join(', ')}.`);
       return value;
+    },
+    // A calendar day 'YYYY-MM-DD' (shop dates for reports and expenses; past dates allowed).
+    // latest: optional 'YYYY-MM-DD' it may not be after (e.g. today for an expense).
+    shopDay: (value, field, { required = true, latest = null } = {}) => {
+      if (isMissing(value)) return required ? fail(field, 'is required. Please pick a date.') : null;
+      const m = typeof value === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim()) : null;
+      if (!m) return fail(field, 'must be a date. Please pick one from the calendar.');
+      const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+      if (d.getUTCFullYear() !== +m[1] || d.getUTCMonth() !== +m[2] - 1 || d.getUTCDate() !== +m[3]) {
+        return fail(field, 'is not a real date. Please pick one from the calendar.');
+      }
+      const ymd = value.trim();
+      if (latest && ymd > latest) return fail(field, `cannot be later than today (${friendlyDate(latest)}).`);
+      return ymd;
     },
     deadline: (value, field) => {
       if (isMissing(value)) return fail(field, 'is required. Please pick a date.');

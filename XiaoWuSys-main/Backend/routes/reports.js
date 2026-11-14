@@ -4,22 +4,37 @@
 //   GET /api/reports/export/inventory.csv      everyone logged in
 //   GET /api/reports/export/orders.csv         Owner, Admin
 //   GET /api/reports/export/payments.csv       Owner, Admin
+//   GET /api/reports/export/waste.csv          Owner, Admin            (PB 20)
+//   GET/POST /api/reports/overheads            Owner, Admin            (PB 22)
+//   DELETE /api/reports/overheads/:expense_id  Owner, online only      (PB 22)
+//   GET /api/reports/pnl, /export/pnl.csv      Owner only              (PB 22 "Magic Button")
 // Reads the cloud, or the local cache when offline (the response says which).
 // CSV files open directly in Excel (UTF-8 with BOM, so ₱ and ñ display correctly).
 // ==========================================
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const { verifyToken, requireRole } = require('../middleware/authMiddleware');
-const { sendDbError } = require('../utils/dbErrors');
-const { localDateTime } = require('../utils/validation');
-const { listRecords, userNames } = require('../services/records');
-const { paymentSummary } = require('../services/domain/payments');
-const { can } = require('../services/domain/permissions');
+const { sendDbError, isConnectionError } = require('../utils/dbErrors');
+const { localDateTime, createValidator } = require('../utils/validation');
+const { LOCAL_NOW } = require('../utils/localSync');
+const {
+  listRecords, userNames, locateRecord, readLocal, serialize, selectList, withPgTransaction, withLocalTransaction, sqliteRun
+} = require('../services/records');
+const { paymentSummary, toCentavos, toPesos } = require('../services/domain/payments');
+const { can, rolesWith } = require('../services/domain/permissions');
 const { deadlineFlag } = require('../services/domain/orderLifecycle');
 const { buildInventorySnapshot } = require('../services/inventorySnapshot');
+const { loadAllLosses } = require('../services/waste');
+const { wasteSummary } = require('../services/domain/wasteReport');
+const { computePnl, defaultPeriod, shopDayOf, OVERHEAD_CATEGORIES } = require('../services/domain/pnl');
+const { writeAudit, writeAuditLocal } = require('../services/auditLog');
 
 const READ_ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
 const FINANCE_ROLES = ['Owner', 'Admin'];
+const PNL_ROLES = rolesWith('set_quote');            // PB 22: the P&L is the Owner's (SIA 1 "Generate P&L Report")
+const OVERHEAD_DELETE_ROLES = rolesWith('void_order'); // removing a recorded expense is a void (Owner)
+const DESCRIPTION_MAX = 500;
 const OPEN = (o) => !['Completed', 'Cancelled'].includes(o.production_status);
 const MAX_ROWS = 10000;
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -75,6 +90,7 @@ router.get('/dashboard', requireRole(READ_ROLES), async (req, res) => {
   try {
     const data = await loadAll(req);
     const snapshot = await buildInventorySnapshot(req);
+    const wasteData = await loadAllLosses(req);
     const today = localDateTime(new Date()).slice(0, 10);
     const weekAhead = addDays(today, 7);
     const name = (id) => data.customers.get(id)?.full_name || id;
@@ -163,8 +179,17 @@ router.get('/dashboard', requireRole(READ_ROLES), async (req, res) => {
     const counts = Object.fromEntries(['Pending', 'Approved', 'Printing', 'Pressing', 'Delayed', 'Completed', 'Cancelled']
       .map((st) => [st, data.orders.filter((o) => o.production_status === st).length]));
 
+    // PB 20: this month's waste by cause; costs only for accounts that may see finances
+    const ordersById = new Map(data.orders.map((o) => [o.order_id, o]));
+    const waste = wasteSummary({
+      losses: wasteData.losses,
+      month: today.slice(0, 7),
+      showCosts: can(req.user.role, 'view_finance'),
+      orderLabel: (id) => orderLabel(ordersById.get(id) || { order_id: id })
+    });
+
     res.status(200).json({
-      source: data.source === 'local' || snapshot.source === 'local' ? 'local' : 'cloud',
+      source: [data.source, snapshot.source, wasteData.source].includes('local') ? 'local' : 'cloud',
       generated_at: new Date().toISOString(),
       today,
       orders: {
@@ -181,7 +206,8 @@ router.get('/dashboard', requireRole(READ_ROLES), async (req, res) => {
       },
       income_by_month: months.map((m) => ({ month: m, amount: income[m] })),
       top_materials: topMaterials,
-      inventory: { summary: snapshot.summary, restock }
+      inventory: { summary: snapshot.summary, restock },
+      waste
     });
   } catch (err) {
     sendDbError(res, err, 'building the dashboard');
@@ -263,6 +289,283 @@ router.get('/export/payments.csv', requireRole(FINANCE_ROLES), async (req, res) 
       data.source);
   } catch (err) {
     sendDbError(res, err, 'exporting payments');
+  }
+});
+
+// PB 20: every material loss with its cost and diagnosed cause
+router.get('/export/waste.csv', requireRole(FINANCE_ROLES), async (req, res) => {
+  try {
+    const [losses, orders] = await Promise.all([
+      loadAllLosses(req),
+      listRecords(req, 'order_profiles', { orderBy: 'order_id', limit: MAX_ROWS })
+    ]);
+    const byId = new Map(orders.records.map((o) => [o.order_id, o]));
+    sendCsv(res, 'waste',
+      ['Date', 'Item', 'Order', 'Quantity lost', 'Unit cost (PHP)', 'Cost (PHP)', 'Reason', 'Reason code', 'Cause', 'Statistical anomaly',
+        'Production step', 'Notes'],
+      losses.losses.map((l) => {
+        const costC = toCentavos(l.financial_cost);
+        return [toShopTime(l.date_recorded).replace('T', ' '), l.item_name, l.order_id ? orderLabel(byId.get(l.order_id) || { order_id: l.order_id }) : '',
+          l.quantity_lost, l.quantity_lost > 0 ? toPesos(Math.round(costC / l.quantity_lost)) : 0, toPesos(costC),
+          l.reason_label || '', l.reason_code || '', l.category_label, l.is_statistical_anomaly ? 'Yes' : 'No', l.production_stage || '',
+          l.loss_reason || ''];
+      }),
+      [losses.source, orders.source].includes('local') ? 'local' : 'cloud');
+  } catch (err) {
+    sendDbError(res, err, 'exporting waste');
+  }
+});
+
+// ==========================================
+// OVERHEAD EXPENSES (PB 22)
+// GET    /api/reports/overheads?from=YYYY-MM-DD&to=YYYY-MM-DD   (default: this month so far)
+//   -> { source, period, expenses: [{ ...expense, recorded_by_name, can_delete }], total, by_category,
+//        categories, can_delete }
+// POST   /api/reports/overheads   { expense_date, category, description, amount }
+//   Cloud first; offline (connection error only) it is saved here and synced later.
+//   -> 201 { message, source, expense }
+// DELETE /api/reports/overheads/:expense_id   Owner only, online only (audit_log 'overhead_deleted')
+// ==========================================
+const readPeriod = (req, res) => {
+  const v = createValidator();
+  const fallback = defaultPeriod();
+  const from = v.shopDay(req.query.from, 'from', { required: false }) || fallback.from;
+  const to = v.shopDay(req.query.to, 'to', { required: false }) || fallback.to;
+  if (!v.failed() && from > to) {
+    v.errors.push({ field: 'from', message: 'Start date must be on or before the end date.' });
+  }
+  if (v.failed()) {
+    v.send(res);
+    return null;
+  }
+  return { from, to };
+};
+
+const sumByCategory = (rows) => {
+  const by = new Map();
+  for (const r of rows) by.set(r.category, (by.get(r.category) || 0) + toCentavos(r.amount));
+  return [...by].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([category, c]) => ({ category, amount: toPesos(c) }));
+};
+
+router.get('/overheads', requireRole(FINANCE_ROLES), async (req, res) => {
+  const period = readPeriod(req, res);
+  if (!period) return;
+  try {
+    const list = await listRecords(req, 'overhead_expenses', { orderBy: 'expense_date DESC, expense_id', limit: MAX_ROWS });
+    const rows = list.records.filter((e) => {
+      const day = String(e.expense_date || '').slice(0, 10);
+      return day >= period.from && day <= period.to;
+    });
+    const names = await userNames(req, rows.map((e) => e.recorded_by));
+    const mayDelete = can(req.user.role, 'void_order');
+    res.status(200).json({
+      source: list.source,
+      period,
+      expenses: rows.map((e) => ({
+        ...e,
+        recorded_by_name: (e.recorded_by && names.get(e.recorded_by)) || 'Not recorded',
+        can_delete: mayDelete && e.sync_status === 'synced'
+      })),
+      total: toPesos(rows.reduce((s, e) => s + toCentavos(e.amount), 0)),
+      by_category: sumByCategory(rows),
+      categories: OVERHEAD_CATEGORIES,
+      can_delete: mayDelete
+    });
+  } catch (err) {
+    sendDbError(res, err, 'listing overhead expenses');
+  }
+});
+
+router.post('/overheads', requireRole(FINANCE_ROLES), async (req, res) => {
+  const body = req.body || {};
+  const v = createValidator();
+  const today = localDateTime(new Date()).slice(0, 10);
+  const day = v.shopDay(body.expense_date, 'expense_date', { latest: today });
+  const category = v.oneOf(body.category, 'category', OVERHEAD_CATEGORIES);
+  const description = v.requiredString(body.description, 'description', DESCRIPTION_MAX);
+  const amount = v.positiveMoney(body.amount, 'amount');
+  for (const field of ['recorded_by', 'expense_id']) {
+    if (body[field] !== undefined) v.errors.push({ field, message: 'This is filled in by the system. Remove it and try again.' });
+  }
+  if (v.failed()) return v.send(res);
+
+  const expense_id = crypto.randomUUID();
+  const expense_date = `${day} 00:00:00`; // a shop day, stored as Manila wall time like deadlines
+  const recorded_by = req.user.user_id;
+  const audit = { entity: 'overhead_expenses', entity_id: expense_id, action: 'overhead_recorded', actor: req.user,
+    details: { expense_date: day, category, description, amount } };
+
+  const inCloud = () => withPgTransaction(req.pgPool, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO overhead_expenses (expense_id, expense_date, category, description, amount, recorded_by)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${selectList('overhead_expenses', 'pg')}`,
+      [expense_id, expense_date, category, description, amount, recorded_by]);
+    await writeAudit(client, audit);
+    return { source: 'cloud', expense: serialize('overhead_expenses', rows[0]) };
+  });
+  const locally = () => withLocalTransaction(req.localDbPath, async (tx) => {
+    await sqliteRun(tx,
+      `INSERT INTO overhead_expenses (expense_id, expense_date, category, description, amount, recorded_by, sync_status, last_modified)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+      [expense_id, expense_date, category, description, amount, recorded_by]);
+    await writeAuditLocal(tx, audit);
+    return { source: 'local', expense: await readLocal(tx, 'overhead_expenses', expense_id) };
+  });
+
+  try {
+    let result;
+    try {
+      result = await inCloud();
+    } catch (err) {
+      if (!isConnectionError(err)) throw err;
+      if (err.commitUnknown) {
+        return res.status(503).json({
+          error: 'COMMIT_UNKNOWN',
+          message: 'The connection to the cloud dropped while saving. Reload the list to see whether the expense was saved before trying again.'
+        });
+      }
+      result = await locally(); // C5: genuine outage only
+    }
+    res.status(201).json({
+      message: result.source === 'cloud' ? 'Expense recorded.' : 'Expense saved on this computer (offline). It will be sent to the cloud when the connection is back.',
+      source: result.source,
+      expense: result.expense
+    });
+  } catch (err) {
+    sendDbError(res, err, 'recording an overhead expense');
+  }
+});
+
+router.delete('/overheads/:expense_id', requireRole(OVERHEAD_DELETE_ROLES), async (req, res) => {
+  const v = createValidator();
+  const expense_id = v.id(req.params.expense_id, 'expense_id');
+  if (v.failed()) return v.send(res);
+  const needsCloud = {
+    error: 'OVERHEAD_DELETE_REQUIRES_CLOUD',
+    message: 'Removing an expense needs the cloud connection, so every branch sees the same totals. Try again when online.'
+  };
+  try {
+    const located = await locateRecord(req, 'overhead_expenses', expense_id);
+    if (!located.location) return res.status(404).json({ error: 'EXPENSE_NOT_FOUND', message: 'We could not find this expense. Reload the list.' });
+    if (!located.cloudReachable) return res.status(503).json(needsCloud);
+    if (located.location === 'local') {
+      return res.status(409).json({
+        error: 'EXPENSE_NOT_SYNCED',
+        message: 'This expense was saved offline and is not in the cloud yet. Sync first, then remove it.'
+      });
+    }
+    const removed = await withPgTransaction(req.pgPool, async (client) => {
+      const { rows } = await client.query(
+        `SELECT ${selectList('overhead_expenses', 'pg')} FROM overhead_expenses WHERE expense_id = $1 FOR UPDATE`, [expense_id]);
+      if (rows.length === 0) return null;
+      const before = serialize('overhead_expenses', rows[0]);
+      await client.query('DELETE FROM overhead_expenses WHERE expense_id = $1', [expense_id]);
+      await writeAudit(client, {
+        entity: 'overhead_expenses', entity_id: expense_id, action: 'overhead_deleted', actor: req.user,
+        details: { before: { expense_date: before.expense_date, category: before.category, description: before.description, amount: before.amount } }
+      });
+      return before;
+    });
+    if (!removed) return res.status(404).json({ error: 'EXPENSE_NOT_FOUND', message: 'We could not find this expense. Reload the list.' });
+    await sqliteRun(req.localDb, 'DELETE FROM overhead_expenses WHERE expense_id = ?', [expense_id])
+      .catch((err) => console.error('⚠️ Could not remove the local copy of an expense:', err.message));
+    res.status(200).json({ message: 'Expense removed.', source: 'cloud', expense_id });
+  } catch (err) {
+    if (isConnectionError(err)) {
+      return res.status(503).json(err.commitUnknown
+        ? { error: 'COMMIT_UNKNOWN', message: 'The connection dropped while removing. Reload the list to see whether it was removed.' }
+        : needsCloud);
+    }
+    sendDbError(res, err, 'removing an overhead expense');
+  }
+});
+
+// ==========================================
+// TRUE-COST PROFIT & LOSS, the Owner's "Magic Button" (PB 22)
+// GET /api/reports/pnl?from=YYYY-MM-DD&to=YYYY-MM-DD   (default: this month so far, shop time)
+// GET /api/reports/export/pnl.csv?from=...&to=...
+// Owner only (403 for Admin, Production, Staff). The maths is services/domain/pnl.js.
+// -> { source, generated_at, period, gross_income, voids_in_period, discounts_given, cogs_blanks,
+//      cogs_consumables, total_cogs, waste_cost, waste_by_category, overhead_cost,
+//      overhead_by_category, total_expenses, net_profit, profitable, counts, notes }
+// ==========================================
+const buildPnl = async (req, period) => {
+  const big = MAX_ROWS * 5;
+  const [payments, orders, items, completions, consumables, losses, overheads, inventory] = await Promise.all([
+    listRecords(req, 'payments', { orderBy: 'payments.payment_date, payments.payment_id', limit: big }),
+    listRecords(req, 'order_profiles', { orderBy: 'order_id', limit: MAX_ROWS }),
+    listRecords(req, 'order_items', { orderBy: 'line_item_id', limit: big }),
+    listRecords(req, 'order_status_history', { filters: [['to_status', 'Completed']], orderBy: 'history_id', limit: big }),
+    listRecords(req, 'order_consumables_log', { orderBy: 'log_id', limit: big }),
+    listRecords(req, 'material_loss', { orderBy: 'loss_id', limit: big }),
+    listRecords(req, 'overhead_expenses', { orderBy: 'expense_id', limit: big }),
+    listRecords(req, 'inventory_items', { orderBy: 'inventory_id', limit: big }) // Recycle Bin items keep their cost
+  ]);
+  const all = [payments, orders, items, completions, consumables, losses, overheads, inventory];
+  const pnl = computePnl({
+    from: period.from,
+    to: period.to,
+    payments: payments.records,
+    orders: orders.records,
+    orderItems: items.records,
+    completions: completions.records,
+    consumablesLog: consumables.records,
+    losses: losses.records,
+    overheads: overheads.records,
+    unitCosts: new Map(inventory.records.map((i) => [i.inventory_id, i.unit_cost]))
+  });
+  const pending = payments.records.filter((p) => {
+    const day = shopDayOf(p.payment_date);
+    return p.sync_status !== 'synced' && day && day >= period.from && day <= period.to;
+  }).length;
+  const source = all.some((r) => r.source === 'local') ? 'local' : 'cloud';
+  return {
+    source,
+    generated_at: new Date().toISOString(),
+    ...pnl,
+    notes: [
+      'Costs use each item’s current unit cost in the catalog.',
+      'Blanks are counted when their order is marked Completed.',
+      ...(source === 'local' ? ['Offline: this is this computer’s copy. Generate it again when online for every branch’s figures.'] : []),
+      ...(pending > 0 ? [`${pending} payment(s) saved offline are included and will sync later.`] : [])
+    ]
+  };
+};
+
+router.get('/pnl', requireRole(PNL_ROLES), async (req, res) => {
+  const period = readPeriod(req, res);
+  if (!period) return;
+  try {
+    res.status(200).json(await buildPnl(req, period));
+  } catch (err) {
+    sendDbError(res, err, 'building the profit and loss report');
+  }
+});
+
+router.get('/export/pnl.csv', requireRole(PNL_ROLES), async (req, res) => {
+  const period = readPeriod(req, res);
+  if (!period) return;
+  try {
+    const p = await buildPnl(req, period);
+    const rows = [
+      ['Period', `${p.period.from} to ${p.period.to}`, ''],
+      ['Income', 'Payments received (after voids)', p.gross_income],
+      ['Income', 'Voided payments in the period', -p.voids_in_period],
+      ['Info', 'Discounts given (already taken off the quotes)', p.discounts_given],
+      ['Cost of goods', 'Blanks used (completed orders)', p.cogs_blanks],
+      ['Cost of goods', 'Consumables used', p.cogs_consumables],
+      ['Cost of goods', 'Total cost of goods', p.total_cogs],
+      ...p.waste_by_category.map((w) => ['Material waste', w.category, w.amount]),
+      ['Material waste', 'Total material waste', p.waste_cost],
+      ...p.overhead_by_category.map((o) => ['Overheads', o.category, o.amount]),
+      ['Overheads', 'Total overheads', p.overhead_cost],
+      ['Total', 'Total expenses', p.total_expenses],
+      ['Total', p.profitable ? 'Net profit' : 'Net loss', p.net_profit],
+      ...p.notes.map((n) => ['Note', n, ''])
+    ];
+    sendCsv(res, `pnl-${p.period.from}-to-${p.period.to}`, ['Section', 'Line', 'Amount (PHP)'], rows, p.source);
+  } catch (err) {
+    sendDbError(res, err, 'exporting the profit and loss report');
   }
 });
 

@@ -68,6 +68,7 @@ const LOCAL_TABLES = [
       subtotal_amount REAL NOT NULL DEFAULT 0,
       discount_amount REAL NOT NULL DEFAULT 0,
       discount_reason TEXT,
+      cancellation_reason TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -92,6 +93,8 @@ const LOCAL_TABLES = [
       payment_type TEXT NOT NULL CHECK (payment_type IN ('Cash', 'GCash', 'Bank Transfer')),
       received_by TEXT,
       receipt_no TEXT,
+      voids_payment_id TEXT,
+      void_reason TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -103,6 +106,22 @@ const LOCAL_TABLES = [
       loss_reason TEXT NOT NULL,
       date_recorded DATETIME DEFAULT CURRENT_TIMESTAMP,
       financial_cost REAL NOT NULL DEFAULT 0.00,
+      reason_code TEXT,
+      loss_category TEXT,
+      production_stage TEXT,
+      is_statistical_anomaly INTEGER DEFAULT 0,
+      ${SYNC_STATUS},
+      last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
+  // PB 22 overheads (migration 012): recorded online or offline (pushed insert-only), deleted
+  // by the Owner online only; rows deleted in the cloud are removed here too (prune).
+  `CREATE TABLE IF NOT EXISTS overhead_expenses (
+      expense_id TEXT PRIMARY KEY,
+      expense_date DATETIME NOT NULL,
+      category TEXT NOT NULL,
+      description TEXT NOT NULL,
+      amount REAL NOT NULL,
+      recorded_by TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -186,7 +205,9 @@ const LOCAL_TABLES = [
   'CREATE INDEX IF NOT EXISTS idx_local_inventory_bin ON inventory_items (deleted_at)',
   'CREATE INDEX IF NOT EXISTS idx_local_audit_item ON inventory_audit_log (inventory_id, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_local_order_tracking ON order_profiles (tracking_no)',
-  'CREATE INDEX IF NOT EXISTS idx_local_payments_order ON payments (order_id)'
+  'CREATE INDEX IF NOT EXISTS idx_local_payments_order ON payments (order_id)',
+  'CREATE INDEX IF NOT EXISTS idx_local_material_loss_order ON material_loss (order_id)',
+  'CREATE INDEX IF NOT EXISTS idx_local_overheads_date ON overhead_expenses (expense_date)'
 ];
 
 const run = (db, sql) => new Promise((resolve, reject) => db.run(sql, (err) => (err ? reject(err) : resolve())));
