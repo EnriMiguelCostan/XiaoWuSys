@@ -13,6 +13,8 @@
 // server decides who gets, keeps or loses a lock, and this sheet shows the outcome.
 // PB 14: the order reloads when the server says it changed ("order_updated"), and the status
 // timeline shows what the server recorded.
+// M6 part 2: the quote panel and the official quotation (PB 11 / PB 12), the consumables the
+// status changes took from stock (PB 15) and the roster import (PB 7, in the materials section).
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CircleCheck, CircleX, Copy, Flame, Lock, Printer, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
@@ -32,6 +34,7 @@ import {
 } from '@/components/orders/order-sections';
 import { useOrderLocks } from '@/components/providers/order-locks-provider';
 import { PaymentsSection } from '@/components/orders/payments-section';
+import { ConsumablesUsed, QuoteSection } from '@/components/orders/pricing-section';
 import { ShortageTable } from '@/components/orders/shortage-table';
 import { OrderStatusBadge } from '@/components/orders/status-badges';
 import { Button } from '@/components/ui/button';
@@ -51,7 +54,7 @@ import { useOrderEditLock } from '@/hooks/use-order-edit-lock';
 import { useSocketEvent } from '@/hooks/use-socket-event';
 import { errorMessage } from '@/lib/api';
 import { AWAITING_APPROVAL, type Customer, type OrderDetail, type OrderUpdated, type Payment, type Shortage } from '@/lib/orders';
-import { copyText, messengerSummary, printJobOrder, printReceipt } from '@/lib/print';
+import { copyText, messengerSummary, printJobOrder, printOfficialQuote, printReceipt } from '@/lib/print';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
 
@@ -308,6 +311,9 @@ export function OrderDetailSheet({
   const printOrder = () => {
     if (detail && !printJobOrder(detail, customer)) setResult(popupBlocked);
   };
+  const printQuote = () => {
+    if (detail && !printOfficialQuote(detail, customer)) setResult(popupBlocked);
+  };
   const copySummary = async () => {
     if (!detail) return;
     const ok = await copyText(messengerSummary(detail, customer));
@@ -394,11 +400,14 @@ export function OrderDetailSheet({
                   />
                 </div>
                 <Separator />
+                <QuoteSection key={`pricing-${order.version}`} detail={detail} actions={actions} onResult={sectionResult} onPrintQuote={printQuote} />
+                <Separator />
                 <MaterialsSection key={`materials-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportMaterials} />
                 <Separator />
                 <PaymentsSection detail={detail} actions={actions} onPrintReceipt={printPayment} onResult={sectionResult} />
                 <Separator />
                 <StatusTimeline detail={detail} />
+                <ConsumablesUsed detail={detail} />
                 {awaitingApproval && <ApprovalPanel detail={detail} canApprove={actions.approve} />}
                 {order.sync_status !== 'synced' && (
                   <p className="text-sm text-muted-foreground">This order was saved offline. Status changes are available once it syncs.</p>

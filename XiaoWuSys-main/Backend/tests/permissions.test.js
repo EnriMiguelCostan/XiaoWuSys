@@ -21,20 +21,24 @@ describe('Who may do what (rules only)', () => {
   it('offers each role only the buttons it may use, per order status', () => {
     const pending = { production_status: 'Pending', total_quote_amount: 1500 };
     assert.deepEqual(allowedActions(pending, 'Owner'), {
-      approve: true, statuses: ['Cancelled'], edit_deadline: true, edit_quote: true, link_design: true, add_items: true,
-      record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true
+      approve: true, statuses: ['Cancelled'], edit_deadline: true, edit_quote: true, generate_quote: true, apply_discount: true,
+      link_design: true, add_items: true, record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true,
+      print_quote: true
     });
     assert.deepEqual(allowedActions(pending, 'Admin'), {
-      approve: false, statuses: [], edit_deadline: true, edit_quote: false, link_design: true, add_items: true,
-      record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true
+      approve: false, statuses: [], edit_deadline: true, edit_quote: false, generate_quote: false, apply_discount: false,
+      link_design: true, add_items: true, record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true,
+      print_quote: true
     });
+    assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Owner').print_quote, false, 'no quotation to print yet');
     assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Production').statuses, ['Pressing', 'Completed'], 'no Cancel for Production');
     assert.deepEqual(allowedActions({ production_status: 'Delayed' }, 'Production').statuses, ['Pending']);
-    assert.equal(allowedActions({ production_status: 'Approved' }, 'Owner').edit_quote, false, 'the quote is frozen after approval');
+    const approved = allowedActions({ production_status: 'Approved' }, 'Owner');
+    assert.deepEqual([approved.edit_quote, approved.generate_quote, approved.apply_discount], [false, false, false], 'the quote is frozen after approval');
     const closed = allowedActions({ production_status: 'Cancelled' }, 'Owner');
     assert.deepEqual([closed.statuses, closed.edit_deadline, closed.record_payment], [[], false, false]);
-    const { print_receipt: staffPrints, ...staff } = allowedActions(pending, 'Staff');
-    assert.equal(staffPrints, true, 'Staff can print a payment acknowledgement');
+    const { print_receipt: staffPrints, print_quote: staffQuote, ...staff } = allowedActions(pending, 'Staff');
+    assert.deepEqual([staffPrints, staffQuote], [true, true], 'Staff can print a payment acknowledgement and the quotation');
     assert.ok(Object.values(staff).every((v) => v === false || v === 0 || v === null || (Array.isArray(v) && v.length === 0)),
       'otherwise Staff can only look');
   });

@@ -10,6 +10,7 @@
 import { useMemo, useState } from 'react';
 import { CloudOff, Download, FileUp, PackagePlus, RefreshCw, Search, SlidersHorizontal, Trash2, X } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
+import { ConsumableRatesDialog } from '@/components/catalog/consumable-rates-dialog';
 import { ImportDialog } from '@/components/catalog/import-dialog';
 import { InventoryTable, nextSort, sortItems, type SortKey, type SortState } from '@/components/catalog/inventory-table';
 import { ItemFormDialog } from '@/components/catalog/item-form-dialog';
@@ -43,6 +44,7 @@ type DialogState =
   | { kind: 'item'; item: InventoryItem | null }
   | { kind: 'stock'; itemId: string | null; action: StockAction }
   | { kind: 'import' }
+  | { kind: 'rates'; item: InventoryItem }
   | null;
 
 const LIVE = {
@@ -326,6 +328,7 @@ export function CatalogScreen() {
               onEdit={(item) => setDialog({ kind: 'item', item })}
               onAdjust={(item, action) => setDialog({ kind: 'stock', itemId: item.inventory_id, action })}
               onDelete={setToDelete}
+              onRates={(item) => setDialog({ kind: 'rates', item })}
             />
             <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
               <span>
@@ -355,6 +358,7 @@ export function CatalogScreen() {
         />
       )}
       {canEdit && dialog?.kind === 'import' && <ImportDialog onClose={() => setDialog(null)} onDone={finish} />}
+      {canEdit && dialog?.kind === 'rates' && <ConsumableRatesDialog item={dialog.item} onClose={() => setDialog(null)} onDone={finish} />}
 
       <ConfirmDialog
         open={Boolean(toDelete)}

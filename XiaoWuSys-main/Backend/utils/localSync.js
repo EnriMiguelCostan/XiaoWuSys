@@ -27,14 +27,18 @@ const LOCAL_SYNC_COLUMNS = ['dirty_fields', 'cloud_last_modified', 'sync_conflic
 //   order_profiles.tracking_no                       order number from the cloud (migration 007)
 //   payments.received_by / receipt_no                receiver, and receipt number from the cloud (migration 008)
 //   order_profiles.last_edited_by / last_edited_role who last changed the order (migration 009)
+//   inventory_items.selling_price                    price per piece before volume discounts (migration 011)
+//   order_profiles.subtotal_amount / discount_amount / discount_reason   the quote's breakdown (migration 011)
 const TABLE_EXTRA_COLUMNS = {
   payments: [['received_by', 'TEXT'], ['receipt_no', 'TEXT']],
   material_loss: [['cloud_stock_delta', 'INTEGER']],
   inventory_items: [['deleted_at', 'TEXT'], ['deleted_by', 'TEXT'], ['purged_at', 'TEXT'],
-                    ['unit', "TEXT NOT NULL DEFAULT 'pcs'"], ['supplier', 'TEXT']],
+                    ['unit', "TEXT NOT NULL DEFAULT 'pcs'"], ['supplier', 'TEXT'], ['selling_price', 'REAL NOT NULL DEFAULT 0']],
   users: [['is_active', 'INTEGER NOT NULL DEFAULT 1'], ['tokens_valid_after', 'TEXT']],
   order_profiles: [['stock_reserved', 'INTEGER NOT NULL DEFAULT 0'], ['approved_by', 'TEXT'], ['approved_at', 'TEXT'],
-                   ['tracking_no', 'TEXT'], ['last_edited_by', 'TEXT'], ['last_edited_role', 'TEXT']]
+                   ['tracking_no', 'TEXT'], ['last_edited_by', 'TEXT'], ['last_edited_role', 'TEXT'],
+                   ['subtotal_amount', 'REAL NOT NULL DEFAULT 0'], ['discount_amount', 'REAL NOT NULL DEFAULT 0'],
+                   ['discount_reason', 'TEXT']]
 };
 
 const all = (db, sql, params = []) =>

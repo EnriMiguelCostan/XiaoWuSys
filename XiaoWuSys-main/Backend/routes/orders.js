@@ -14,13 +14,15 @@ const {
 const { withAvailability } = require('../services/inventorySnapshot');
 const { rolesWith, can, capabilitiesFor, outranks } = require('../services/domain/permissions');
 const {
-  STATUS_TRANSITIONS, CLOSED_STATUSES, QUOTE_FROZEN_STATUSES, APPROVABLE_STATUSES, capabilityForTransition, allowedActions,
+  STATUS_TRANSITIONS, CLOSED_STATUSES, EDITABLE_STATUSES, QUOTE_FROZEN_STATUSES, APPROVABLE_STATUSES, capabilityForTransition, allowedActions,
   withDeadlineFlag, deadlineWindows
 } = require('../services/domain/orderLifecycle');
-const { writeAudit } = require('../services/auditLog');
+const { writeAudit, writeAuditLocal } = require('../services/auditLog');
+const { computeQuote, quoteBreakdown, quoteLines, manualQuoteColumns, DISCOUNT_REASON_MAX } = require('../services/domain/pricing');
+const { planConsumables, applyConsumables, consumablesSentence, loadOrderConsumables } = require('../services/consumables');
 const { needsReservation, stockNeeds, buildStockCheck } = require('../services/domain/stockCheck');
 const {
-  paymentSummary, runningTotals, checkPayment, downpaymentWarnings, toCentavos, toPesos
+  paymentSummary, runningTotals, checkPayment, downpaymentWarnings, toCentavos, toPesos, pesoText
 } = require('../services/domain/payments');
 
 const VERSION_SQL = `to_char(last_modified, '${PG_VERSION_FORMAT}')`;
@@ -111,6 +113,10 @@ const overrideInCloud = (req, order_id, updates, guard = () => null) => withPgTr
   });
   return { before, after };
 });
+
+// The money fields of an order, for the audit trail of a quote change
+const QUOTE_FIELDS = ['total_quote_amount', 'subtotal_amount', 'discount_amount', 'discount_reason'];
+const quoteFieldsOf = (order) => (order ? Object.fromEntries([...QUOTE_FIELDS, 'version'].map((f) => [f, order[f] ?? null])) : null);
 
 // After the override is committed: refresh every screen and tell the account whose change was replaced
 const announceOverride = (req, { before, after }) => {
@@ -333,7 +339,13 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
 
 // ==========================================
 // ORDER DETAIL (M10)
-// GET /api/orders/:order_id -> { source, order, items, payments, totals, allowed_actions, stock_check, status_history }
+// GET /api/orders/:order_id -> { source, order, items, payments, totals, allowed_actions, stock_check, status_history,
+//                               quote, consumables_deducted }
+//   quote (PB 11 / PB 12): { has_quote, subtotal_amount, discount_amount, discount_reason, total_quote_amount,
+//                    lines: [{ line_item_id, product_type, size, custom_name, custom_number, quantity, unit_price,
+//                    line_total }] | null (null when the item prices do not add up to the subtotal) }
+//   consumables_deducted (PB 15): [{ log_id, trigger_status, consumable_inventory_id, item_name, unit,
+//                    quantity_deducted, shortfall, deducted_at }] what its status changes took from stock
 //   order.deadline_flag (PB 16): 'overdue' | 'urgent_24h' | 'warning_72h' | 'normal' | null (closed)
 //   status_history (PB 14): [{ history_id, from_status, to_status, changed_by_name, changed_role, changed_at }]
 //                    oldest first; changed_at is UTC like date_created
@@ -352,9 +364,10 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
     const items = await listRecords(req, 'order_items', { filters: [['order_id', order_id]], orderBy: 'line_item_id' });
     const view = await loadPaymentView(req, order);
     const timeline = await loadStatusHistory(req, order_id);
+    const used = await loadOrderConsumables(req, order_id);
     const needs = needsReservation(order) ? stockNeeds(items.records) : [];
     const evaluation = needs.length > 0 ? await evaluateCapacity(req, needs) : null;
-    const sources = [source, items.source, view.source, timeline.source, evaluation && evaluation.source];
+    const sources = [source, items.source, view.source, timeline.source, used.source, evaluation && evaluation.source];
 
     res.status(200).json({
       source: sources.includes('local') ? 'local' : 'cloud',
@@ -368,7 +381,9 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
         ...paymentTotals(order, view.summary)
       },
       allowed_actions: allowedActions(order, req.user.role, view.summary),
-      stock_check: buildStockCheck(order, items.records, evaluation)
+      stock_check: buildStockCheck(order, items.records, evaluation),
+      quote: { ...quoteBreakdown(order), lines: quoteLines(items.records, quoteBreakdown(order)) },
+      consumables_deducted: used.consumables
     });
   } catch (err) {
     sendDbError(res, err, 'reading order');
@@ -547,7 +562,13 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 // branches must not be released or consumed from a stale offline copy.
 // PB 14: the same transaction writes one order_status_history row; "order_updated" is pushed
 // to every screen after COMMIT.
-// -> 200 { message, order, stock_changes }
+// PB 15: leaving Printing (for Pressing, or for Completed when Pressing is skipped) takes the
+// 'Pressing' usage rates of the order's blanks from stock; Completed also takes the 'Completed'
+// rates. Same transaction, each (order, step, consumable) at most once (order_consumables_log),
+// never below 0: a shortfall is recorded, never a reason to refuse the change (steering §5).
+// The consumable ids join "inventory_updated", so the low-stock warning follows at once.
+// -> 200 { message, order, stock_changes, consumables_deducted: [{ log_id, trigger_status,
+//          consumable_inventory_id, item_name, unit, needed, quantity_deducted, shortfall }] }
 // ==========================================
 router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAccess, async (req, res) => {
   const { order_id } = req.params;
@@ -606,9 +627,13 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
           WHERE order_id = $1 AND inventory_id IS NOT NULL GROUP BY inventory_id ORDER BY inventory_id`, [order_id]);
       const needs = lines.rows.map((r) => ({ inventory_id: r.inventory_id, quantity_needed: r.qty }));
       const ids = needs.map((n) => n.inventory_id);
-      const stock = ids.length === 0 ? { rows: [] } : await client.query(
+      // PB 15: the consumables this change takes (not taken before), locked together with the
+      // materials in ONE inventory_id order so two status changes can never deadlock
+      const consumablePlan = await planConsumables(client, { order_id, from, to: status, lines: needs });
+      const lockIds = [...new Set([...ids, ...consumablePlan.ids])].sort();
+      const stock = lockIds.length === 0 ? { rows: [] } : await client.query(
         `SELECT inventory_id, item_name, quantity_available, quantity_reserved, deleted_at, purged_at FROM inventory_items
-          WHERE inventory_id = ANY($1::text[]) ORDER BY inventory_id FOR UPDATE`, [ids]);
+          WHERE inventory_id = ANY($1::text[]) ORDER BY inventory_id FOR UPDATE`, [lockIds]);
       const rowsById = new Map(stock.rows.map((r) => [r.inventory_id, r]));
 
       let stockReserved = order.stock_reserved;
@@ -654,14 +679,16 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
         }
         stockReserved = false;
       }
-      changedIds = stockChanges.map((c) => c.inventory_id);
+      // PB 15: never blocks the change; a shortfall clamps the stock at 0 and is recorded
+      const consumables = await applyConsumables(client, req, { order_id, planned: consumablePlan.planned, rowsById });
+      changedIds = [...new Set([...stockChanges.map((c) => c.inventory_id), ...consumables.map((c) => c.consumable_inventory_id)])];
 
       const updated = await client.query(
         `UPDATE order_profiles SET production_status = $2, stock_reserved = $3, last_edited_by = $4, last_edited_role = $5
           WHERE order_id = $1 RETURNING ${selectList('order_profiles', 'pg')}`,
         [order_id, status, stockReserved, ...editorOf(req)]);
       await recordStatusChange(client, req, order_id, from, status);
-      return { order: serialize('order_profiles', updated.rows[0]), stockChanges, from };
+      return { order: serialize('order_profiles', updated.rows[0]), stockChanges, consumables, from };
     });
 
     pushStockChange(req, changedIds, `order_${status.toLowerCase()}`);
@@ -672,9 +699,10 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
         ? (status === 'Cancelled' ? ' Reserved materials were released back to stock.'
           : status === 'Completed' ? ' Reserved materials were used up from stock.'
             : ' Materials were reserved.')
-        : ''),
+        : '') + consumablesSentence(result.consumables),
       order: withDeadlineFlag(result.order),
-      stock_changes: result.stockChanges
+      stock_changes: result.stockChanges,
+      consumables_deducted: result.consumables
     });
   } catch (err) {
     if (err instanceof Rejected) return res.status(err.status).json(err.body);
@@ -821,6 +849,159 @@ router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess
   } catch (err) {
     if (err instanceof Rejected) return res.status(err.status).json(err.body);
     sendDbError(res, err, 'adding order item');
+  }
+});
+
+// ==========================================
+// BULK ITEMS: A JERSEY ROSTER IN ONE GO (PB 7)
+// POST /api/orders/:order_id/items/bulk
+// Body: { items: [{ product_type, quantity, size?, custom_name?, custom_number?, inventory_id? }] }   1 to 500 rows
+//  - Every row is checked first (400 VALIDATION_FAILED, each message starts with "Row N:").
+//  - All rows are added in ONE transaction, or none are.
+//  - Same stock guard as adding one item: when the order already holds its stock (stock_reserved),
+//    the linked rows reserve theirs too (409 INSUFFICIENT_INVENTORY if short; nothing added), and
+//    that needs the cloud (503 ITEM_RESERVATION_REQUIRES_CLOUD offline).
+//  - Only open orders take items (409 ORDER_CLOSED).
+// -> 201 { message, source, items, stock_reserved }
+// ==========================================
+const BULK_ITEMS_MAX = 500;
+const BULK_ERRORS_SHOWN = 20;
+
+const checkBulkItems = (list) => {
+  if (!Array.isArray(list) || list.length === 0) {
+    return { errors: [{ field: 'items', message: 'Add at least one row to import.' }] };
+  }
+  if (list.length > BULK_ITEMS_MAX) {
+    return { errors: [{ field: 'items', message: `At most ${BULK_ITEMS_MAX} rows can be imported at once. Split the list and import it in parts.` }] };
+  }
+  const errors = [];
+  const rows = list.map((raw, i) => {
+    const r = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const v = createValidator();
+    const row = {
+      product_type: v.requiredString(r.product_type, 'product_type', 100),
+      quantity: v.positiveInt(r.quantity, 'quantity'),
+      size: v.optionalString(r.size, 'size', 50),
+      custom_name: v.optionalString(r.custom_name, 'custom_name', 255),
+      custom_number: v.optionalString(r.custom_number, 'custom_number', 50),
+      inventory_id: v.id(r.inventory_id, 'inventory_id', { required: false }) || null
+    };
+    for (const e of v.errors) errors.push({ field: `items[${i}].${e.field}`, message: `Row ${i + 1}: ${e.message}` });
+    return row;
+  });
+  return { errors: errors.slice(0, BULK_ERRORS_SHOWN), rows };
+};
+
+router.post('/:order_id/items/bulk', requireRole(WRITE_ROLES), requireOrderEditAccess, async (req, res) => {
+  const { order_id } = req.params;
+  const checked = checkBulkItems((req.body || {}).items);
+  if (checked.errors.length > 0) {
+    return res.status(400).json({ error: 'VALIDATION_FAILED', message: checked.errors[0].message, details: checked.errors });
+  }
+  const rows = checked.rows.map((r) => ({ ...r, line_item_id: crypto.randomUUID() }));
+  const totals = new Map();
+  for (const r of rows) if (r.inventory_id) totals.set(r.inventory_id, (totals.get(r.inventory_id) || 0) + r.quantity);
+  const needs = [...totals].map(([inventory_id, quantity_needed]) => ({ inventory_id, quantity_needed }))
+    .sort((a, b) => (a.inventory_id < b.inventory_id ? -1 : a.inventory_id > b.inventory_id ? 1 : 0));
+  const ids = needs.map((n) => n.inventory_id);
+  const closed = (status) => new Rejected(409, {
+    error: 'ORDER_CLOSED', message: `This order is ${status}, so items can no longer be added.`
+  });
+  const needsCloud = () => new Rejected(503, {
+    error: 'ITEM_RESERVATION_REQUIRES_CLOUD',
+    message: 'This order already holds reserved stock, so adding stock-linked items reserves them too. '
+      + 'That needs the cloud connection (and the order synced). Try again when online.'
+  });
+  const columns = ['line_item_id', 'inventory_id', 'product_type', 'quantity', 'size', 'custom_name', 'custom_number'];
+
+  // ---- Online: lock the order and the stock rows (inventory_id order), insert all, reserve ----
+  const addInCloud = () => withPgTransaction(req.pgPool, async (client) => {
+    const ord = await client.query('SELECT production_status, stock_reserved FROM order_profiles WHERE order_id = $1 FOR UPDATE', [order_id]);
+    if (ord.rowCount === 0) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
+    if (!EDITABLE_STATUSES.includes(ord.rows[0].production_status)) throw closed(ord.rows[0].production_status);
+    const stock = ids.length === 0 ? { rows: [] } : await client.query(
+      `SELECT inventory_id, item_name, quantity_available, quantity_reserved FROM inventory_items
+        WHERE inventory_id = ANY($1::text[]) AND ${ACTIVE_ITEM_SQL} ORDER BY inventory_id FOR UPDATE`, [ids]);
+    const rowsById = new Map(stock.rows.map((r) => [r.inventory_id, r]));
+    const { missing, shortages } = checkStock(needs, rowsById);
+    if (missing.length) throw missingItemsRejection(missing, 'cloud');
+    const reserve = Boolean(ord.rows[0].stock_reserved) && needs.length > 0;
+    if (reserve && shortages.length) throw shortageRejection(shortages, 'cloud');
+
+    const inserted = await client.query(
+      `INSERT INTO order_items (order_id, ${columns.join(', ')})
+       SELECT $1::text, * FROM unnest($2::text[], $3::text[], $4::text[], $5::int[], $6::text[], $7::text[], $8::text[])
+       RETURNING ${selectList('order_items', 'pg')}`,
+      [order_id, ...columns.map((c) => rows.map((r) => r[c]))]);
+    if (inserted.rowCount !== rows.length) throw new Error(`bulk insert wrote ${inserted.rowCount} of ${rows.length} rows`);
+    if (reserve) {
+      for (const n of needs) {
+        // Guarded in SQL as well as checked above: never over-commit stock
+        const held = await client.query(
+          `UPDATE inventory_items SET quantity_reserved = quantity_reserved + $1
+            WHERE inventory_id = $2 AND quantity_available - quantity_reserved >= $1`, [n.quantity_needed, n.inventory_id]);
+        if (held.rowCount !== 1) throw shortageRejection(checkStock([n], rowsById).shortages, 'cloud');
+      }
+    }
+    const byId = new Map(inserted.rows.map((r) => [r.line_item_id, serialize('order_items', r)]));
+    return { source: 'cloud', items: rows.map((r) => byId.get(r.line_item_id)), reserved: reserve };
+  });
+
+  // ---- Offline: allowed only when nothing has to be reserved ----
+  const addLocally = () => withLocalTransaction(req.localDbPath, async (tx) => {
+    const local = await sqliteGet(tx, 'SELECT production_status, stock_reserved FROM order_profiles WHERE order_id = ?', [order_id]);
+    if (!local) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
+    if (!EDITABLE_STATUSES.includes(local.production_status)) throw closed(local.production_status);
+    const found = ids.length === 0 ? [] : await sqliteAll(tx,
+      `SELECT inventory_id FROM inventory_items WHERE inventory_id IN (${ids.map(() => '?').join(', ')}) AND ${ACTIVE_ITEM_SQL}`, ids);
+    const present = new Set(found.map((r) => r.inventory_id));
+    const missing = ids.filter((id) => !present.has(id));
+    if (missing.length) throw missingItemsRejection(missing, 'local');
+    if (ids.length > 0 && Number(local.stock_reserved) === 1) throw needsCloud();
+    for (const r of rows) {
+      await sqliteRun(tx,
+        `INSERT INTO order_items (order_id, ${columns.join(', ')}, sync_status, last_modified)
+         VALUES (?, ${columns.map(() => '?').join(', ')}, 'pending_insert', ${LOCAL_NOW})`,
+        [order_id, ...columns.map((c) => r[c])]);
+    }
+    const saved = await sqliteAll(tx,
+      `SELECT ${selectList('order_items', 'sqlite')} FROM order_items WHERE line_item_id IN (${rows.map(() => '?').join(', ')})`,
+      rows.map((r) => r.line_item_id));
+    const byId = new Map(saved.map((r) => [r.line_item_id, serialize('order_items', r)]));
+    return { source: 'local', items: rows.map((r) => byId.get(r.line_item_id)), reserved: false };
+  });
+
+  try {
+    const order = await locateRecord(req, 'order_profiles', order_id);
+    if (!order.location) return notFound(res, 'Order', order_id);
+
+    let result;
+    if (order.location === 'local') {
+      result = await addLocally();
+    } else {
+      try {
+        result = await addInCloud();
+      } catch (err) {
+        if (err instanceof Rejected || !isConnectionError(err)) throw err;
+        if (err.commitUnknown) return res.status(503).json(COMMIT_UNKNOWN);
+        console.error('☁️  Cloud unreachable, saving the imported items locally:', err.message);
+        result = await addLocally(); // C5: genuine outage only
+      }
+    }
+
+    if (result.reserved) pushStockChange(req, ids, 'order_item_reserved');
+    console.log(`📋 Order ${order_id}: ${rows.length} item(s) imported by ${req.user.user_id} [${result.source}]`);
+    res.status(201).json({
+      message: result.source === 'cloud'
+        ? `${rows.length} item${rows.length === 1 ? '' : 's'} added.${result.reserved ? ' Their stock was reserved.' : ''}`
+        : `${rows.length} item${rows.length === 1 ? '' : 's'} saved on this computer (offline). They will sync when the connection is back.`,
+      source: result.source,
+      items: result.items,
+      stock_reserved: result.reserved
+    });
+  } catch (err) {
+    if (err instanceof Rejected) return res.status(err.status).json(err.body);
+    sendDbError(res, err, 'importing order items');
   }
 });
 
@@ -1091,6 +1272,9 @@ router.patch('/:order_id/design', requireRole(WRITE_ROLES), requireOrderEditAcce
 // PATCH /api/orders/:order_id/details   Body (any of): { production_deadline, total_quote_amount, expected_version?, override? }
 //  - Completed / Cancelled orders cannot be edited.
 //  - PB 2: only the Owner may send total_quote_amount (403 QUOTE_OWNER_ONLY).
+//  - PB 12: a quote typed in by hand replaces the calculated breakdown (it becomes its own
+//    subtotal, with no discount) and writes an audit_log row 'quote_overridden' (before / after)
+//    in the same transaction, online or offline. POST /:order_id/quote calculates it instead.
 //  - The quote is frozen once an order is Approved (its downpayment was checked against it).
 //  - Optimistic concurrency: if the order changed since it was loaded -> 409 EDIT_CONFLICT
 //    { current, can_override }.
@@ -1154,41 +1338,64 @@ router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAcc
       return null;
     };
 
+    // PB 11 / PB 12: a quote typed in by hand is its own subtotal (no discount), and the change
+    // is recorded in audit_log in the same transaction as the write
+    const quoteTyped = fields.includes('total_quote_amount');
+    const writes = Object.fromEntries(fields.map((f) => [f, updates[f]]));
+    if (quoteTyped) Object.assign(writes, manualQuoteColumns(updates.total_quote_amount));
+    const cols = Object.keys(writes);
+    const quoteAudit = (before, after) => ({
+      entity: 'order_profiles', entity_id: order_id, action: 'quote_overridden', actor: req.user,
+      details: { before: quoteFieldsOf(before), after: quoteFieldsOf(after) }
+    });
+
     let conflict = null;
     let overridden = null;
     const result = await writeCloudFirst(
       current.sync_status === 'pending_insert' ? 'local' : 'cloud',
       async () => {
-        const n = fields.length;
-        const { rows, rowCount } = await req.pgPool.query(
-          `UPDATE order_profiles SET ${fields.map((f, i) => `${f} = $${i + 1}`).join(', ')},
-                  last_edited_by = $${n + 4}, last_edited_role = $${n + 5}
-            WHERE order_id = $${n + 1}
-              AND production_status <> ALL($${n + 2}::text[])
-              AND ($${n + 3}::text IS NULL OR ${VERSION_SQL} = $${n + 3}::text)
-            RETURNING ${selectList('order_profiles', 'pg')}`,
-          [...fields.map((f) => updates[f]), order_id, CLOSED_STATUSES, expected, ...editorOf(req)]
-        );
-        if (rowCount === 0) {
+        const n = cols.length;
+        const written = await withPgTransaction(req.pgPool, async (client) => {
+          const before = quoteTyped ? (await client.query(
+            `SELECT ${selectList('order_profiles', 'pg')} FROM order_profiles WHERE order_id = $1 FOR UPDATE`, [order_id])).rows[0] : null;
+          const { rows, rowCount } = await client.query(
+            `UPDATE order_profiles SET ${cols.map((f, i) => `${f} = $${i + 1}`).join(', ')},
+                    last_edited_by = $${n + 4}, last_edited_role = $${n + 5}
+              WHERE order_id = $${n + 1}
+                AND production_status <> ALL($${n + 2}::text[])
+                AND ($${n + 3}::text IS NULL OR ${VERSION_SQL} = $${n + 3}::text)
+              RETURNING ${selectList('order_profiles', 'pg')}`,
+            [...cols.map((f) => writes[f]), order_id, CLOSED_STATUSES, expected, ...editorOf(req)]
+          );
+          if (rowCount === 0) return null; // nothing was written: the conflict is handled after this transaction
+          const record = serialize('order_profiles', rows[0]);
+          if (quoteTyped) await writeAudit(client, quoteAudit(serialize('order_profiles', before), record));
+          return record;
+        });
+        if (!written) {
           conflict = (await getRecord(req, 'order_profiles', order_id)).record;
           // PB 5: the caller confirmed "replace their changes with mine"
           if (body.override === true && canOverride(req, conflict)) {
-            overridden = await overrideInCloud(req, order_id, Object.fromEntries(fields.map((f) => [f, updates[f]])), overrideGuard);
+            overridden = await overrideInCloud(req, order_id, writes, overrideGuard);
             conflict = null;
             return { source: 'cloud', record: overridden.after };
           }
           return null;
         }
-        return { source: 'cloud', record: serialize('order_profiles', rows[0]) };
+        return { source: 'cloud', record: written };
       },
-      async () => {
-        const { changes } = await sqliteRun(req.localDb,
-          `UPDATE order_profiles SET ${fields.map((f) => `${f} = ?`).join(', ')}, last_edited_by = ?, last_edited_role = ?,
-             ${offlineUpdateBookkeeping('order_profiles', [...fields, ...EDITOR_FIELDS])}
+      () => withLocalTransaction(req.localDbPath, async (tx) => {
+        const before = quoteTyped ? await readLocal(tx, 'order_profiles', order_id) : null;
+        const { changes } = await sqliteRun(tx,
+          `UPDATE order_profiles SET ${cols.map((f) => `${f} = ?`).join(', ')}, last_edited_by = ?, last_edited_role = ?,
+             ${offlineUpdateBookkeeping('order_profiles', [...cols, ...EDITOR_FIELDS])}
            WHERE order_id = ? AND production_status NOT IN ('Completed', 'Cancelled')`,
-          [...fields.map((f) => updates[f]), ...editorOf(req), order_id]);
-        return changes === 0 ? null : { source: 'local', record: await readLocal(req.localDb, 'order_profiles', order_id) };
-      }
+          [...cols.map((f) => writes[f]), ...editorOf(req), order_id]);
+        if (changes === 0) return null;
+        const record = await readLocal(tx, 'order_profiles', order_id);
+        if (quoteTyped) await writeAuditLocal(tx, quoteAudit(before, record));
+        return { source: 'local', record };
+      })
     );
 
     if (conflict || !result) {
@@ -1210,6 +1417,159 @@ router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAcc
     if (err instanceof Rejected) return res.status(err.status).json(err.body);
     if (err.commitUnknown) return res.status(503).json(COMMIT_UNKNOWN);
     sendDbError(res, err, 'editing order details');
+  }
+});
+
+// ==========================================
+// CALCULATE THE QUOTE, WITH AN OPTIONAL DISCOUNT (PB 11 / PB 12)
+// POST /api/orders/:order_id/quote   (Owner only: set_quote; a discount also needs apply_discount)
+// Body: { dry_run?, discount_amount? | discount_percent?, discount_reason?, expected_version? }
+//  - Each item's price is its catalog selling price less the volume tier for the order's total
+//    quantity (services/domain/pricing.js); subtotal = the line totals; total = subtotal - discount.
+//  - discount_amount (pesos) or discount_percent (0-100, converted to pesos here), never both;
+//    a reason is required whenever there is a discount. Neither sent: the order's current
+//    discount is kept (re-pricing after items change keeps it). discount_amount 0 removes it.
+//  - dry_run: true works it all out and saves nothing (the panel's preview).
+//  - Saved: every item's price, the order's subtotal / discount / reason / total and one
+//    audit_log row ('quote_generated', or 'discount_applied' with a discount) in ONE transaction.
+//  Refused (nothing saved):
+//    400 VALIDATION_FAILED   403 DISCOUNT_OWNER_ONLY   404 ORDER_NOT_FOUND   409 ORDER_NOT_SYNCED
+//    409 EDIT_CONFLICT (expected_version)   409 ORDER_CLOSED | QUOTE_LOCKED (after approval)
+//    422 NO_ITEMS | ITEMS_NOT_LINKED_TO_STOCK | SELLING_PRICE_MISSING | DISCOUNT_TOO_LARGE
+//    503 QUOTE_REQUIRES_CLOUD | COMMIT_UNKNOWN (the Owner's final price is never set from a stale copy)
+// -> 200 { message, source: 'cloud', dry_run, calculation: { total_quantity, tier, lines: [{ line_item_id,
+//          product_type, size, quantity, selling_price, unit_price, line_total }], subtotal_amount,
+//          discount_amount, discount_percent, discount_reason, total_quote_amount },
+//          quote: { has_quote, subtotal_amount, discount_amount, discount_reason, total_quote_amount }, order }
+// ==========================================
+const atMostTwoDecimals = (n) => Math.abs(Math.round(n * 100) - n * 100) < 1e-6;
+const QUOTE_REQUIRES_CLOUD = {
+  error: 'QUOTE_REQUIRES_CLOUD',
+  message: 'Calculating the quote needs the cloud connection, so the latest prices are used. Nothing was changed. Try again when online.'
+};
+
+router.post('/:order_id/quote', requireRole(rolesWith('set_quote')), requireOrderEditAccess, async (req, res) => {
+  const { order_id } = req.params;
+  const body = req.body || {};
+  const v = createValidator();
+  const given = (x) => x !== undefined && x !== null;
+  const dry_run = given(body.dry_run) ? body.dry_run : false;
+  if (typeof dry_run !== 'boolean') v.errors.push({ field: 'dry_run', message: 'Preview only must be true or false.' });
+  if (given(body.discount_amount) && given(body.discount_percent)) {
+    v.errors.push({ field: 'discount_percent', message: 'Send either a discount amount or a percentage, not both.' });
+  }
+  const discount_amount = given(body.discount_amount) ? v.nonNegativeMoney(body.discount_amount, 'discount_amount') : undefined;
+  let discount_percent;
+  if (given(body.discount_percent)) {
+    const p = body.discount_percent;
+    if (typeof p !== 'number' || !Number.isFinite(p) || p < 0 || p > 100) {
+      v.errors.push({ field: 'discount_percent', message: 'Discount (%) must be a number from 0 to 100, like 5 or 12.5.' });
+    } else if (!atMostTwoDecimals(p)) {
+      v.errors.push({ field: 'discount_percent', message: 'Discount (%) can have at most 2 decimals, like 12.5.' });
+    } else {
+      discount_percent = p;
+    }
+  }
+  const discount_reason = given(body.discount_reason) ? v.optionalString(body.discount_reason, 'discount_reason', DISCOUNT_REASON_MAX) : undefined;
+  if (given(body.expected_version) && typeof body.expected_version !== 'string') {
+    v.errors.push({ field: 'expected_version', message: 'expected_version must be the string returned as "version".' });
+  }
+  if (v.failed()) return v.send(res);
+  if ((discount_amount > 0 || discount_percent > 0) && !can(req.user.role, 'apply_discount')) {
+    return res.status(403).json({ error: 'DISCOUNT_OWNER_ONLY', message: 'Only the Owner can give a discount.' });
+  }
+  const expected_version = body.expected_version || null;
+
+  try {
+    const located = await locateRecord(req, 'order_profiles', order_id);
+    if (!located.location) return notFound(res, 'Order', order_id);
+    if (located.location === 'local') {
+      if (!located.cloudReachable) return res.status(503).json(QUOTE_REQUIRES_CLOUD);
+      return res.status(409).json({ error: 'ORDER_NOT_SYNCED', message: 'This order was saved offline and is not in the cloud yet. Sync, then calculate the quote.' });
+    }
+
+    const result = await withPgTransaction(req.pgPool, async (client) => {
+      const locked = await client.query(
+        `SELECT ${selectList('order_profiles', 'pg')} FROM order_profiles WHERE order_id = $1 FOR UPDATE`, [order_id]);
+      if (locked.rowCount === 0) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
+      const before = serialize('order_profiles', locked.rows[0]);
+      if (expected_version && before.version !== expected_version) {
+        // A price is never forced over someone else's change: reload and decide again
+        throw new Rejected(409, {
+          error: 'EDIT_CONFLICT', message: 'This order was changed by someone else. Reload it and calculate the quote again.',
+          current: withDeadlineFlag(before), can_override: false
+        });
+      }
+      if (CLOSED_STATUSES.includes(before.production_status)) {
+        throw new Rejected(409, { error: 'ORDER_CLOSED', message: `This order is ${before.production_status}, so its quote can no longer be changed.` });
+      }
+      if (QUOTE_FROZEN_STATUSES.includes(before.production_status)) {
+        throw new Rejected(409, {
+          error: 'QUOTE_LOCKED', message: 'The quote cannot be changed after the job order was approved, because the downpayment was based on it.'
+        });
+      }
+      const items = await client.query(
+        `SELECT oi.line_item_id, oi.product_type, oi.size, oi.quantity, oi.inventory_id,
+                ii.item_name, ii.selling_price::text AS selling_price
+           FROM order_items oi LEFT JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id
+          WHERE oi.order_id = $1 ORDER BY oi.line_item_id`, [order_id]);
+      const shown = quoteBreakdown(before);
+      const { problem, quote } = computeQuote({
+        items: items.rows,
+        requested: { amount: discount_amount, percent: discount_percent, reason: discount_reason },
+        existing: { amount: shown.discount_amount, reason: shown.discount_reason }
+      });
+      if (problem) throw new Rejected(problem.status, problem.body);
+      if (dry_run) return { quote, order: before, saved: false };
+
+      const priced = await client.query(
+        `UPDATE order_items oi SET price = v.price
+           FROM unnest($1::text[], $2::numeric[]) AS v(line_item_id, price)
+          WHERE oi.line_item_id = v.line_item_id AND oi.order_id = $3`,
+        [quote.lines.map((l) => l.line_item_id), quote.lines.map((l) => l.unit_price), order_id]);
+      if (priced.rowCount !== quote.lines.length) throw new Error(`priced ${priced.rowCount} of ${quote.lines.length} items`);
+      const updated = await client.query(
+        `UPDATE order_profiles
+            SET subtotal_amount = $2, discount_amount = $3, discount_reason = $4, total_quote_amount = $5,
+                last_edited_by = $6, last_edited_role = $7
+          WHERE order_id = $1 RETURNING ${selectList('order_profiles', 'pg')}`,
+        [order_id, quote.subtotal_amount, quote.discount_amount, quote.discount_reason, quote.total_quote_amount, ...editorOf(req)]);
+      const after = serialize('order_profiles', updated.rows[0]);
+      await writeAudit(client, {
+        entity: 'order_profiles',
+        entity_id: order_id,
+        action: quote.discount_amount > 0 ? 'discount_applied' : 'quote_generated',
+        actor: req.user,
+        details: {
+          total_quantity: quote.total_quantity,
+          tier: quote.tier,
+          lines: quote.lines.map((l) => ({ line_item_id: l.line_item_id, quantity: l.quantity, unit_price: l.unit_price, line_total: l.line_total })),
+          discount_percent: quote.discount_percent,
+          before: quoteFieldsOf(before),
+          after: quoteFieldsOf(after)
+        }
+      });
+      return { quote, order: after, saved: true };
+    });
+
+    if (result.saved) pushOrderChange(req, result.order);
+    const q = result.quote;
+    console.log(`🧾 Order ${order_id}: quote ${result.saved ? 'saved' : 'previewed'} by ${req.user.user_id} (${q.lines.length} line(s))`);
+    res.status(200).json({
+      message: result.saved
+        ? `Quote saved: ${pesoText(q.total_quote_amount)}${q.discount_amount > 0 ? ` after a ${pesoText(q.discount_amount)} discount` : ''}.`
+        : 'Here is the quote. Nothing is saved until you confirm it.',
+      source: 'cloud',
+      dry_run: !result.saved,
+      calculation: q,
+      quote: quoteBreakdown(result.order),
+      order: withDeadlineFlag(result.order)
+    });
+  } catch (err) {
+    if (err instanceof Rejected) return res.status(err.status).json(err.body);
+    if (err.commitUnknown) return res.status(503).json(COMMIT_UNKNOWN);
+    if (isConnectionError(err)) return res.status(503).json(QUOTE_REQUIRES_CLOUD);
+    sendDbError(res, err, 'calculating the quote');
   }
 });
 

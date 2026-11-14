@@ -75,7 +75,11 @@ const FIELD_LABELS = {
   product_type: 'Product type', size: 'Size', custom_name: 'Custom name', custom_number: 'Custom number',
   category: 'Category', stock_status: 'Stock status', search: 'Search', limit: 'Page size', offset: 'Page',
   sort: 'Sort by', dir: 'Sort direction', tracking_no: 'Order number', design_drive_link: 'Design link',
-  quantity_reserved: 'Reserved stock', supplier: 'Supplier', unit: 'Unit', keep: 'Which version to keep'
+  quantity_reserved: 'Reserved stock', supplier: 'Supplier', unit: 'Unit', keep: 'Which version to keep',
+  // migration 011 (PB 11 / PB 12 / PB 15)
+  selling_price: 'Selling price', subtotal_amount: 'Subtotal', discount_amount: 'Discount', discount_percent: 'Discount (%)',
+  discount_reason: 'Reason for the discount', quantity_per_piece: 'Amount per piece', trigger_status: 'When it is used',
+  consumable_inventory_id: 'Consumable', items: 'Items', rates: 'Usage rates', dry_run: 'Preview only'
 };
 const labelOf = (field) =>
   FIELD_LABELS[field] || String(field).replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());

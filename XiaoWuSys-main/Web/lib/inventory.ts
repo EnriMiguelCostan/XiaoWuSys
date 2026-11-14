@@ -16,6 +16,8 @@ export interface InventoryItem {
   quantity_available_net: number;
   minimum_threshold: number;
   unit_cost: number;
+  /** PB 11: what the shop charges per piece before volume discounts (absent on an older server) */
+  selling_price?: number;
   /** on hand x unit cost, computed by the server (absent on an older server) */
   stock_value?: number;
   stock_status: StockStatus | string;
@@ -45,6 +47,32 @@ export interface InventorySnapshot {
   categories: string[];
   items: InventoryItem[];
 }
+
+/** PB 15: GET /api/inventory/:id/consumable-rates (what one piece of a blank uses, and when) */
+export interface ConsumableRate {
+  rate_id: string;
+  consumable_inventory_id: string;
+  consumable_name: string;
+  consumable_unit: string | null;
+  consumable_in_recycle_bin: boolean;
+  quantity_per_piece: number;
+  trigger_status: string;
+}
+export interface ConsumableRatesView {
+  source?: 'cloud' | 'local';
+  product: { inventory_id: string; item_name: string; unit: string | null };
+  rates: ConsumableRate[];
+  consumable_options: { inventory_id: string; item_name: string; unit: string | null; item_category: string }[];
+  /** the steps the server accepts ('Pressing', 'Completed') */
+  triggers: string[];
+  can_edit: boolean;
+}
+
+/** Plain words for the step a consumable is taken at (display only) */
+export const TRIGGER_LABEL: Record<string, string> = {
+  Pressing: 'When printing ends (pressing starts, or the order is completed without pressing)',
+  Completed: 'When the order is completed',
+};
 
 /** GET /api/inventory/recycle-bin */
 export interface RecycleBinPage {
