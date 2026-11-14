@@ -18,11 +18,12 @@ const {
 const { STOCK_STATUSES, withAvailability, buildInventorySnapshot } = require('../services/inventorySnapshot');
 const { snapshotOf, auditCloud, auditLocal } = require('../services/inventoryAudit');
 const { purgeInCloud, applyPurgeLocally, purgeBatches, RETENTION_DAYS } = require('../services/recycleBin');
+const { rolesWith } = require('../services/domain/permissions');
 
 // Who may do what (role always comes from the JWT)
 const READ_ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
-const EDIT_ROLES = ['Owner', 'Admin', 'Production'];   // add, edit, stock changes, move to / restore from bin
-const PURGE_ROLES = ['Owner', 'Admin'];                // permanent delete / empty bin
+const EDIT_ROLES = rolesWith('edit_inventory');   // add, edit, stock changes, move to / restore from bin
+const PURGE_ROLES = rolesWith('purge_inventory'); // permanent delete / empty bin
 
 // Real-time push (Socket.io) after any stock change made by this server
 const pushStockChange = (req, ids, reason) => {

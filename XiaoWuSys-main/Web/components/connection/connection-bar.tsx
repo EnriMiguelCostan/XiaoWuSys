@@ -4,10 +4,14 @@
 // on this computer, how many changes are waiting, and offers "Sync now".
 // Labels: connectionText() / pendingText() / syncDisabledReason() in client-core.
 // Colours and icons: lib/ui-tokens.ts. Nothing here decides anything.
-import { RefreshCw } from 'lucide-react';
+// PB 5: for accounts that may settle them (manage_accounts), the count of changes that clash
+// with the cloud opens the Conflicts dialog.
+import { useState } from 'react';
+import { RefreshCw, TriangleAlert } from 'lucide-react';
 import { connectionText, pendingText, syncDisabledReason } from '@xiaowu/client-core/connection';
 import { formatDateTime } from '@xiaowu/client-core/format';
 import { can } from '@xiaowu/client-core/permissions';
+import { ConflictsDialog } from '@/components/connection/conflicts-dialog';
 import { useConnection } from '@/components/connection/connection-provider';
 import { ResultDialog } from '@/components/feedback/result-dialog';
 import { Badge } from '@/components/ui/badge';
@@ -19,7 +23,8 @@ import { cn } from '@/lib/utils';
 
 export function ConnectionBar() {
   const { user } = useSession();
-  const { state, syncStatus, browserOnline, syncBusy, syncNow, syncResult, dismissSyncResult } = useConnection();
+  const { state, syncStatus, browserOnline, syncBusy, syncNow, syncResult, dismissSyncResult, conflictSettled } = useConnection();
+  const [conflictsOpen, setConflictsOpen] = useState(false);
 
   const { label, detail } = connectionText(state, { cloud: syncStatus?.cloud, browserOnline });
   const look = CONNECTION[state];
@@ -27,7 +32,8 @@ export function ConnectionBar() {
   const blocked = syncDisabledReason({ state, syncing: syncBusy });
   const pendingTotal = syncStatus?.pending_total ?? 0;
   // Conflicts are only shown to accounts that can resolve them
-  const conflictCount = can(user, 'manage_accounts') ? (syncStatus?.conflicts ?? 0) : 0;
+  const canSettle = can(user, 'manage_accounts');
+  const conflictCount = canSettle ? (syncStatus?.conflicts ?? 0) : 0;
   const lastSynced =
     state === 'online' && syncStatus?.last_sync_at ? ` Last synced ${formatDateTime(syncStatus.last_sync_at)}.` : '';
 
@@ -72,9 +78,17 @@ export function ConnectionBar() {
               {pendingText(pendingTotal)}
             </Badge>
             {conflictCount > 0 && (
-              <Badge variant="outline" className={TONE_CLASSES.danger.badge}>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className={TONE_CLASSES.danger.badge}
+                onClick={() => setConflictsOpen(true)}
+                aria-label={`${conflictCount} change${conflictCount === 1 ? '' : 's'} need${conflictCount === 1 ? 's' : ''} a decision: review`}
+              >
+                <TriangleAlert aria-hidden />
                 {conflictCount} need{conflictCount === 1 ? 's' : ''} a decision
-              </Badge>
+              </Button>
             )}
             {/* A disabled button gets no pointer events, so the tooltip hangs on a wrapper */}
             <Tooltip>
@@ -90,6 +104,7 @@ export function ConnectionBar() {
       </div>
 
       <ResultDialog result={syncResult} onClose={dismissSyncResult} />
+      {canSettle && <ConflictsDialog open={conflictsOpen} onClose={() => setConflictsOpen(false)} onResolved={conflictSettled} />}
     </>
   );
 }

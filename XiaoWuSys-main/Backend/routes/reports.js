@@ -15,6 +15,7 @@ const { localDateTime } = require('../utils/validation');
 const { listRecords, userNames } = require('../services/records');
 const { paymentSummary } = require('../services/domain/payments');
 const { can } = require('../services/domain/permissions');
+const { deadlineFlag } = require('../services/domain/orderLifecycle');
 const { buildInventorySnapshot } = require('../services/inventorySnapshot');
 
 const READ_ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
@@ -87,6 +88,7 @@ router.get('/dashboard', requireRole(READ_ROLES), async (req, res) => {
         customer_name: name(o.customer_id),
         production_status: o.production_status,
         production_deadline: o.production_deadline,
+        deadline_flag: deadlineFlag(o), // PB 16: overdue | urgent_24h | warning_72h | normal
         total_quote_amount: o.total_quote_amount || 0,
         total_paid: paid,
         balance: round2((o.total_quote_amount || 0) - paid),
@@ -158,7 +160,7 @@ router.get('/dashboard', requireRole(READ_ROLES), async (req, res) => {
       }))
       .sort((a, b) => a.free - b.free || a.item_name.localeCompare(b.item_name));
 
-    const counts = Object.fromEntries(['Pending', 'Approved', 'Printing', 'Delayed', 'Completed', 'Cancelled']
+    const counts = Object.fromEntries(['Pending', 'Approved', 'Printing', 'Pressing', 'Delayed', 'Completed', 'Cancelled']
       .map((st) => [st, data.orders.filter((o) => o.production_status === st).length]));
 
     res.status(200).json({

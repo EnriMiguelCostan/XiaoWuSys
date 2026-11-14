@@ -7,7 +7,11 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const { verifyToken, requireRole } = require('./middleware/authMiddleware');
-const { buildSyncStatus } = require('./services/sync');
+const sync = require('./services/sync');
+const { rolesWith } = require('./services/domain/permissions');
+const { createValidator } = require('./utils/validation');
+
+const { buildSyncStatus } = sync;
 
 // Vite MVP (5173 dev, 4173 preview) and the Next.js app in Web/ (3000, Batch M0).
 // Tablets on the shop Wi-Fi open the UI by the shop computer's LAN address, which can't be known
@@ -48,9 +52,14 @@ const fallbackCloudHealth = (pgPool) => {
 
 // cloudHealth: services/cloudHealth.js (PB 3). onLocalWrite: called after a write was saved
 // on this computer instead of the cloud, so server.js can push the new "changes waiting" count.
+// orderEvents: services/orderEvents.js (PB 14 / PB 5), live "order_updated" / "order_overridden".
+// onSyncQueueChange: called when the conflict list changed, so the status bar count follows.
+const NO_ORDER_EVENTS = { notifyUpdated: () => {}, notifyOverridden: () => 0 };
+
 const createApp = ({
-  pgPool, localDb, localDbPath, orderLocks, inventoryEvents,
+  pgPool, localDb, localDbPath, orderLocks, inventoryEvents, orderEvents = NO_ORDER_EVENTS,
   syncAndNotify, listConflicts, cloudHealth = fallbackCloudHealth(pgPool), onLocalWrite = () => {},
+  onSyncQueueChange = onLocalWrite,
   corsOrigins = parseOrigins(process.env.CORS_ORIGINS)
 }) => {
   const app = express();
@@ -88,6 +97,7 @@ const createApp = ({
     req.localDbPath = localDbPath;
     req.orderLocks = orderLocks;
     req.inventoryEvents = inventoryEvents;
+    req.orderEvents = orderEvents;
     next();
   });
 
@@ -134,11 +144,42 @@ const createApp = ({
     }
   });
 
-  app.get('/api/sync/conflicts', verifyToken, requireRole(['Owner', 'Admin']), async (req, res) => {
+  // Changes made on this computer that clash with newer cloud changes (C3 / PB 5), described in
+  // plain words: { conflicts: [{ table, id, title, changed: [labels], keep_local_blocked_reason }] }
+  const CONFLICT_ROLES = rolesWith('manage_accounts');
+  app.get('/api/sync/conflicts', verifyToken, requireRole(CONFLICT_ROLES), async (req, res) => {
     try {
-      res.status(200).json({ conflicts: await listConflicts(localDb) });
+      res.status(200).json({ conflicts: await sync.describeConflicts(localDb, listConflicts) });
     } catch (error) {
       res.status(500).json({ error: 'SYNC_FAILED', message: 'Could not read sync conflicts.' });
+    }
+  });
+
+  // PB 5: an Owner / Admin settles one flagged conflict.
+  // POST /api/sync/conflicts/:table/:id/resolve   Body: { keep: 'cloud' | 'local' }
+  //   200 { message, table, id, kept, conflicts_remaining }
+  //   404 CONFLICT_NOT_FOUND   409 KEEP_LOCAL_NOT_ALLOWED | EDIT_CONFLICT | CLOUD_RECORD_MISSING
+  //   503 CLOUD_UNREACHABLE | COMMIT_UNKNOWN (needs the cloud; never settled from a stale copy)
+  // Either way the dropped or replaced values are written to audit_log.
+  app.post('/api/sync/conflicts/:table/:id/resolve', verifyToken, requireRole(CONFLICT_ROLES), async (req, res) => {
+    const v = createValidator();
+    const table = v.oneOf(req.params.table, 'table', sync.SYNC_TABLES.filter((t) => !t.pullOnly).map((t) => t.table));
+    const id = v.id(req.params.id, 'id');
+    const keep = v.oneOf(req.body.keep, 'keep', ['cloud', 'local']);
+    if (v.failed()) return v.send(res);
+    try {
+      const actor = { user_id: req.user.user_id, role: req.user.role };
+      const { status, body } = await sync.resolveConflict(pgPool, localDb, { table, id, keep, actor });
+      if (status === 200) {
+        const { order, ...answer } = body;
+        if (order) orderEvents.notifyUpdated(order);
+        try { onSyncQueueChange(); } catch (err) { console.error('⚠️ onSyncQueueChange failed:', err.message); }
+        return res.status(200).json(answer);
+      }
+      res.status(status).json(body);
+    } catch (error) {
+      console.error('❌ Could not settle the sync conflict:', error.message);
+      res.status(500).json({ error: 'SYNC_FAILED', message: 'Could not settle this conflict. Please try again.' });
     }
   });
 

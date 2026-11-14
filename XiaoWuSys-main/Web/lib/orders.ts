@@ -2,10 +2,14 @@
 // Types and display lists only: every total, status and permission is decided by the server.
 import type { OrderActions } from '@xiaowu/client-core/permissions';
 
-export type ProductionStatus = 'Pending' | 'Approved' | 'Printing' | 'Completed' | 'Delayed' | 'Cancelled';
+export type ProductionStatus = 'Pending' | 'Approved' | 'Printing' | 'Pressing' | 'Completed' | 'Delayed' | 'Cancelled';
 
 /** The server's PRODUCTION_STATUSES, for the status filter. */
-export const ORDER_STATUSES: ProductionStatus[] = ['Pending', 'Approved', 'Printing', 'Completed', 'Delayed', 'Cancelled'];
+export const ORDER_STATUSES: ProductionStatus[] = ['Pending', 'Approved', 'Printing', 'Pressing', 'Completed', 'Delayed', 'Cancelled'];
+
+/** PB 16: how close an open order is to its deadline, decided by the server
+ *  (orderLifecycle.deadlineFlag, shop time). null for Completed / Cancelled orders. */
+export type DeadlineFlag = 'overdue' | 'urgent_24h' | 'warning_72h' | 'normal';
 
 export const PAYMENT_TYPES = ['Cash', 'GCash', 'Bank Transfer'] as const;
 
@@ -28,7 +32,28 @@ export interface Order {
   stock_reserved?: boolean | number;
   approved_at?: string | null;
   sync_status: string;
-  version?: number | null;
+  /** opaque text from the server: send it back as expected_version, never interpret it */
+  version?: string | null;
+  deadline_flag?: DeadlineFlag | string | null;
+}
+
+/** PB 14: one status change, oldest first in OrderDetail.status_history */
+export interface StatusChange {
+  history_id: string;
+  from_status: string | null;
+  to_status: string;
+  changed_by_name: string;
+  changed_role: string | null;
+  /** UTC, like date_created */
+  changed_at: string;
+}
+
+/** "order_updated" socket event (Backend/services/orderEvents.js): only a hint to reload */
+export interface OrderUpdated {
+  order_id: string;
+  tracking_no: string | null;
+  production_status: string | null;
+  version: string | null;
 }
 
 export interface OrderItem {
@@ -80,6 +105,8 @@ export interface OrderDetail {
   totals: OrderTotals;
   allowed_actions?: Partial<OrderActions>;
   stock_check?: StockCheck | null;
+  /** absent on an older server */
+  status_history?: StatusChange[];
 }
 
 /** GET /api/orders */
@@ -101,7 +128,8 @@ export interface Shortage {
 }
 
 // Server-side sort options (GET /api/orders?sort=&dir=)
-export type OrderSortKey = 'date_created' | 'production_deadline' | 'total_quote_amount' | 'production_status';
+//   priority (PB 16): overdue first, then due today / tomorrow, then within 3 days; the server ranks them
+export type OrderSortKey = 'date_created' | 'production_deadline' | 'total_quote_amount' | 'production_status' | 'priority';
 export interface OrderSort {
   key: OrderSortKey;
   dir: 'asc' | 'desc';
@@ -110,6 +138,7 @@ export const DEFAULT_ORDER_SORT: OrderSort = { key: 'date_created', dir: 'desc' 
 export const ORDER_SORT_OPTIONS: (OrderSort & { label: string })[] = [
   { key: 'date_created', dir: 'desc', label: 'Newest first' },
   { key: 'date_created', dir: 'asc', label: 'Oldest first' },
+  { key: 'priority', dir: 'asc', label: 'Most urgent first' },
   { key: 'production_deadline', dir: 'asc', label: 'Deadline: soonest first' },
   { key: 'production_deadline', dir: 'desc', label: 'Deadline: latest first' },
   { key: 'total_quote_amount', dir: 'desc', label: 'Quote: highest first' },
@@ -121,6 +150,7 @@ export const SORT_FIRST_DIR: Record<OrderSortKey, 'asc' | 'desc'> = {
   production_deadline: 'asc',
   total_quote_amount: 'desc',
   production_status: 'asc',
+  priority: 'asc',
 };
 
 /** "3 x Jersey print (M, DELA CRUZ, #7)" */

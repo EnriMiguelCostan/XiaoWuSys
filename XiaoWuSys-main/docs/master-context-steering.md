@@ -13,7 +13,7 @@ Here is the master context steering file for the XiaoWuSys repository. Please re
 
 
 main is at **805a619**: the merge of **PR #16 (Batch 2)**, on top of **PR #15 (Batch 1)**. Check with git log --oneline -5.
-Migrations 001–008 exist. **Never edit them.** The next one is 009 (Batch 3).
+Migrations 001–010 exist. **Never edit them.** 009 and 010 are Batch 3 (built in Batch M6, see sprint-12-steering.md §2 "As built"). The next one is 011 (PB 15).
 CI (.github/workflows/ci.yml) was green at the end of Batch 2:
   - Backend: npm ci && npm test with a PostgreSQL 16 service and TEST_DATABASE_URL. **115 tests pass, 0 are skipped**, including two real-PostgreSQL suites.
   - Frontend: npm ci, npm run lint and npm run build.

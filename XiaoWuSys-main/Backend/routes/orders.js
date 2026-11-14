@@ -12,10 +12,12 @@ const {
   withPgTransaction, withLocalTransaction, ACTIVE_ITEM_SQL
 } = require('../services/records');
 const { withAvailability } = require('../services/inventorySnapshot');
-const { rolesWith, can, capabilitiesFor } = require('../services/domain/permissions');
+const { rolesWith, can, capabilitiesFor, outranks } = require('../services/domain/permissions');
 const {
-  STATUS_TRANSITIONS, CLOSED_STATUSES, QUOTE_FROZEN_STATUSES, APPROVABLE_STATUSES, capabilityForTransition, allowedActions
+  STATUS_TRANSITIONS, CLOSED_STATUSES, QUOTE_FROZEN_STATUSES, APPROVABLE_STATUSES, capabilityForTransition, allowedActions,
+  withDeadlineFlag, deadlineWindows
 } = require('../services/domain/orderLifecycle');
+const { writeAudit } = require('../services/auditLog');
 const { needsReservation, stockNeeds, buildStockCheck } = require('../services/domain/stockCheck');
 const {
   paymentSummary, runningTotals, checkPayment, downpaymentWarnings, toCentavos, toPesos
@@ -42,6 +44,111 @@ class Rejected extends Error {
 }
 const pushStockChange = (req, ids, reason) => {
   if (req.inventoryEvents && ids.length > 0) req.inventoryEvents.notifyChanged(ids, reason);
+};
+// PB 14: live "order_updated" to every screen. Call only AFTER the write is committed.
+const pushOrderChange = (req, order) => {
+  if (req.orderEvents && order) req.orderEvents.notifyUpdated(order);
+};
+
+// ---- PB 5: who last changed an order, and replacing a lower rank's conflicting change ----
+// Always from the verified login token
+const EDITOR_FIELDS = ['last_edited_by', 'last_edited_role'];
+const editorOf = (req) => [req.user.user_id, req.user.role];
+
+// May this account replace the change that caused the conflict? Strictly higher rank than
+// the order's last editor, and never on a closed order.
+const canOverride = (req, current) => Boolean(current)
+  && !CLOSED_STATUSES.includes(current.production_status)
+  && outranks(req.user.role, current.last_edited_role);
+
+const editConflict = (req, current, message) => ({
+  error: 'EDIT_CONFLICT',
+  message,
+  current: withDeadlineFlag(current),
+  can_override: canOverride(req, current)
+});
+
+const COMMIT_UNKNOWN = {
+  error: 'COMMIT_UNKNOWN',
+  message: 'The connection to the cloud dropped while saving. Reload the order to see whether the change was applied.'
+};
+
+// The caller confirmed "replace their changes with mine" (override: true) after a 409 that
+// said can_override. One transaction: lock the order, check the rank again on the locked row
+// (from the login token), apply, and record before / after in audit_log.
+//   guard(lockedOrder) -> null, or { status, body } when the order no longer accepts this change
+// -> { before, after }
+const overrideInCloud = (req, order_id, updates, guard = () => null) => withPgTransaction(req.pgPool, async (client) => {
+  const { rows } = await client.query(
+    `SELECT ${selectList('order_profiles', 'pg')} FROM order_profiles WHERE order_id = $1 FOR UPDATE`, [order_id]);
+  if (rows.length === 0) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
+  const before = serialize('order_profiles', rows[0]);
+  if (!outranks(req.user.role, before.last_edited_role)) {
+    throw new Rejected(403, {
+      error: 'OVERRIDE_NOT_ALLOWED',
+      message: 'You can only replace changes made by an account with a lower role than yours. Reload the order and try again.',
+      current: withDeadlineFlag(before)
+    });
+  }
+  const problem = guard(before);
+  if (problem) throw new Rejected(problem.status, problem.body);
+
+  const fields = Object.keys(updates);
+  const updated = await client.query(
+    `UPDATE order_profiles
+        SET ${fields.map((f, i) => `${f} = $${i + 2}`).join(', ')},
+            last_edited_by = $${fields.length + 2}, last_edited_role = $${fields.length + 3}
+      WHERE order_id = $1 RETURNING ${selectList('order_profiles', 'pg')}`,
+    [order_id, ...fields.map((f) => updates[f]), ...editorOf(req)]);
+  const after = serialize('order_profiles', updated.rows[0]);
+  const snapshot = (order) => Object.fromEntries([...fields, ...EDITOR_FIELDS, 'version'].map((f) => [f, order[f]]));
+  await writeAudit(client, {
+    entity: 'order_profiles',
+    entity_id: order_id,
+    action: 'conflict_override',
+    actor: req.user,
+    details: { fields, before: snapshot(before), after: snapshot(after) }
+  });
+  return { before, after };
+});
+
+// After the override is committed: refresh every screen and tell the account whose change was replaced
+const announceOverride = (req, { before, after }) => {
+  pushOrderChange(req, after);
+  if (req.orderEvents && before.last_edited_by && before.last_edited_by !== req.user.user_id) {
+    req.orderEvents.notifyOverridden({
+      user_id: before.last_edited_by,
+      order_id: after.order_id,
+      tracking_no: after.tracking_no,
+      overridden_by_role: req.user.role
+    });
+  }
+  console.log(`⚖️  Order ${after.order_id}: ${req.user.user_id} (${req.user.role}) replaced a change by ${before.last_edited_by || 'an unknown account'} (${before.last_edited_role || 'unknown role'})`);
+};
+
+// PB 14: one row per status change, in the same transaction as the change
+const recordStatusChange = (client, req, order_id, from, to) => client.query(
+  `INSERT INTO order_status_history (history_id, order_id, from_status, to_status, changed_by, changed_role)
+   VALUES ($1, $2, $3, $4, $5, $6)`,
+  [crypto.randomUUID(), order_id, from || null, to, ...editorOf(req)]);
+
+// The order's status timeline, oldest first, with each account's name -> { source, history }
+const loadStatusHistory = async (req, order_id) => {
+  const list = await listRecords(req, 'order_status_history', {
+    filters: [['order_id', order_id]], orderBy: 'order_status_history.changed_at, order_status_history.history_id'
+  });
+  const names = await userNames(req, list.records.map((h) => h.changed_by));
+  return {
+    source: list.source,
+    history: list.records.map((h) => ({
+      history_id: h.history_id,
+      from_status: h.from_status,
+      to_status: h.to_status,
+      changed_by_name: (h.changed_by && names.get(h.changed_by)) || NOT_RECORDED,
+      changed_role: h.changed_role,
+      changed_at: h.changed_at
+    }))
+  };
 };
 const shortageRejection = (shortages, source) => new Rejected(409, {
   error: 'INSUFFICIENT_INVENTORY',
@@ -148,7 +255,7 @@ const writeCloudFirst = async (target, cloudWrite, localWrite) => {
   try {
     return await cloudWrite();
   } catch (err) {
-    if (!isConnectionError(err)) throw err;
+    if (!isConnectionError(err) || err.commitUnknown) throw err;
     console.error('☁️  Cloud unreachable, saving locally:', err.message);
     return localWrite();
   }
@@ -160,8 +267,11 @@ router.use(verifyToken);
 // ==========================================
 // LIST ORDERS (M10)
 // GET /api/orders?status=Pending&customer_id=CUST-001&sort=production_deadline&dir=asc&limit=50&offset=0
-//   sort: date_created (default) | production_deadline | total_quote_amount | production_status
-//   dir:  desc (default) | asc
+//   sort: date_created (default) | production_deadline | total_quote_amount | production_status | priority
+//   dir:  desc (default) | asc     (priority defaults to asc: most urgent first)
+//   priority (PB 16): overdue orders first, then due today / tomorrow, then due within 3 days,
+//                     then the rest by deadline; Completed / Cancelled orders last.
+// Every order carries deadline_flag: 'overdue' | 'urgent_24h' | 'warning_72h' | 'normal' | null (closed).
 // Sorting runs in the database, so it is correct across pages (not just within one page).
 // The ORDER BY text comes only from the allow-list below, never from the request.
 // -> { source, orders: [...], limit, offset, sort, dir, unsynced }
@@ -175,27 +285,45 @@ const ORDER_SORTS = {
   total_quote_amount: 'order_profiles.total_quote_amount',
   production_status: STATUS_RANK_SQL // lifecycle order: Pending, Approved, Printing, ...
 };
+// PB 16: the same day windows as deadlineFlag() (services/domain/orderLifecycle.js), as SQL
+// that runs in both databases. The dates are produced by the server ('YYYY-MM-DD' only),
+// never taken from the request.
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+const prioritySql = (now = new Date()) => {
+  const { today, urgent_until, warning_until } = deadlineWindows(now);
+  if (![today, urgent_until, warning_until].every((d) => YMD.test(d))) throw new Error('bad deadline window');
+  const due = 'substr(CAST(order_profiles.production_deadline AS text), 1, 10)';
+  return `CASE WHEN order_profiles.production_status IN (${CLOSED_STATUSES.map((s) => `'${s}'`).join(', ')}) THEN 4
+               WHEN ${due} < '${today}' THEN 0
+               WHEN ${due} <= '${urgent_until}' THEN 1
+               WHEN ${due} <= '${warning_until}' THEN 2
+               ELSE 3 END`;
+};
+const SORT_NAMES = [...Object.keys(ORDER_SORTS), 'priority'];
 
 router.get('/', requireRole(READ_ROLES), async (req, res) => {
   const v = createValidator();
   const status = v.oneOf(req.query.status, 'status', PRODUCTION_STATUSES, { required: false });
   const customer_id = v.id(req.query.customer_id, 'customer_id', { required: false });
   const tracking_no = v.trackingNo(req.query.tracking_no, 'tracking_no', { required: false }); // PB 6: find by order number
-  const sort = v.oneOf(req.query.sort, 'sort', Object.keys(ORDER_SORTS), { required: false }) || 'date_created';
-  const dir = v.oneOf(req.query.dir, 'dir', ['asc', 'desc'], { required: false }) || 'desc';
+  const sort = v.oneOf(req.query.sort, 'sort', SORT_NAMES, { required: false }) || 'date_created';
+  const dir = v.oneOf(req.query.dir, 'dir', ['asc', 'desc'], { required: false }) || (sort === 'priority' ? 'asc' : 'desc');
   const { limit, offset } = v.pagination(req.query);
   if (v.failed()) return v.send(res);
 
   try {
     const result = await listRecords(req, 'order_profiles', {
       filters: [['production_status', status], ['customer_id', customer_id], ['tracking_no', tracking_no]],
-      // Ties broken by newest first, then order_id, so paging is stable
-      orderBy: `${ORDER_SORTS[sort]} ${dir.toUpperCase()}, order_profiles.date_created DESC, order_profiles.order_id`,
+      // Ties broken by newest first, then order_id, so paging is stable. Within one urgency
+      // group the nearest deadline comes first.
+      orderBy: sort === 'priority'
+        ? `${prioritySql()} ${dir.toUpperCase()}, order_profiles.production_deadline ASC, order_profiles.order_id`
+        : `${ORDER_SORTS[sort]} ${dir.toUpperCase()}, order_profiles.date_created DESC, order_profiles.order_id`,
       limit,
       offset
     });
     res.status(200).json({
-      source: result.source, orders: result.records, limit, offset, sort, dir, unsynced: result.unsynced,
+      source: result.source, orders: result.records.map((o) => withDeadlineFlag(o)), limit, offset, sort, dir, unsynced: result.unsynced,
       capabilities: capabilitiesFor(req.user.role)
     });
   } catch (err) {
@@ -205,7 +333,10 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
 
 // ==========================================
 // ORDER DETAIL (M10)
-// GET /api/orders/:order_id -> { source, order, items, payments, totals, allowed_actions, stock_check }
+// GET /api/orders/:order_id -> { source, order, items, payments, totals, allowed_actions, stock_check, status_history }
+//   order.deadline_flag (PB 16): 'overdue' | 'urgent_24h' | 'warning_72h' | 'normal' | null (closed)
+//   status_history (PB 14): [{ history_id, from_status, to_status, changed_by_name, changed_role, changed_at }]
+//                    oldest first; changed_at is UTC like date_created
 //   allowed_actions: which buttons this account may use on this order (role + status rules),
 //                    e.g. { approve, statuses: ['Printing', 'Cancelled'], edit_quote, ... }
 //   stock_check (PB 9): for an order that still has to reserve its stock (Pending / Delayed,
@@ -220,13 +351,15 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
 
     const items = await listRecords(req, 'order_items', { filters: [['order_id', order_id]], orderBy: 'line_item_id' });
     const view = await loadPaymentView(req, order);
+    const timeline = await loadStatusHistory(req, order_id);
     const needs = needsReservation(order) ? stockNeeds(items.records) : [];
     const evaluation = needs.length > 0 ? await evaluateCapacity(req, needs) : null;
-    const sources = [source, items.source, view.source, evaluation && evaluation.source];
+    const sources = [source, items.source, view.source, timeline.source, evaluation && evaluation.source];
 
     res.status(200).json({
       source: sources.includes('local') ? 'local' : 'cloud',
-      order,
+      order: withDeadlineFlag(order),
+      status_history: timeline.history,
       items: items.records,
       payments: view.payments,
       totals: {
@@ -375,6 +508,7 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
     }
 
     if (reserve) pushStockChange(req, ids, 'order_reserved');
+    pushOrderChange(req, result.record);
     console.log(`✅ Order ${order_id} (${production_status}, ${needs.length} material(s)${reserve ? ', stock reserved' : ''}) saved to ${result.source}`);
     return res.status(201).json({
       message: result.source === 'cloud'
@@ -383,7 +517,7 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
       source: result.source,
       order_id,
       production_status,
-      order: result.record,
+      order: withDeadlineFlag(result.record),
       items: result.items
     });
   } catch (err) {
@@ -401,7 +535,8 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 //   The allowed moves are STATUS_TRANSITIONS in services/domain/orderLifecycle.js:
 //   Pending  -> Cancelled             (Pending -> Approved only via POST /:order_id/approve, Owner)
 //   Approved -> Printing | Cancelled
-//   Printing -> Completed | Cancelled
+//   Printing -> Pressing | Completed | Cancelled   (PB 14: Pressing is optional)
+//   Pressing -> Completed | Cancelled
 //   Delayed  -> Pending (reserves stock now; 409 INSUFFICIENT_INVENTORY if short) | Cancelled
 //   Completed / Cancelled are final.
 // PB 2: Cancelled is a void, so only the Owner may send it (403 VOID_OWNER_ONLY otherwise).
@@ -410,6 +545,8 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 // Stock effects (same transaction): Cancelled releases the reservation; Completed consumes it
 // (quantity_available and quantity_reserved both go down). Needs the cloud: stock shared by all
 // branches must not be released or consumed from a stale offline copy.
+// PB 14: the same transaction writes one order_status_history row; "order_updated" is pushed
+// to every screen after COMMIT.
 // -> 200 { message, order, stock_changes }
 // ==========================================
 router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAccess, async (req, res) => {
@@ -441,7 +578,11 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
       if (rows.length === 0) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: `Order ${order_id} does not exist.` });
       const order = serialize('order_profiles', rows[0]);
       if (expected_version && order.version !== expected_version) {
-        throw new Rejected(409, { error: 'EDIT_CONFLICT', message: 'This order was changed by someone else. Reload it and try again.', current: order });
+        // A status change is never forced over someone else's change: reload and decide again
+        throw new Rejected(409, {
+          error: 'EDIT_CONFLICT', message: 'This order was changed by someone else. Reload it and try again.',
+          current: withDeadlineFlag(order), can_override: false
+        });
       }
       const from = order.production_status;
       if (status === 'Approved') {
@@ -516,13 +657,15 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
       changedIds = stockChanges.map((c) => c.inventory_id);
 
       const updated = await client.query(
-        `UPDATE order_profiles SET production_status = $2, stock_reserved = $3
+        `UPDATE order_profiles SET production_status = $2, stock_reserved = $3, last_edited_by = $4, last_edited_role = $5
           WHERE order_id = $1 RETURNING ${selectList('order_profiles', 'pg')}`,
-        [order_id, status, stockReserved]);
+        [order_id, status, stockReserved, ...editorOf(req)]);
+      await recordStatusChange(client, req, order_id, from, status);
       return { order: serialize('order_profiles', updated.rows[0]), stockChanges, from };
     });
 
     pushStockChange(req, changedIds, `order_${status.toLowerCase()}`);
+    pushOrderChange(req, result.order);
     console.log(`🔁 Order ${order_id}: ${result.from} -> ${status} by ${req.user.user_id} (${req.user.role})`);
     res.status(200).json({
       message: `Order is now ${status}.` + (result.stockChanges.length
@@ -530,7 +673,7 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
           : status === 'Completed' ? ' Reserved materials were used up from stock.'
             : ' Materials were reserved.')
         : ''),
-      order: result.order,
+      order: withDeadlineFlag(result.order),
       stock_changes: result.stockChanges
     });
   } catch (err) {
@@ -845,15 +988,19 @@ router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), asy
 
 // ==========================================
 // LINK DESIGN FILE (Sprint 8 / PB 8)
-// Body: { design_drive_link, expected_version? }
+// Body: { design_drive_link, expected_version?, override? }
 //  H6: link must be an https:// drive.google.com or docs.google.com URL
 //  H2: 409 ORDER_LOCKED if another user holds the edit lock (Owner prevails)
 //  C3: if expected_version is sent and the cloud row changed since, 409 EDIT_CONFLICT
+//      { current, can_override }
+//  PB 5: can_override is true when this account outranks the order's last editor. Sending the
+//      same body again with override: true replaces their change (rank re-checked from the
+//      login token on the locked row, audit_log row written, "order_overridden" sent to them).
 // -> 200 { message, source, order, version }
 // ==========================================
 router.patch('/:order_id/design', requireRole(WRITE_ROLES), requireOrderEditAccess, async (req, res) => {
   const { order_id } = req.params;
-  const { design_drive_link, expected_version } = req.body || {};
+  const { design_drive_link, expected_version, override } = req.body || {};
 
   const validation = validateDriveLink(design_drive_link);
   if (validation.error) {
@@ -861,6 +1008,9 @@ router.patch('/:order_id/design', requireRole(WRITE_ROLES), requireOrderEditAcce
   }
   if (expected_version !== undefined && typeof expected_version !== 'string') {
     return res.status(400).json({ error: 'VALIDATION_FAILED', message: 'expected_version must be the string returned as "version".' });
+  }
+  if (override !== undefined && typeof override !== 'boolean') {
+    return res.status(400).json({ error: 'VALIDATION_FAILED', message: 'override must be true or false.' });
   }
   const link = validation.url;
 
@@ -870,9 +1020,10 @@ router.patch('/:order_id/design', requireRole(WRITE_ROLES), requireOrderEditAcce
     const { changes } = await sqliteRun(
       req.localDb,
       `UPDATE order_profiles
-          SET design_drive_link = ?, ${offlineUpdateBookkeeping('order_profiles', ['design_drive_link'])}
+          SET design_drive_link = ?, last_edited_by = ?, last_edited_role = ?,
+              ${offlineUpdateBookkeeping('order_profiles', ['design_drive_link', ...EDITOR_FIELDS])}
         WHERE order_id = ?`,
-      [link, order_id]
+      [link, ...editorOf(req), order_id]
     );
     return changes === 0 ? null : { source: 'local', record: await readLocal(req.localDb, 'order_profiles', order_id) };
   };
@@ -882,21 +1033,28 @@ router.patch('/:order_id/design', requireRole(WRITE_ROLES), requireOrderEditAcce
     if (!order.location) return notFound(res, 'Order', order_id);
 
     let conflict = null;
+    let overridden = null;
     const result = await writeCloudFirst(
       order.location,
       async () => {
         // Optimistic update: only if the row is still at expected_version
         const { rows, rowCount } = await req.pgPool.query(
           `UPDATE order_profiles
-              SET design_drive_link = $1, last_modified = NOW()
+              SET design_drive_link = $1, last_edited_by = $4, last_edited_role = $5, last_modified = NOW()
             WHERE order_id = $2
               AND ($3::text IS NULL OR ${VERSION_SQL} = $3::text)
             RETURNING ${selectList('order_profiles', 'pg')}`,
-          [link, order_id, expected_version || null]
+          [link, order_id, expected_version || null, ...editorOf(req)]
         );
         if (rowCount === 0) {
           const current = await getRecord(req, 'order_profiles', order_id);
           conflict = current.record;
+          // PB 5: the caller confirmed "replace their changes with mine"
+          if (override === true && canOverride(req, conflict)) {
+            overridden = await overrideInCloud(req, order_id, { design_drive_link: link });
+            conflict = null;
+            return { source: 'cloud', record: overridden.after };
+          }
           return null;
         }
         return { source: 'cloud', record: serialize('order_profiles', rows[0]) };
@@ -905,36 +1063,44 @@ router.patch('/:order_id/design', requireRole(WRITE_ROLES), requireOrderEditAcce
     );
 
     if (conflict) {
-      return res.status(409).json({
-        error: 'EDIT_CONFLICT',
-        message: 'This order was changed by someone else. Reload it and apply your change again.',
-        current: conflict
-      });
+      return res.status(409).json(editConflict(req, conflict, 'This order was changed by someone else. Reload it and apply your change again.'));
     }
     if (!result) return notFound(res, 'Order', order_id);
 
+    if (overridden) announceOverride(req, overridden);
+    else pushOrderChange(req, result.record);
     res.status(200).json({
-      message: result.source === 'cloud'
-        ? 'Design linked.'
-        : 'Design linked locally (Offline Mode). Will sync when internet is restored.',
+      message: overridden ? 'Design linked. Your change replaced theirs.'
+        : result.source === 'cloud'
+          ? 'Design linked.'
+          : 'Design linked locally (Offline Mode). Will sync when internet is restored.',
       source: result.source,
-      order: result.record,
-      version: result.record.version // null offline until the next sync
+      order: withDeadlineFlag(result.record),
+      version: result.record.version, // null offline until the next sync
+      overridden: Boolean(overridden)
     });
   } catch (err) {
+    if (err instanceof Rejected) return res.status(err.status).json(err.body);
+    if (err.commitUnknown) return res.status(503).json(COMMIT_UNKNOWN);
     sendDbError(res, err, 'linking design file');
   }
 });
 
 // ==========================================
 // EDIT ORDER DETAILS (Orders tab "Edit details")
-// PATCH /api/orders/:order_id/details   Body (any of): { production_deadline, total_quote_amount, expected_version? }
+// PATCH /api/orders/:order_id/details   Body (any of): { production_deadline, total_quote_amount, expected_version?, override? }
 //  - Completed / Cancelled orders cannot be edited.
 //  - PB 2: only the Owner may send total_quote_amount (403 QUOTE_OWNER_ONLY).
 //  - The quote is frozen once an order is Approved (its downpayment was checked against it).
-//  - Optimistic concurrency: if the order changed since it was loaded -> 409 EDIT_CONFLICT.
-// Works offline (synced later, pushing only the changed fields).
-// -> 200 { message, source, order, changed }
+//  - Optimistic concurrency: if the order changed since it was loaded -> 409 EDIT_CONFLICT
+//    { current, can_override }.
+//  - PB 5: can_override is true when this account outranks the order's last editor. Sending the
+//    same body again with override: true replaces their change: the rank is checked again from
+//    the login token on the locked row, the change and its audit_log row (before / after) are
+//    written in one transaction, and "order_overridden" goes to the replaced account's screens.
+//    A closed order and a frozen quote stay refused, override or not.
+// Works offline (synced later, pushing only the changed fields; the sync settles a clash by rank).
+// -> 200 { message, source, order, changed, overridden }
 // ==========================================
 router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAccess, async (req, res) => {
   const { order_id } = req.params;
@@ -945,6 +1111,9 @@ router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAcc
   if (body.total_quote_amount !== undefined) updates.total_quote_amount = v.nonNegativeMoney(body.total_quote_amount, 'total_quote_amount');
   if (body.expected_version !== undefined && body.expected_version !== null && typeof body.expected_version !== 'string') {
     v.errors.push({ field: 'expected_version', message: 'expected_version must be the string returned as "version".' });
+  }
+  if (body.override !== undefined && typeof body.override !== 'boolean') {
+    v.errors.push({ field: 'override', message: 'override must be true or false.' });
   }
   if (Object.keys(updates).length === 0 && !v.failed()) {
     v.errors.push({ field: 'body', message: 'Nothing to change: send a new deadline or quote amount.' });
@@ -958,61 +1127,88 @@ router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAcc
     if (CLOSED_STATUSES.includes(current.production_status)) {
       return res.status(409).json({ error: 'ORDER_CLOSED', message: `This order is ${current.production_status}, so its details can no longer be changed.` });
     }
+    const quoteLocked = {
+      error: 'QUOTE_LOCKED',
+      message: 'The quote cannot be changed after the job order was approved, because the downpayment was based on it.'
+    };
     if (updates.total_quote_amount !== undefined && updates.total_quote_amount !== current.total_quote_amount
         && QUOTE_FROZEN_STATUSES.includes(current.production_status)) {
-      return res.status(409).json({
-        error: 'QUOTE_LOCKED',
-        message: 'The quote cannot be changed after the job order was approved, because the downpayment was based on it.'
-      });
+      return res.status(409).json(quoteLocked);
     }
     const expected = body.expected_version || current.version || null;
     const fields = Object.keys(updates).filter((f) => updates[f] !== current[f]
       && !(f === 'production_deadline' && String(current[f]).slice(0, 10) === String(updates[f]).slice(0, 10)));
-    if (fields.length === 0) return res.status(200).json({ message: 'Nothing changed.', source: 'cloud', order: current, changed: [] });
+    if (fields.length === 0) {
+      return res.status(200).json({ message: 'Nothing changed.', source: 'cloud', order: withDeadlineFlag(current), changed: [], overridden: false });
+    }
+
+    // The lifecycle rules an override must still respect, checked on the locked row
+    const overrideGuard = (locked) => {
+      if (CLOSED_STATUSES.includes(locked.production_status)) {
+        return { status: 409, body: { error: 'ORDER_CLOSED', message: `This order is ${locked.production_status}, so its details can no longer be changed.` } };
+      }
+      if (fields.includes('total_quote_amount') && updates.total_quote_amount !== locked.total_quote_amount
+          && QUOTE_FROZEN_STATUSES.includes(locked.production_status)) {
+        return { status: 409, body: quoteLocked };
+      }
+      return null;
+    };
 
     let conflict = null;
+    let overridden = null;
     const result = await writeCloudFirst(
       current.sync_status === 'pending_insert' ? 'local' : 'cloud',
       async () => {
+        const n = fields.length;
         const { rows, rowCount } = await req.pgPool.query(
-          `UPDATE order_profiles SET ${fields.map((f, i) => `${f} = $${i + 1}`).join(', ')}
-            WHERE order_id = $${fields.length + 1}
-              AND production_status <> ALL($${fields.length + 2}::text[])
-              AND ($${fields.length + 3}::text IS NULL OR ${VERSION_SQL} = $${fields.length + 3}::text)
+          `UPDATE order_profiles SET ${fields.map((f, i) => `${f} = $${i + 1}`).join(', ')},
+                  last_edited_by = $${n + 4}, last_edited_role = $${n + 5}
+            WHERE order_id = $${n + 1}
+              AND production_status <> ALL($${n + 2}::text[])
+              AND ($${n + 3}::text IS NULL OR ${VERSION_SQL} = $${n + 3}::text)
             RETURNING ${selectList('order_profiles', 'pg')}`,
-          [...fields.map((f) => updates[f]), order_id, CLOSED_STATUSES, expected]
+          [...fields.map((f) => updates[f]), order_id, CLOSED_STATUSES, expected, ...editorOf(req)]
         );
         if (rowCount === 0) {
           conflict = (await getRecord(req, 'order_profiles', order_id)).record;
+          // PB 5: the caller confirmed "replace their changes with mine"
+          if (body.override === true && canOverride(req, conflict)) {
+            overridden = await overrideInCloud(req, order_id, Object.fromEntries(fields.map((f) => [f, updates[f]])), overrideGuard);
+            conflict = null;
+            return { source: 'cloud', record: overridden.after };
+          }
           return null;
         }
         return { source: 'cloud', record: serialize('order_profiles', rows[0]) };
       },
       async () => {
         const { changes } = await sqliteRun(req.localDb,
-          `UPDATE order_profiles SET ${fields.map((f) => `${f} = ?`).join(', ')},
-             ${offlineUpdateBookkeeping('order_profiles', fields)}
+          `UPDATE order_profiles SET ${fields.map((f) => `${f} = ?`).join(', ')}, last_edited_by = ?, last_edited_role = ?,
+             ${offlineUpdateBookkeeping('order_profiles', [...fields, ...EDITOR_FIELDS])}
            WHERE order_id = ? AND production_status NOT IN ('Completed', 'Cancelled')`,
-          [...fields.map((f) => updates[f]), order_id]);
+          [...fields.map((f) => updates[f]), ...editorOf(req), order_id]);
         return changes === 0 ? null : { source: 'local', record: await readLocal(req.localDb, 'order_profiles', order_id) };
       }
     );
 
     if (conflict || !result) {
-      return res.status(409).json({
-        error: 'EDIT_CONFLICT',
-        message: 'This order was changed by someone else while you were editing. Reload it and try again.',
-        current: conflict
-      });
+      return res.status(409).json(editConflict(req, conflict,
+        'This order was changed by someone else while you were editing. Reload it and try again.'));
     }
+    if (overridden) announceOverride(req, overridden);
+    else pushOrderChange(req, result.record);
     console.log(`✏️  Order ${order_id}: ${fields.join(', ')} changed by ${req.user.user_id} [${result.source}]`);
     res.status(200).json({
-      message: result.source === 'cloud' ? 'Order details saved.' : 'Order details saved offline. They will sync when the internet is back.',
+      message: overridden ? 'Order details saved. Your changes replaced theirs.'
+        : result.source === 'cloud' ? 'Order details saved.' : 'Order details saved offline. They will sync when the internet is back.',
       source: result.source,
-      order: result.record,
-      changed: fields
+      order: withDeadlineFlag(result.record),
+      changed: fields,
+      overridden: Boolean(overridden)
     });
   } catch (err) {
+    if (err instanceof Rejected) return res.status(err.status).json(err.body);
+    if (err.commitUnknown) return res.status(503).json(COMMIT_UNKNOWN);
     sendDbError(res, err, 'editing order details');
   }
 });
@@ -1083,10 +1279,12 @@ router.post('/:order_id/approve', requireRole(APPROVE_ROLES), requireOrderEditAc
 
       // 2. Optimistic concurrency
       if (order.version !== expected_version) {
+        // An approval is never forced over someone else's change: reload and decide again
         throw new Rejected(409, {
           error: 'EDIT_CONFLICT',
           message: 'This order was changed by someone else. Reload it and approve again.',
-          current: order
+          current: withDeadlineFlag(order),
+          can_override: false
         });
       }
 
@@ -1185,10 +1383,13 @@ router.post('/:order_id/approve', requireRole(APPROVE_ROLES), requireOrderEditAc
       // ---- Approve ----
       const approved = await client.query(
         `UPDATE order_profiles
-            SET production_status = 'Approved', approved_by = $2, approved_at = NOW(), stock_reserved = TRUE
+            SET production_status = 'Approved', approved_by = $2, approved_at = NOW(), stock_reserved = TRUE,
+                last_edited_by = $2, last_edited_role = $3
           WHERE order_id = $1 RETURNING ${selectList('order_profiles', 'pg')}`,
-        [order_id, req.user.user_id]
+        [order_id, req.user.user_id, req.user.role]
       );
+      // PB 14: the approval is a status change too (same transaction)
+      await recordStatusChange(client, req, order_id, order.production_status, 'Approved');
       const fresh = await client.query(
         `SELECT ${selectList('inventory_items', 'pg')} FROM inventory_items
           WHERE inventory_id = ANY($1::text[]) ORDER BY inventory_id`,
@@ -1208,12 +1409,13 @@ router.post('/:order_id/approve', requireRole(APPROVE_ROLES), requireOrderEditAc
     });
 
     if (result.newlyReserved) pushStockChange(req, result.ids, 'order_approved');
+    pushOrderChange(req, result.order);
     console.log(`✅ Order ${order_id} approved by ${req.user.user_id} (Owner)` +
                 (result.newlyReserved ? `; reserved ${result.ids.length} stock item(s)` : '; stock was already reserved'));
     return res.status(200).json({
       message: 'Job order approved.',
       source: 'cloud',
-      order: result.order,
+      order: withDeadlineFlag(result.order),
       reserved: result.reserved,
       newly_reserved: result.newlyReserved,
       inventory: result.inventory

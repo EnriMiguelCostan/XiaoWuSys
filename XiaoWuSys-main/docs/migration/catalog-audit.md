@@ -7,32 +7,32 @@ API (`Backend/routes/inventory.js`): `GET /api/inventory` → `{ source, fetched
 
 Categories: **1. Presentation** (port freely) · **2. Formatting** (must call client-core) · **3. Rule** (must already be an API field; must not exist in `Web/`).
 
-**Result: no category-3 logic lives in `Web/`.** The MVP had ten rule expressions on this screen (two role lists, a duplicate-name rule in two places, a stock check, three number limits, and two money sums). Each was removed or replaced by a server answer. `npm run check-rules` passes. One temporary mapping is recorded in §1.
+**Result: no category-3 logic lives in `Web/`.** The MVP had ten rule expressions on this screen (two role lists, a duplicate-name rule in two places, a stock check, three number limits, and two money sums). Each was removed or replaced by a server answer. `npm run check-rules` passes. The temporary capability mapping and the two missing figures recorded here after M2 were closed in Batch M6 (§1, §2).
 
 ## 1. Permissions
 
 | MVP expression | Category | In `Web/` |
 |---|---|---|
-| `STOCK_EDIT_ROLES = ['Owner', 'Admin', 'Production']`; `canEdit = STOCK_EDIT_ROLES.includes(userRole)` | **3** | **Removed.** `canEditInventory(user)` = `can(user, 'create_order')` in `Web/lib/inventory.ts` |
-| `PURGE_ROLES = ['Owner', 'Admin']`; `canPurge = PURGE_ROLES.includes(userRole)` | **3** | **Removed.** `canPurgeInventory(user)` = `can(user, 'manage_accounts')` |
+| `STOCK_EDIT_ROLES = ['Owner', 'Admin', 'Production']`; `canEdit = STOCK_EDIT_ROLES.includes(userRole)` | **3** | **Removed.** `canEditInventory(user)` = `can(user, 'edit_inventory')` in `Web/lib/inventory.ts` |
+| `PURGE_ROLES = ['Owner', 'Admin']`; `canPurge = PURGE_ROLES.includes(userRole)` | **3** | **Removed.** `canPurgeInventory(user)` = `can(user, 'purge_inventory')` |
 | Buttons hidden by `canEdit` / `canPurge` | 1 | Same, from the two helpers above. Express answers 403 anyway |
 
-**Temporary mapping (agreed in M2, still open).** The backend guards inventory with role lists (`EDIT_ROLES`, `PURGE_ROLES`), not with capabilities of its own. `Web/` therefore borrows two capabilities that cover exactly the same roles today. No role name is compared in `Web/`, but the pairing is a coincidence of the current role table: if `create_order` or `manage_accounts` ever changes, the catalog buttons would follow the wrong capability. The fix is a backend PR adding `edit_inventory` and `purge_inventory`, then changing two lines in `Web/lib/inventory.ts`.
+**Closed in Batch M6.** After M2 the backend guarded inventory with role lists of its own, so `Web/` borrowed `create_order` and `manage_accounts`, which happened to cover the same roles. The backend now has `edit_inventory` (Owner, Admin, Production) and `purge_inventory` (Owner, Admin) in `services/domain/permissions.js`; `routes/inventory.js` guards its routes with `rolesWith(...)` of those two, and `Web/lib/inventory.ts` checks the same two. Login and `GET /api/auth/me` send them in `capabilities`, so nothing is borrowed any more.
 
 ## 2. Stock numbers and money
 
 | MVP expression | Category | In `Web/` |
 |---|---|---|
-| `stockValue(item) = quantity_available * unit_cost` (row column, sort key) | **3** (money maths) | **Removed.** No per-row "Stock value" column and no sort by it. The API has no such field |
+| `stockValue(item) = quantity_available * unit_cost` (row column, sort key) | **3** (money maths) | **Removed** as maths. The "Stock value" column shows `peso(item.stock_value)`, which the server computes per item (`withAvailability()`, Batch M6). Sorting by it compares the server's figures (presentation) |
 | Footer `totals` (`reduce` over on hand, reserved, free, value) | **3** (stock and money maths) | **Removed.** No totals footer |
-| `totalUnits = items.reduce(...)` ("N units on hand" under Total items) | **3** (stock maths) | **Removed.** The card shows `summary.total_items` only |
+| `totalUnits = items.reduce(...)` ("N units on hand" under Total items) | **3** (stock maths) | **Removed** as maths. The card shows `summary.total_units` from the server (Batch M6) under `summary.total_items` |
 | Whole-catalog value | — (new) | `peso(summary.stock_value)`, computed by the server |
 | `item.quantity_available_net`, `item.stock_status`, `summary.*` | 1 (server's answer) | Same fields, displayed as sent |
 | `STATUS_META` colours and labels | 1 | `STOCK_STATUS` + `TONE_CLASSES` / `TONE_EDGE` in `Web/lib/ui-tokens.ts` |
 | `peso(item.unit_cost)` | 2 | Same client-core call |
 | `toLocaleString()` on counts | 1 | Same |
 
-What staff lose compared with the MVP: the per-row stock value, the filtered totals row, and the "units on hand" line. They return when the API sends those figures.
+What staff still lose compared with the MVP: the totals row over the filtered list. The per-row stock value and the "units on hand" line returned in Batch M6, as server figures (`item.stock_value`, `summary.total_units`). Against an older server that does not send them, the column shows "—" and the line is left out.
 
 ## 3. Add and edit item
 
@@ -104,5 +104,5 @@ Successes and list-level failures (delete, export, restore, purge, empty) end in
 
 ## 9. Open notes
 
-- The empty-catalog text for people who cannot edit reads "Items added by an Owner, Admin or Production user will appear here." It is wording only (no comparison, and the rules guard passes), but it names roles and would go stale if the roles change. Reword it when `edit_inventory` lands.
+- The empty-catalog text for people who cannot edit named three roles. It was reworded in Batch M6 ("Items added by the people who manage the catalog will appear here."), so it cannot go stale when roles change.
 - Not checked in a browser for this audit: see `docs/migration/m5-parity-signoff.md`.

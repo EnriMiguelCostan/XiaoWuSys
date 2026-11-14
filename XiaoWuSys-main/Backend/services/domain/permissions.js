@@ -23,8 +23,17 @@ const CAPABILITIES = {
   void_order: OWNER_ONLY,         // cancel an existing order (releases its stock)
   approve_order: OWNER_ONLY,
   view_finance: MANAGER_ROLES,
-  manage_accounts: MANAGER_ROLES
+  manage_accounts: MANAGER_ROLES,
+  edit_inventory: WRITE_ROLES,    // add, edit, stock changes, move to / restore from the Recycle Bin
+  purge_inventory: MANAGER_ROLES  // permanent delete / empty the Recycle Bin
 };
+
+// Who outranks whom (PB 5): a higher rank may take over an edit lock and replace a lower
+// rank's conflicting edit. An unknown or missing role ranks below everyone.
+const ROLE_RANK = { Owner: 4, Admin: 3, Production: 2, Staff: 1 };
+const rankOf = (role) => ROLE_RANK[role] || 0;
+// May "role" replace a conflicting change last made by "lastEditedRole"? Strictly higher only.
+const outranks = (role, lastEditedRole) => rankOf(role) > rankOf(lastEditedRole);
 
 const rolesWith = (capability) => {
   const roles = CAPABILITIES[capability];
@@ -36,4 +45,6 @@ const can = (role, capability) => rolesWith(capability).includes(role);
 
 const capabilitiesFor = (role) => Object.keys(CAPABILITIES).filter((c) => CAPABILITIES[c].includes(role)).sort();
 
-module.exports = { CAPABILITIES, ALL_ROLES, WRITE_ROLES, MANAGER_ROLES, rolesWith, can, capabilitiesFor };
+module.exports = {
+  CAPABILITIES, ALL_ROLES, WRITE_ROLES, MANAGER_ROLES, ROLE_RANK, rankOf, outranks, rolesWith, can, capabilitiesFor
+};

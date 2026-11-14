@@ -11,7 +11,7 @@ import type { LucideIcon } from 'lucide-react';
 import { TriangleAlert } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { orderNumber } from '@xiaowu/client-core/orders';
-import { OrderStatusBadge, PaymentStatusBadge } from '@/components/orders/status-badges';
+import { DeadlineBadge, OrderStatusBadge, PaymentStatusBadge } from '@/components/orders/status-badges';
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import type { DashboardOrder, RestockItem } from '@/lib/reports';
@@ -209,6 +209,7 @@ export function OrdersTableCard({
                   {!overpaid && (
                     <TableCell className="hidden pr-4 text-muted-foreground md:table-cell">
                       <Cell value={formatDateTime(order.production_deadline, { withTime: false })} />
+                      <DeadlineBadge flag={order.deadline_flag} className="mt-1" />
                     </TableCell>
                   )}
                 </TableRow>

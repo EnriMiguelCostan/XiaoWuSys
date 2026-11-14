@@ -6,11 +6,13 @@
 // the same thing. This file only adds tone and icon.
 import type { LucideIcon } from 'lucide-react';
 import {
+  AlarmClock,
   CircleCheck,
   CircleDashed,
   CircleDot,
   CircleX,
   Clock,
+  Flame,
   HardDrive,
   Loader,
   Printer,
@@ -88,9 +90,18 @@ export const ORDER_STATUS: Record<string, StateLook> = {
   Pending: { tone: 'info', icon: Clock },
   Approved: { tone: 'info', icon: ShieldCheck },
   Printing: { tone: 'warning', icon: Printer },
+  Pressing: { tone: 'warning', icon: Flame },
   Completed: { tone: 'success', icon: CircleCheck },
   Delayed: { tone: 'warning', icon: TriangleAlert },
   Cancelled: { tone: 'danger', icon: CircleX },
+};
+
+// deadline_flag from the server (PB 16; orderLifecycle.deadlineFlag decides it in shop time,
+// never derive it from the date here). 'normal' and closed orders (null) show no badge.
+export const DEADLINE_FLAG: Record<string, StateLook & { label: string }> = {
+  overdue: { tone: 'danger', icon: TriangleAlert, label: 'Overdue' },
+  urgent_24h: { tone: 'danger', icon: AlarmClock, label: 'Due today or tomorrow' },
+  warning_72h: { tone: 'warning', icon: Clock, label: 'Due in 2 to 3 days' },
 };
 
 // SYNC_STATUS is added with the screen that shows it.

@@ -81,7 +81,7 @@ Code status was checked against the UAC on 2026-10-29.
 | 2 | 2 | Role-based authorization | Done (Batch 1) | — |
 | 3 | 3 | Local data cache (offline) | Done (Batch 2) | — |
 | 4 | 4 | Asynchronous cloud sync | Done (Batch 2) | Conflict resolution screens are Batch 3 (3.6) |
-| 5 | 5 | Owner overrides staff edits | Partly | **Batch 3:** Owner wins, staff notified, offline conflicts resolved by rank |
+| 5 | 5 | Owner overrides staff edits | Done (Batch 3 / M6) | — |
 | 6 | 6 | Create order profile | Done (Batch 1) | — |
 | 7 | 7 | Encode order details | Done | — |
 | 8 | 8 | Link design file | Done | — |
@@ -90,8 +90,8 @@ Code status was checked against the UAC on 2026-10-29.
 | 11 | 10 | Generate official quote | Not started | Needs price tiers from client |
 | 12 | 10 | Apply discount / final price | Not started | Needs Owner-only rules (Batch 1) and `audit_log` (Batch 3) |
 | 13 | 11 | Approve job order | Done | Mark Completed in the sheet |
-| 14 | 11 | Update production status | Partly | **Batch 3:** "Pressing", status timestamps, live push |
-| 16 | 11 | Flag expiring deadline | Not started | Sprint 11 carry-over |
+| 14 | 11 | Update production status | Done (Batch 3 / M6) | Consumable deduction on status change is PB 15 |
+| 16 | 11 | Flag expiring deadline | Done (Batch 3 / M6) | — |
 | 15 | **12** | Deduct consumables | Not started | **§5 of this file** |
 | 17 | **12** | Notify low stock | Done (Batch 1) | Consumables join the warning with PB 15 |
 | 18 | 13 | Record material loss | Partly | Misprint form with reason codes (§7) |
@@ -154,9 +154,22 @@ Payments and the connection status both touch the offline/sync path, so they are
 | 2.2 | 4 | **Sync on reconnect + "Sync now"** | When cloud health flips from unreachable to reachable, the server runs `syncAndNotify()` once. Single-flight already prevents overlap. | A "Sync now" button calls `POST /api/sync` and shows the result: done, conflicts, or cloud unreachable. A badge shows the number of changes waiting. |
 | 2.3 | 21 | **Payment rules** | Cloud path:<br>• `withPgTransaction`, locking the order `FOR UPDATE`;<br>• requires a quote > 0;<br>• amount ≤ quote − paid in centavos, otherwise 409 `PAYMENT_EXCEEDS_BALANCE`;<br>• SQL guard and `rowCount` check.<br><br>Every payment also gets:<br>• **`received_by`** = the JWT user;<br>• **`receipt_no`** from a Neon sequence, assigned on sync for offline payments.<br><br>Derived **`payment_status`**: `Unpaid`, `Partial`, `Fully Paid` or `Overpaid`, computed in `services/domain/payments.js`.<br><br>Response warning (non-blocking): "Not enough downpayment to start production" when paid is below 50%.<br><br>**Offline:** capped against the local view. Sync never drops a payment. If branches together overpay, the order shows `Overpaid` for the Owner to review. | A Fully Paid / Partial / Unpaid / Overpaid label, a receiver column, and a printable **payment acknowledgement receipt**. This is not a BIR Official Receipt; SIA 1 says the system does not issue ORs. |
 
-### Batch 3: Live production floor and Owner override (migration `009`)
+### Batch 3: Live production floor and Owner override (migrations `009` and `010`) — BUILT (Batch M6, part 1)
 
 This is the highest-risk batch. It depends on Batch 1 (domain layer and permissions) and Batch 2 (connection state).
+
+**As built (differences from the table below):**
+- Two migrations, as decided in `nextjs-migration-steering.md` §5: `009_conflict_override_and_audit.sql` (PB 5: `order_profiles.last_edited_by` / `last_edited_role`, append-only `audit_log`) and `010_pressing_status_and_history.sql` (PB 14: `Pressing` in the status CHECK, append-only `order_status_history`, `orders_changed` NOTIFY). `forbid_audit_change()` now names the table it protects, so the three append-only tables share it.
+- **Pressing is optional** (open question 6 answered): `Printing → Pressing → Completed` and `Printing → Completed` are both allowed.
+- Every write to an order row records the editor from the login token: details, design link, status changes and approvals. Rank rules are `outranks()` in `services/domain/permissions.js`; an unknown editor ranks below everyone, and equal ranks never win automatically.
+- `can_override` is sent with every `409 EDIT_CONFLICT` of the details and design routes. Status changes and approvals are never forced (`can_override: false`). An override still respects the lifecycle: a closed order stays closed and the quote stays frozen after approval.
+- **Offline conflicts** (`services/sync.js`): settled by rank for `order_profiles` only. A higher-ranked offline edit that would break a lifecycle rule (order closed in the cloud, quote frozen) is dropped and recorded instead of applied. Both outcomes write `audit_log` in the cloud; the sync summary lists them in `resolved` and the server sends `order_overridden` to the account whose change was not kept.
+- `POST /api/sync/conflicts/:table/:id/resolve` needs the cloud (503 otherwise). "Keep local" is refused for stock counts (`quantity_available`, `quantity_reserved`): only the cloud count can be kept, then the stock is corrected by hand. `GET /api/sync/conflicts` now describes each conflict in plain words (`title`, `changed`, `keep_local_blocked_reason`).
+- `order_updated` goes to every connected screen (no `orders` room: every role may view orders). It comes from the cloud NOTIFY (heard by the LISTEN client in `inventoryEvents.js`) and from this server's own writes after COMMIT; `services/orderEvents.js` drops the duplicate by version.
+- `order_status_history` is written in the cloud only and copied down for offline reading (`pullOnly` in `SYNC_TABLES`, listed in `REFRESH_TABLES`).
+- **PB 16** shipped with this batch: `deadline_flag` (`overdue`, `urgent_24h`, `warning_72h`, `normal`, `null` for closed orders) on every order the API returns and on the dashboard lists, counted in whole shop-time calendar days; `GET /api/orders?sort=priority` lists the most urgent first.
+- The M2 catalog audit gaps were closed in the same PR: `edit_inventory` / `purge_inventory` capabilities, `stock_value` per item and `summary.total_units`.
+- Tests: `tests/batch3-rules.test.js` (offline), `tests/conflict-sync.test.js` and `tests/override-race.test.js` (scripted cloud; the second covers an Owner edit landing between the conflict check and the override's row lock), `tests/batch3.pg.test.js` (real PostgreSQL).
 
 | # | PB | Change | Server | Screens |
 |---|---|---|---|---|
@@ -323,7 +336,7 @@ The earlier draft's designs remain valid. They now belong to these backlog items
 3. ~~Batch 1.1: logout scope?~~ **This device only.**
 4. ~~Batch 1.6: add CI now?~~ **Yes.**
 5. ~~**Batch 2.3:** Is "payment acknowledgement receipt" (not a BIR OR) acceptable? What should happen when two offline branches together overpay?~~ **D1:** yes, a printable "Payment Acknowledgement" that says it is not an Official Receipt. **D2:** every payment is accepted when it syncs; the order shows "Overpaid" and the Owner refunds by hand (voids/refunds are PB 23).
-6. **Batch 3.1:** Can orders skip Pressing (e.g. mugs), going Printing → Completed?
+6. ~~**Batch 3.1:** Can orders skip Pressing (e.g. mugs), going Printing → Completed?~~ **Yes** (answered 2026-11-12): Pressing is optional.
 7. **PB 15:** Consumable list, usage rates, and the "never block a status change" rule.
 8. **PB 18:** Immediate deduction (UAC), or a report → verify flow?
 9. **Branches:** 2 (SIA 1) or 3 (SoftEng proposal, UAT)? This affects UAT device count and deployment.

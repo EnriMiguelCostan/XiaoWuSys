@@ -52,9 +52,17 @@ const startPgTestServer = async (pool) => {
   const dbPath = path.join(dir, 'cache.db');
   const localDb = await prepareDatabase(dbPath);
   const since = Date.now();
+  // Records the live order events a real server would send over Socket.io (PB 14 / PB 5)
+  const orderEvents = {
+    updated: [],
+    overridden: [],
+    notifyUpdated: (order) => { orderEvents.updated.push(order); },
+    notifyOverridden: (notice) => { orderEvents.overridden.push(notice); return 1; }
+  };
   const app = createApp({
     pgPool: pool, localDb, localDbPath: dbPath, orderLocks: createOrderLockManager(),
     inventoryEvents: { notifyChanged: () => {} },
+    orderEvents,
     syncAndNotify: async () => ({ synced: 0, conflicts: [], failed: 0, requeued: 0, aborted: false, unresolved_conflicts: 0 }),
     listConflicts,
     cloudHealth: { state: () => 'reachable', since: () => since }
@@ -88,7 +96,7 @@ const startPgTestServer = async (pool) => {
     fs.rmSync(dir, { recursive: true, force: true });
   };
 
-  return { baseUrl, request, tokenFor, close, localDb };
+  return { baseUrl, request, tokenFor, close, localDb, orderEvents };
 };
 
 module.exports = { pgTarget, resetDatabase, startPgTestServer, migrationFiles, readMigration };

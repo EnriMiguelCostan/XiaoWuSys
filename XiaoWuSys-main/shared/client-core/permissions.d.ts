@@ -5,6 +5,7 @@ export type Capability =
   | 'view_orders' | 'create_order' | 'edit_order' | 'change_status' | 'record_payment'
   | 'set_quote' | 'apply_discount' | 'void_order' | 'approve_order'
   | 'view_finance' | 'manage_accounts'
+  | 'edit_inventory' | 'purge_inventory'
   | (string & {});
 
 export interface SessionUser {

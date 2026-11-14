@@ -65,6 +65,8 @@ export function DashboardScreen() {
 
   // PB 17: the low-stock banner and restock list follow stock changes live
   useSocketEvent('inventory_updated', reload);
+  // PB 14: an order changed on any branch (status, deadline, new order): the lists follow, no polling
+  useSocketEvent('order_updated', reload);
   // No pushes while the socket is down: re-read on a timer until it is back (never while live)
   useFallbackPolling(reload, DASHBOARD_POLL_MS);
 

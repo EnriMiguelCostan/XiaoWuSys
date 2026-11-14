@@ -4,7 +4,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test --test-concurrency=1 \"tests/**/*.test.js\"",
+    "test": "node --test --test-concurrency=1 --require ./tests/helpers/logs-to-stderr.js \"tests/**/*.test.js\"",
     "create-admin": "node scripts/createAdmin.js",
     "migrate": "node scripts/migrate.js",
     "seed-inventory": "node scripts/seedInventory.js",

@@ -3,7 +3,9 @@
 //
 //   Pending  -> Cancelled             (Pending -> Approved only through the Owner's Approve)
 //   Approved -> Printing | Cancelled
-//   Printing -> Completed | Cancelled
+//   Printing -> Pressing | Completed | Cancelled   (Pressing is optional: apparel is pressed,
+//                                                   tarpaulins and stickers go straight to Completed)
+//   Pressing -> Completed | Cancelled
 //   Delayed  -> Pending (reserves stock) | Cancelled
 //   Completed / Cancelled are final.
 //
@@ -12,20 +14,22 @@
 // ==========================================
 const { can } = require('./permissions');
 const { paymentSummary, paymentBlockedReason } = require('./payments');
+const { localDateTime } = require('../../utils/validation');
 
 const STATUS_TRANSITIONS = {
   Pending: ['Cancelled'],
   Approved: ['Printing', 'Cancelled'],
-  Printing: ['Completed', 'Cancelled'],
+  Printing: ['Pressing', 'Completed', 'Cancelled'],
+  Pressing: ['Completed', 'Cancelled'],
   Delayed: ['Pending', 'Cancelled'],
   Completed: [],
   Cancelled: []
 };
 
 const CLOSED_STATUSES = ['Completed', 'Cancelled'];
-const EDITABLE_STATUSES = ['Pending', 'Approved', 'Printing', 'Delayed'];
+const EDITABLE_STATUSES = ['Pending', 'Approved', 'Printing', 'Pressing', 'Delayed'];
 // The quote is frozen from approval on: the 50% downpayment was checked against it
-const QUOTE_FROZEN_STATUSES = ['Approved', 'Printing', 'Completed', 'Cancelled'];
+const QUOTE_FROZEN_STATUSES = ['Approved', 'Printing', 'Pressing', 'Completed', 'Cancelled'];
 const QUOTE_EDITABLE_STATUSES = EDITABLE_STATUSES.filter((s) => !QUOTE_FROZEN_STATUSES.includes(s));
 const APPROVABLE_STATUSES = ['Pending', 'Delayed'];
 
@@ -60,7 +64,48 @@ const allowedActions = (order, role, summary = null) => {
   };
 };
 
+// ---------- PB 16: how close an open order is to its deadline ----------
+// Counted in whole calendar days on the shop's wall clock (Asia/Manila), because deadlines are
+// dates staff read off a calendar:
+//   overdue      the deadline day has passed
+//   urgent_24h   due today or tomorrow
+//   warning_72h  due in 2 or 3 days
+//   normal       later than that
+//   null         Completed / Cancelled orders (nothing left to chase)
+const DEADLINE_FLAGS = ['overdue', 'urgent_24h', 'warning_72h', 'normal'];
+const URGENT_DAYS = 1;
+const WARNING_DAYS = 3;
+
+const addDays = (ymd, days) => {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+
+// The shop-time dates the flags are measured against -> { today, urgent_until, warning_until } ('YYYY-MM-DD')
+const deadlineWindows = (now = new Date()) => {
+  const today = localDateTime(now).slice(0, 10);
+  return { today, urgent_until: addDays(today, URGENT_DAYS), warning_until: addDays(today, WARNING_DAYS) };
+};
+
+const deadlineFlag = (order, now = new Date()) => {
+  if (!order || !order.production_deadline || CLOSED_STATUSES.includes(order.production_status)) return null;
+  const due = String(order.production_deadline).slice(0, 10);
+  const { today, urgent_until, warning_until } = deadlineWindows(now);
+  if (due < today) return 'overdue';
+  if (due <= urgent_until) return 'urgent_24h';
+  if (due <= warning_until) return 'warning_72h';
+  return 'normal';
+};
+
+// An order as the screens get it: the stored fields plus the server's deadline decision
+const withDeadlineFlag = (order, now = new Date()) => (order ? { ...order, deadline_flag: deadlineFlag(order, now) } : order);
+
 module.exports = {
+  DEADLINE_FLAGS,
+  deadlineWindows,
+  deadlineFlag,
+  withDeadlineFlag,
   STATUS_TRANSITIONS,
   CLOSED_STATUSES,
   EDITABLE_STATUSES,

@@ -7,15 +7,30 @@
 // "allowed_actions" (approve, statuses, edit_*, record_payment, max_payment, …), so this screen
 // keeps no copy of the role or status rules. Cancelling is a void: the server only lists it for
 // accounts with void_order.
-import { useCallback, useEffect, useState } from 'react';
-import { CircleCheck, CircleX, Copy, Printer, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-react';
+//
+// PB 5 (edit locks): while one of this sheet's edit forms is open, the tab holds the order's
+// edit lock on the server (useOrderEditLock). Someone else's lock is shown as a banner; the
+// server decides who gets, keeps or loses a lock, and this sheet shows the outcome.
+// PB 14: the order reloads when the server says it changed ("order_updated"), and the status
+// timeline shows what the server recorded.
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { CircleCheck, CircleX, Copy, Flame, Lock, Printer, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { orderNumber, shortfallLines } from '@xiaowu/client-core/orders';
 import { orderActions } from '@xiaowu/client-core/permissions';
 import { useConnection } from '@/components/connection/connection-provider';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
-import { approvalNotes, ApprovalPanel, DesignLink, DetailsEditor, MaterialsSection, OrderInfo } from '@/components/orders/order-sections';
+import {
+  approvalNotes,
+  ApprovalPanel,
+  DesignLink,
+  DetailsEditor,
+  MaterialsSection,
+  OrderInfo,
+  StatusTimeline,
+} from '@/components/orders/order-sections';
+import { useOrderLocks } from '@/components/providers/order-locks-provider';
 import { PaymentsSection } from '@/components/orders/payments-section';
 import { ShortageTable } from '@/components/orders/shortage-table';
 import { OrderStatusBadge } from '@/components/orders/status-badges';
@@ -32,9 +47,10 @@ import { Separator } from '@/components/ui/separator';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useApi } from '@/hooks/use-api';
+import { useOrderEditLock } from '@/hooks/use-order-edit-lock';
 import { useSocketEvent } from '@/hooks/use-socket-event';
 import { errorMessage } from '@/lib/api';
-import { AWAITING_APPROVAL, type Customer, type OrderDetail, type Payment, type Shortage } from '@/lib/orders';
+import { AWAITING_APPROVAL, type Customer, type OrderDetail, type OrderUpdated, type Payment, type Shortage } from '@/lib/orders';
 import { copyText, messengerSummary, printJobOrder, printReceipt } from '@/lib/print';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
@@ -42,6 +58,7 @@ import { cn } from '@/lib/utils';
 // Label and icon per status button. WHICH buttons appear: allowed_actions.statuses.
 const STATUS_ACTION: Record<string, { label: string; icon: typeof Printer; danger?: boolean }> = {
   Printing: { label: 'Start printing', icon: Printer },
+  Pressing: { label: 'Start pressing', icon: Flame },
   Completed: { label: 'Mark completed', icon: CircleCheck },
   Pending: { label: 'Resume (reserve stock)', icon: RotateCcw },
   Cancelled: { label: 'Cancel order', icon: CircleX, danger: true },
@@ -84,9 +101,59 @@ export function OrderDetailSheet({
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [confirmApprove, setConfirmApprove] = useState(false);
   const [shortage, setShortage] = useState<{ title: string; message: string; shortages: Shortage[] } | null>(null);
+  // PB 5: which edit forms are open (the lock is held while any is), and a counter that
+  // closes them all when the lock is refused or taken over
+  const [openForms, setOpenForms] = useState<Record<string, boolean>>({});
+  const [formsEpoch, setFormsEpoch] = useState(0);
+  const reloadAfterEditing = useRef(false);
+  const { lockedByOther } = useOrderLocks();
 
   const requestKey = `${orderId}|${tick}|${syncGeneration}`;
   const reloadDetail = useCallback(() => setTick((t) => t + 1), []);
+
+  const editing = Object.values(openForms).some(Boolean);
+  const reportDetails = useCallback((open: boolean) => setOpenForms((f) => ({ ...f, details: open })), []);
+  const reportDesign = useCallback((open: boolean) => setOpenForms((f) => ({ ...f, design: open })), []);
+  const reportMaterials = useCallback((open: boolean) => setOpenForms((f) => ({ ...f, materials: open })), []);
+  const closeForms = useCallback(() => {
+    setFormsEpoch((n) => n + 1);
+    setOpenForms({});
+  }, []);
+
+  // The server refused the lock: someone of the same or a higher role is editing
+  useOrderEditLock(orderId, editing, (heldByRole) => {
+    closeForms();
+    setResult({
+      type: 'warning',
+      title: 'Order is being edited',
+      message: `${heldByRole ? `A ${heldByRole} user` : 'Someone else'} is editing this order right now. Try again when they finish.`,
+    });
+  });
+
+  // The server handed this order's lock to someone with a higher role
+  useSocketEvent<{ orderId?: string; by?: { role?: string } }>('order_lock_revoked', (payload) => {
+    if (!orderId || payload?.orderId !== orderId) return;
+    closeForms();
+    setResult({
+      type: 'warning',
+      title: 'Someone took over this order',
+      message: `${payload.by?.role ? `The ${payload.by.role}` : 'Someone with a higher role'} took over this order. Your unsaved changes were not saved.`,
+    });
+    reloadDetail();
+  });
+
+  // PB 14: this order changed somewhere (any branch). Never reload under an open form: the
+  // typed values would be lost. The save then meets the server's version check instead.
+  useSocketEvent<OrderUpdated>('order_updated', (payload) => {
+    if (!orderId || payload?.order_id !== orderId) return;
+    if (editing) reloadAfterEditing.current = true;
+    else reloadDetail();
+  });
+  useEffect(() => {
+    if (editing || !reloadAfterEditing.current) return;
+    reloadAfterEditing.current = false;
+    reloadDetail();
+  }, [editing, reloadDetail]);
 
   useEffect(() => {
     if (!orderId) return undefined;
@@ -119,6 +186,7 @@ export function OrderDetailSheet({
   const approval = detail && awaitingApproval ? approvalNotes(detail) : null;
   const stockShort = Boolean(detail?.stock_check && !detail.stock_check.sufficient);
   const footerActions = order ? actions.statuses.map(statusAction) : [];
+  const otherLock = lockedByOther(orderId);
 
   const sectionResult = (r: ResultMessage, reload: boolean) => {
     setResult(r);
@@ -254,7 +322,14 @@ export function OrderDetailSheet({
 
   return (
     <>
-      <Sheet open={open} onOpenChange={(next) => !next && !busy && onClose()}>
+      <Sheet
+        open={open}
+        onOpenChange={(next) => {
+          if (next || busy) return;
+          closeForms(); // gives the edit lock back
+          onClose();
+        }}
+      >
         <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-2xl">
           <SheetHeader className="border-b pr-12">
             <SheetTitle className="flex flex-wrap items-center gap-2">
@@ -293,15 +368,37 @@ export function OrderDetailSheet({
 
             {detail && order && (
               <>
+                {otherLock && (
+                  <p role="status" className={cn('flex items-start gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.warning.banner)}>
+                    <Lock className="mt-0.5 size-4 shrink-0" aria-hidden />
+                    <span className="wrap-anywhere">
+                      A {otherLock.role} user is editing this order right now. You can look, but your changes may be refused until they finish.
+                    </span>
+                  </p>
+                )}
                 <OrderInfo detail={detail} customer={customer} />
                 <div className="flex flex-col gap-3">
-                  <DetailsEditor key={`details-${order.version}`} detail={detail} actions={actions} onResult={sectionResult} />
-                  <DesignLink key={`design-${order.version}`} detail={detail} actions={actions} onResult={sectionResult} />
+                  <DetailsEditor
+                    key={`details-${order.version}-${formsEpoch}`}
+                    detail={detail}
+                    actions={actions}
+                    onResult={sectionResult}
+                    onEditing={reportDetails}
+                  />
+                  <DesignLink
+                    key={`design-${order.version}-${formsEpoch}`}
+                    detail={detail}
+                    actions={actions}
+                    onResult={sectionResult}
+                    onEditing={reportDesign}
+                  />
                 </div>
                 <Separator />
-                <MaterialsSection detail={detail} actions={actions} onResult={sectionResult} />
+                <MaterialsSection key={`materials-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportMaterials} />
                 <Separator />
                 <PaymentsSection detail={detail} actions={actions} onPrintReceipt={printPayment} onResult={sectionResult} />
+                <Separator />
+                <StatusTimeline detail={detail} />
                 {awaitingApproval && <ApprovalPanel detail={detail} canApprove={actions.approve} />}
                 {order.sync_status !== 'synced' && (
                   <p className="text-sm text-muted-foreground">This order was saved offline. Status changes are available once it syncs.</p>

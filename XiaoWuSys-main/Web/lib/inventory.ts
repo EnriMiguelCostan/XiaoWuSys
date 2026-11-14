@@ -16,6 +16,8 @@ export interface InventoryItem {
   quantity_available_net: number;
   minimum_threshold: number;
   unit_cost: number;
+  /** on hand x unit cost, computed by the server (absent on an older server) */
+  stock_value?: number;
   stock_status: StockStatus | string;
   sync_status: string;
   version?: number | null;
@@ -31,6 +33,8 @@ export interface InventorySummary {
   recycle_bin: number;
   /** whole catalog, computed by the server */
   stock_value: number;
+  /** units on hand across the active catalog, computed by the server (absent on an older server) */
+  total_units?: number;
 }
 
 /** GET /api/inventory and the "inventory_updated" socket event */
@@ -55,16 +59,14 @@ export interface RecycleBinPage {
 // ---------------------------------------------------------------------------------------------
 // Who may change the catalog
 //
-// TEMPORARY (agreed for M2): the backend guards inventory with role lists (EDIT_ROLES and
-// PURGE_ROLES in Backend/routes/inventory.js), not capabilities, so there is nothing named for
-// inventory to check. These two existing capabilities currently cover exactly the same roles:
-//   create_order    = Owner, Admin, Production = EDIT_ROLES  (add, edit, stock, bin, restore)
-//   manage_accounts = Owner, Admin             = PURGE_ROLES (delete forever, empty bin)
-// When the backend adds edit_inventory / purge_inventory, change these two lines only.
+// The catalog has its own capabilities (Batch M6; Backend/services/domain/permissions.js), the
+// same ones Backend/routes/inventory.js guards its routes with:
+//   edit_inventory   add, edit, stock changes, move to / restore from the Recycle Bin
+//   purge_inventory  delete forever, empty the Recycle Bin
 // Hiding is cosmetic either way: Express answers 403 to anyone else.
 // ---------------------------------------------------------------------------------------------
-const INVENTORY_EDIT: Capability = 'create_order';
-const INVENTORY_PURGE: Capability = 'manage_accounts';
+const INVENTORY_EDIT: Capability = 'edit_inventory';
+const INVENTORY_PURGE: Capability = 'purge_inventory';
 
 export const canEditInventory = (user: SessionUser | null) => can(user, INVENTORY_EDIT);
 export const canPurgeInventory = (user: SessionUser | null) => can(user, INVENTORY_PURGE);

@@ -13,11 +13,15 @@ const EXTRA_COLUMNS = [
   'users.is_active', 'users.tokens_valid_after',
   ...['audit_id', 'inventory_id', 'action', 'item_name', 'details', 'performed_by', 'performed_role', 'created_at', 'last_modified']
     .map((c) => `inventory_audit_log.${c}`),
-  ...['session_id', 'user_id', 'expires_at', 'revoked_at', 'last_modified'].map((c) => `revoked_sessions.${c}`) // migration 007
+  ...['session_id', 'user_id', 'expires_at', 'revoked_at', 'last_modified'].map((c) => `revoked_sessions.${c}`), // migration 007
+  ...['audit_id', 'entity', 'entity_id', 'action', 'details', 'performed_by', 'performed_role', 'created_at', 'last_modified']
+    .map((c) => `audit_log.${c}`) // migration 009
 ];
 const EXPECTED_TRIGGERS = [
   'trg_order_profiles_last_modified', 'trg_inventory_items_notify', 'trg_order_profiles_assign_tracking_no',
-  'trg_payments_assign_receipt_no' // migration 008
+  'trg_payments_assign_receipt_no', // migration 008
+  'trg_audit_log_append_only', // migration 009
+  'trg_order_status_history_append_only', 'trg_order_profiles_notify' // migration 010
 ];
 
 const checkCloudSchema = async (pgPool) => {
