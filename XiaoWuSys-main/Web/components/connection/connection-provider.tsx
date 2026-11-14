@@ -54,6 +54,8 @@ interface ConnectionContextValue {
   /** Goes up after a sync that may have changed data (200 / 409): screens reload on change. */
   syncGeneration: number;
   recheck: () => void;
+  /** A sync conflict was settled (PB 5): refresh the counts and let the screens reload. */
+  conflictSettled: () => void;
 }
 
 const ConnectionContext = createContext<ConnectionContextValue | null>(null);
@@ -129,6 +131,11 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
 
   const dismissSyncResult = useCallback(() => setSyncResult(null), []);
 
+  const conflictSettled = useCallback(() => {
+    recheck();
+    setSyncGeneration((g) => g + 1);
+  }, [recheck]);
+
   // A live socket proves the shop server is reachable, whatever the last request said.
   const reachable = liveStatus === 'live' ? true : serverReachable;
   const state = deriveConnectionState({ serverReachable: reachable, cloud: syncStatus?.cloud });
@@ -145,8 +152,9 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       dismissSyncResult,
       syncGeneration,
       recheck,
+      conflictSettled,
     }),
-    [state, syncStatus, browserOnline, syncBusy, syncNow, syncResult, dismissSyncResult, syncGeneration, recheck]
+    [state, syncStatus, browserOnline, syncBusy, syncNow, syncResult, dismissSyncResult, syncGeneration, recheck, conflictSettled]
   );
 
   return <ConnectionContext.Provider value={value}>{children}</ConnectionContext.Provider>;

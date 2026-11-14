@@ -10,6 +10,7 @@ const { createApp, parseOrigins } = require('./app');
 const { createOrderLockManager } = require('./services/orderLocks');
 const { ensureLocalSyncColumns } = require('./utils/localSync');
 const { createInventoryEvents } = require('./services/inventoryEvents');
+const { createOrderEvents } = require('./services/orderEvents');
 const { checkCloudSchema } = require('./services/schemaCheck');
 const { createLocalSchema, createLocalIndexes, upgradeLocalOrderStatusCheck } = require('./services/localSchema');
 const { applyPendingMigrations } = require('./services/migrations');
@@ -107,13 +108,17 @@ const io = new Server(server, {
 // "Owner Prevails" order edit locks (audit H2), checked by the order write routes
 const orderLocks = createOrderLockManager();
 
-// Real-time stock push: Postgres NOTIFY (all branches) + this server's own writes
+// Live order updates (PB 14) and "your change was replaced" notices (PB 5)
+const orderEvents = createOrderEvents({ io });
+
+// Real-time stock and order push: Postgres NOTIFY (all branches) + this server's own writes
 const inventoryEvents = createInventoryEvents({
   io,
   pgPool,
   localDb,
   databaseUrl: cloudDisabled ? null : process.env.DATABASE_URL,
-  listenUrl: cloudDisabled ? null : process.env.PG_LISTEN_URL
+  listenUrl: cloudDisabled ? null : process.env.PG_LISTEN_URL,
+  onOrderChange: (order) => orderEvents.notifyUpdated(order)
 });
 
 // Socket connections need a valid, not signed-out login token
@@ -201,6 +206,15 @@ const syncAndNotify = async () => {
   try {
     const summary = await running;
     if (summary && summary.inventory_changed && !summary.joined) inventoryEvents.notifyChanged([], 'sync');
+    // PB 5: order conflicts settled by rank. Tell the account whose change lost, and refresh the screens.
+    if (summary && !summary.joined) {
+      for (const r of summary.resolved || []) {
+        orderEvents.notifyUpdated({ order_id: r.id, tracking_no: r.tracking_no });
+        if (r.notify_user) {
+          orderEvents.notifyOverridden({ user_id: r.notify_user, order_id: r.id, tracking_no: r.tracking_no, overridden_by_role: r.by_role });
+        }
+      }
+    }
     return summary;
   } finally {
     emitSyncStatus();
@@ -224,8 +238,8 @@ io.on('connection', (socket) => {
 
 // ================= HTTP API =================
 app = createApp({
-  pgPool, localDb, localDbPath: sqliteDbPath, orderLocks, inventoryEvents, syncAndNotify, listConflicts,
-  cloudHealth, onLocalWrite, corsOrigins
+  pgPool, localDb, localDbPath: sqliteDbPath, orderLocks, inventoryEvents, orderEvents, syncAndNotify, listConflicts,
+  cloudHealth, onLocalWrite, onSyncQueueChange: () => { emitSyncStatus(); }, corsOrigins
 });
 
 // Applies pending migrations/*.sql to Neon (AUTO_MIGRATE=false to manage them by hand)

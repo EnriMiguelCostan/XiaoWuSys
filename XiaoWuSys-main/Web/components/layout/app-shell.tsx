@@ -10,6 +10,7 @@ import { Loader } from 'lucide-react';
 import { ConnectionBar } from '@/components/connection/connection-bar';
 import { ConnectionProvider } from '@/components/connection/connection-provider';
 import { AppHeader } from '@/components/layout/app-header';
+import { OrderLocksProvider } from '@/components/providers/order-locks-provider';
 import { SocketProvider } from '@/components/providers/socket-provider';
 import { useSession } from '@/hooks/use-session';
 
@@ -58,6 +59,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <SocketProvider>
       <ConnectionProvider>
+        {/* PB 5: who is editing which order, and "your changes were replaced" notices */}
+        <OrderLocksProvider>
         <div className="flex min-h-dvh flex-col bg-muted/30">
           {/* Header and connection bar stick together as ONE opaque block, stacked with flex-col.
               The bar's tint is translucent (e.g. bg-success at 10%), so without the opaque bg-background here the
@@ -70,6 +73,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {/* min-w-0: wide content (tables) scrolls inside its own box, never widens the page */}
           <main className="mx-auto w-full max-w-6xl min-w-0 flex-1 px-4 py-6">{children}</main>
         </div>
+        </OrderLocksProvider>
       </ConnectionProvider>
     </SocketProvider>
   );

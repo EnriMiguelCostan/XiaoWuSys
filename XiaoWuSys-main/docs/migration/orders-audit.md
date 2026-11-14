@@ -115,5 +115,17 @@ Successes (create, approve, status change, payment, edits) and list-level failur
 ## 9. Open notes
 
 - Several fixed sentences name the Owner ("The Owner will set the price.", "Only the Owner can change the quote…", "Waiting for the Owner to approve…", "by the Owner", "The Owner should review it…"). They are wording only: nothing compares a role, and the rules guard passes. They would go stale if another role were given `set_quote` or `approve_order`. A server-sent reason (like `payment_blocked_reason`) would remove them.
-- `AWAITING_APPROVAL` and `ORDER_STATUSES` repeat the server's status names for display and filtering. A new status (PB 14 `Pressing`) needs one line in each, plus a token in `ui-tokens.ts`.
+- `AWAITING_APPROVAL` and `ORDER_STATUSES` repeat the server's status names for display and filtering. PB 14 `Pressing` was added in Batch M6: one entry in `ORDER_STATUSES`, one token in `ui-tokens.ts` and one label in `STATUS_ACTION`. Which next-status buttons appear still comes only from `allowed_actions.statuses`.
 - Not checked in a browser for this audit: see `docs/migration/m5-parity-signoff.md`.
+
+## 10. Added in Batch M6 (new features, not ported from the MVP)
+
+These screens did not exist in the Vite MVP. They follow the same rule: `Web/` renders decisions and collects input.
+
+| Feature | What the server decides | What `Web/` does |
+|---|---|---|
+| Edit locks (PB 5) | Who gets, keeps or loses a lock (`editing_order` ack, `order_lock_revoked`), and `409 ORDER_LOCKED` on writes | Holds the lock while an edit form is open (`useOrderEditLock`, renewed every 60 s on the live socket, released on close), shows "being edited" from `locks_snapshot` / `order_locked`, and a `ResultDialog` when the lock is refused or taken over. No rank is compared in `Web/` |
+| Owner override (PB 5) | `can_override` in the `409 EDIT_CONFLICT` answer; rank re-checked from the token on the locked row; `audit_log`; `order_overridden` to the replaced account | `ConfirmDialog` "Replace their changes with mine?" only when `can_override === true`, then the same body again with `override: true`. `order_overridden` ends in a `ResultDialog` |
+| Sync conflicts (PB 5) | Rank rule during sync; `title`, `changed` and `keep_local_blocked_reason` per conflict; refusals such as `KEEP_LOCAL_NOT_ALLOWED` | Conflicts dialog from the connection bar for accounts with `manage_accounts`: Keep cloud / Keep this computer's version, each confirmed first; the second button is not offered when the server gives a blocked reason |
+| Pressing and status history (PB 14) | `allowed_actions.statuses`, `status_history`, `order_updated` | "Start pressing" label, the timeline as sent, reload on `order_updated` (list, open order, Dashboard). An open edit form is never reloaded from under the person typing |
+| Deadline flags (PB 16) | `deadline_flag` per order (shop-time calendar days) and `sort=priority` | `DEADLINE_FLAG` tokens and `DeadlineBadge`; "Most urgent first" sends `sort=priority`. No date is compared in `Web/` to decide urgency |

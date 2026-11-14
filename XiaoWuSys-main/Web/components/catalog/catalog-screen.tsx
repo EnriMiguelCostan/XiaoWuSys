@@ -136,8 +136,10 @@ export function CatalogScreen() {
   const live = LIVE[liveStatus];
   const binCount = summary?.recycle_bin ?? 0;
 
-  const cards: { key: string; label: string; value: number | undefined; tone: Tone }[] = [
-    { key: ALL, label: 'Total items', value: summary?.total_items, tone: 'info' },
+  // "N units on hand" is summary.total_units from the server (nothing is added up here)
+  const unitsOnHand = summary?.total_units === undefined ? undefined : `${summary.total_units.toLocaleString()} units on hand`;
+  const cards: { key: string; label: string; value: number | undefined; tone: Tone; sub?: string }[] = [
+    { key: ALL, label: 'Total items', value: summary?.total_items, tone: 'info', sub: unitsOnHand },
     { key: 'in_stock', label: 'In stock', value: summary?.in_stock, tone: 'success' },
     { key: 'low_stock', label: 'Low stock', value: summary?.low_stock, tone: 'warning' },
     { key: 'out_of_stock', label: 'Out of stock', value: summary?.out_of_stock, tone: 'danger' },
@@ -220,6 +222,7 @@ export function CatalogScreen() {
                 {card.value.toLocaleString()}
               </span>
             )}
+            {card.sub && <span className="max-w-full truncate text-xs text-muted-foreground" title={card.sub}>{card.sub}</span>}
           </button>
         ))}
         <div className="col-span-2 flex min-w-0 flex-col items-start gap-1 rounded-lg border bg-card p-4 sm:col-span-1">
@@ -305,7 +308,7 @@ export function CatalogScreen() {
         {snapshot && items.length === 0 && (
           <p className="rounded-lg border border-dashed bg-card p-8 text-center text-sm text-muted-foreground">
             No items in the catalog yet.{' '}
-            {canEdit ? 'Click "Add item" or "Import" to add the first ones.' : 'Items added by an Owner, Admin or Production user will appear here.'}
+            {canEdit ? 'Click "Add item" or "Import" to add the first ones.' : 'Items added by the people who manage the catalog will appear here.'}
           </p>
         )}
         {items.length > 0 && visible.length === 0 && (

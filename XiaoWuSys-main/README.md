@@ -109,9 +109,9 @@ cd Backend
 npm test
 ```
 
-There are 98 automated tests in `Backend/tests/`. Most start the real API on a throw-away SQLite database filled with the shop's own data (`tests/fixtures/data.js`), with the cloud switched off, and call it over HTTP like the browser does. The sync and connection tests use a small scripted stand-in for the cloud.
+There are 122 automated tests in `Backend/tests/`. Most start the real API on a throw-away SQLite database filled with the shop's own data (`tests/fixtures/data.js`), with the cloud switched off, and call it over HTTP like the browser does. The sync and connection tests use a small scripted stand-in for the cloud.
 
-`tests/migrations.pg.test.js` and `tests/payments.pg.test.js` add 16 more that apply `schema.sql` and every migration to a real, throw-away PostgreSQL and check order and receipt numbering and two payments sent at the same moment. They run when `TEST_DATABASE_URL` is set, which **wipes that database**, so it must be on `localhost` or have "test" in its name (never Neon):
+`tests/migrations.pg.test.js`, `tests/payments.pg.test.js` and `tests/batch3.pg.test.js` add 31 more that apply `schema.sql` and every migration to a real, throw-away PostgreSQL and check order and receipt numbering, two payments sent at the same moment, the Pressing step and its status history, the Owner override with its audit trail, and offline conflicts settled by rank. They run when `TEST_DATABASE_URL` is set, which **wipes that database**, so it must be on `localhost` or have "test" in its name (never Neon):
 
 ```bash
 TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/xiaowusys_test npm test

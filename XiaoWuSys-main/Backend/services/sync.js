@@ -5,9 +5,18 @@
 //  C3: pending_update rows push ONLY their changed fields, and only if the Neon row still
 //      has the last_modified this device saw (optimistic lock). Otherwise -> conflict.
 //  H4/H5 support: refreshes parent tables from Neon so offline child writes pass SQLite FKs
+//  PB 5: an order edited offline AND online is settled by rank (Owner > Admin > Production >
+//      Staff): the higher rank's change is kept and the other is recorded in audit_log. Equal
+//      ranks (and every other table) stay flagged until an Owner / Admin picks a side with
+//      POST /api/sync/conflicts/:table/:id/resolve.
 // ==========================================
 const { isConnectionError } = require('../utils/dbErrors');
 const { PG_VERSION_FORMAT } = require('../utils/localSync');
+const { labelOf } = require('../utils/validation');
+const { outranks } = require('./domain/permissions');
+const { CLOSED_STATUSES, QUOTE_FROZEN_STATUSES } = require('./domain/orderLifecycle');
+const { withPgTransaction } = require('./records');
+const { writeAudit } = require('./auditLog');
 
 // Order matters: children can only be inserted in Neon after their parent exists.
 //   inventory_items, customers -> order_profiles -> order_items, payments, material_loss
@@ -48,7 +57,7 @@ const SYNC_TABLES = [
     // approved_by/approved_at are only ever set in Neon (approval is online-only). They are
     // listed so the refresh copies them into the cache; offline rows never have them set.
     columns: ['order_id', 'customer_id', 'date_created', 'production_deadline', 'production_status', 'design_drive_link', 'total_quote_amount',
-              'stock_reserved', 'approved_by', 'approved_at', 'tracking_no'],
+              'stock_reserved', 'approved_by', 'approved_at', 'tracking_no', 'last_edited_by', 'last_edited_role'],
     // Given by the cloud database (migration 007 trigger): never pushed, copied back after a push
     cloudOwned: ['tracking_no']
   },
@@ -75,12 +84,26 @@ const SYNC_TABLES = [
     table: 'inventory_audit_log',
     id: 'audit_id',
     columns: ['audit_id', 'inventory_id', 'action', 'item_name', 'details', 'performed_by', 'performed_role', 'created_at']
+  },
+  {
+    // General audit trail (migration 009): pushed insert-only, never refreshed back
+    table: 'audit_log',
+    id: 'audit_id',
+    columns: ['audit_id', 'entity', 'entity_id', 'action', 'details', 'performed_by', 'performed_role', 'created_at']
+  },
+  {
+    // Status timeline (migration 010): status changes are online-only, so rows only travel down
+    table: 'order_status_history',
+    id: 'history_id',
+    columns: ['history_id', 'order_id', 'from_status', 'to_status', 'changed_by', 'changed_role', 'changed_at'],
+    pullOnly: true
   }
 ];
 
 // Tables copied Neon -> SQLite (parents first) so offline writes satisfy foreign keys
 // M10: children are refreshed too, so offline reads show the same items/payments/losses.
-const REFRESH_TABLES = ['users', 'customers', 'inventory_items', 'order_profiles', 'order_items', 'payments', 'material_loss'];
+const REFRESH_TABLES = ['users', 'customers', 'inventory_items', 'order_profiles', 'order_items', 'payments', 'material_loss',
+  'order_status_history'];
 
 const specFor = (table) => SYNC_TABLES.find((t) => t.table === table);
 const updatableColumns = (spec) => spec.columns.filter((c) => c !== spec.id);
@@ -118,7 +141,7 @@ const markAsSynced = (localDb, spec, row, cloudVersion, cloud = null) => {
   return sqliteRun(
     localDb,
     `UPDATE ${spec.table}
-        SET sync_status = 'synced', dirty_fields = NULL, sync_error = NULL, cloud_last_modified = ?${extra.sql}
+        SET sync_status = 'synced', dirty_fields = NULL, sync_error = NULL, sync_conflict = NULL, cloud_last_modified = ?${extra.sql}
       WHERE ${spec.id} = ? AND last_modified IS ?`,
     [cloudVersion, ...extra.params, row[spec.id], row.last_modified]
   );
@@ -132,7 +155,7 @@ const keepPendingAfterPush = (localDb, spec, row, cloudVersion, cloud = null) =>
   return sqliteRun(
     localDb,
     `UPDATE ${spec.table}
-        SET cloud_last_modified = ?${extra.sql},
+        SET cloud_last_modified = ?${extra.sql}, sync_conflict = NULL,
             sync_status = CASE WHEN sync_status = 'pending_insert' THEN 'pending_update' ELSE sync_status END
       WHERE ${spec.id} = ?`,
     [cloudVersion, ...extra.params, row[spec.id]]
@@ -269,6 +292,151 @@ const pushUpdate = async (pgPool, spec, row) => {
   };
 };
 
+// ---------- PB 5: settling a conflict (by rank during sync, or by hand) ----------
+
+// Who edited the row: travels with the change, but is not itself "a change" to argue about
+const EDITOR_COLUMNS = ['last_edited_by', 'last_edited_role'];
+// Absolute stock counts must never be forced over newer cloud counts (stock would go wrong
+// for every branch). Such a conflict can only be settled by keeping the cloud version.
+const NEVER_FORCED = { inventory_items: ['quantity_available', 'quantity_reserved'] };
+
+// The fields the offline edit really changed (the editor columns left out)
+const changedFieldsOf = (spec, row) => dirtyFieldsFor(spec, row).filter((f) => !EDITOR_COLUMNS.includes(f));
+const pick = (source, fields) => Object.fromEntries(fields.map((f) => [f, source[f] === undefined ? null : source[f]]));
+const sameMoney = (a, b) => Math.round(Number(a || 0) * 100) === Math.round(Number(b || 0) * 100);
+
+// The cloud row as it is now: its version, the contested fields and (orders) what the rank
+// and lifecycle rules need. null when the record is no longer in the cloud.
+const readCloudRow = async (pgPool, spec, id, fields) => {
+  const extra = spec.table === 'order_profiles' ? ['production_status', 'tracking_no', ...EDITOR_COLUMNS] : [];
+  const cols = [...new Set([...fields, ...extra])];
+  const { rows } = await pgPool.query(
+    `SELECT ${versionExpr} AS version${cols.map((c) => `, ${c}::text AS ${c}`).join('')} FROM ${spec.table} WHERE ${spec.id} = $1`,
+    [id]
+  );
+  return rows[0] || null;
+};
+
+// Why this computer's version may not replace the cloud's, in plain words (null = it may).
+// The lifecycle rules of the online routes still hold: a closed order is not edited, and the
+// quote stays frozen once the order is approved.
+const keepLocalBlockedReason = (spec, row, cloud, fields) => {
+  const stock = (NEVER_FORCED[spec.table] || []).filter((f) => fields.includes(f));
+  if (stock.length > 0) {
+    return 'Stock counts changed in both places, so this computer\u2019s count cannot replace the cloud\u2019s. '
+      + 'Keep the cloud version, then correct the stock with Add or Subtract stock.';
+  }
+  if (spec.table === 'order_profiles' && cloud) {
+    if (CLOSED_STATUSES.includes(cloud.production_status)) {
+      return `This order is already ${cloud.production_status}, so it can no longer be changed.`;
+    }
+    if (fields.includes('total_quote_amount') && QUOTE_FROZEN_STATUSES.includes(cloud.production_status)
+        && !sameMoney(row.total_quote_amount, cloud.total_quote_amount)) {
+      return 'The quote cannot be changed after the job order was approved, because the downpayment was based on it.';
+    }
+  }
+  return null;
+};
+
+// Writes this computer's fields over the cloud row, with its audit row, in ONE transaction.
+// Only lands if the cloud row is still the one that was compared (cloud.version).
+// -> the new cloud values ({ version, ...cloud-owned }), or null if the row changed again
+const applyLocalOverCloud = (pgPool, spec, row, cloud, fields, { action, actor, editor, reason = null }) =>
+  withPgTransaction(pgPool, async (client) => {
+    const values = pick(row, fields);
+    if (spec.table === 'order_profiles') {
+      values.last_edited_by = editor && editor.user_id ? editor.user_id : null;
+      values.last_edited_role = editor && editor.role ? editor.role : null;
+    }
+    const cols = Object.keys(values);
+    const updated = await client.query(
+      `UPDATE ${spec.table}
+          SET ${cols.map((c, i) => `${c} = $${i + 1}`).join(', ')}, last_modified = NOW()
+        WHERE ${spec.id} = $${cols.length + 1} AND ${versionExpr} = $${cols.length + 2}::text
+        RETURNING ${versionExpr} AS version${cloudOwnedSelect(spec)}`,
+      [...cols.map((c) => values[c]), row[spec.id], cloud.version]
+    );
+    if (updated.rowCount !== 1) return null;
+    await writeAudit(client, {
+      entity: spec.table,
+      entity_id: row[spec.id],
+      action,
+      actor,
+      details: {
+        fields, reason,
+        before: pick(cloud, fields), after: pick(row, fields),
+        replaced_editor: spec.table === 'order_profiles' ? pick(cloud, EDITOR_COLUMNS) : undefined
+      }
+    });
+    return updated.rows[0];
+  });
+
+// Drops this computer's edit and takes the cloud row. The discarded values are written to
+// audit_log first, so they are never lost without a trace.
+// -> true when the local row now carries the cloud version
+const acceptCloudOverLocal = async (pgPool, localDb, spec, row, cloud, fields, { action, actor, reason = null }) => {
+  await writeAudit(pgPool, {
+    entity: spec.table,
+    entity_id: row[spec.id],
+    action,
+    actor,
+    details: {
+      fields, reason,
+      discarded: pick(row, fields), kept: pick(cloud, fields),
+      discarded_editor: spec.table === 'order_profiles' ? pick(row, EDITOR_COLUMNS) : undefined
+    }
+  });
+  const cleared = await sqliteRun(
+    localDb,
+    `UPDATE ${spec.table}
+        SET sync_status = 'synced', dirty_fields = NULL, sync_error = NULL, sync_conflict = NULL, cloud_last_modified = NULL
+      WHERE ${spec.id} = ? AND last_modified IS ?`,
+    [row[spec.id], row.last_modified]
+  );
+  if (cleared !== 1) return false; // edited again meanwhile: the next sync looks at it afresh
+  await refreshTable(pgPool, localDb, spec, [row[spec.id]]);
+  return true;
+};
+
+// An order edited offline whose cloud copy changed too: the higher rank's change is kept.
+//   offline editor outranks the cloud's last editor -> the offline fields are applied
+//   the cloud's last editor outranks the offline one -> the cloud row is kept
+//   equal ranks (or nobody recorded)                 -> null: stays flagged for a person
+// -> { table, id, winner: 'local' | 'cloud', tracking_no, notify_user, by_role, version? } or null
+const settleOrderConflictByRank = async (pgPool, localDb, spec, row) => {
+  const fields = changedFieldsOf(spec, row);
+  const cloud = await readCloudRow(pgPool, spec, row[spec.id], fields);
+  if (!cloud) return null;
+  const local = { user_id: row.last_edited_by || null, role: row.last_edited_role || null };
+  const base = { table: spec.table, id: row[spec.id], tracking_no: cloud.tracking_no || null };
+
+  if (outranks(local.role, cloud.last_edited_role)) {
+    const blocked = keepLocalBlockedReason(spec, row, cloud, fields);
+    if (!blocked) {
+      const applied = await applyLocalOverCloud(pgPool, spec, row, cloud, fields, {
+        action: 'offline_conflict_local_applied', actor: local, editor: local,
+        reason: `Offline change by a ${local.role} replaced a change by ${cloud.last_edited_role || 'an unknown account'}.`
+      });
+      if (!applied) return null; // the cloud row changed again mid-way: flag it, decide next time
+      return { ...base, winner: 'local', notify_user: cloud.last_edited_by || null, by_role: local.role,
+               version: applied.version, cloud: cloudValuesOf(spec, applied) };
+    }
+    // Higher rank, but the order moved on (closed / quote frozen): the offline change cannot apply
+    const kept = await acceptCloudOverLocal(pgPool, localDb, spec, row, cloud, fields, {
+      action: 'offline_conflict_local_discarded', actor: local, reason: blocked
+    });
+    return kept ? { ...base, winner: 'cloud', notify_user: local.user_id, by_role: cloud.last_edited_role || null } : null;
+  }
+  if (outranks(cloud.last_edited_role, local.role)) {
+    const kept = await acceptCloudOverLocal(pgPool, localDb, spec, row, cloud, fields, {
+      action: 'offline_conflict_local_discarded', actor: local,
+      reason: `A change by a ${cloud.last_edited_role} in the cloud outranks this offline change.`
+    });
+    return kept ? { ...base, winner: 'cloud', notify_user: local.user_id, by_role: cloud.last_edited_role } : null;
+  }
+  return null;
+};
+
 // ---------- Neon -> SQLite refresh of parent tables ----------
 // ids: optional list to refresh only those rows (used by the real-time NOTIFY handler)
 const refreshTable = async (pgPool, localDb, spec, ids = null) => {
@@ -338,7 +506,8 @@ const refreshLocalCache = async (pgPool, localDb, summary) => {
 
 // ---------- Main sync run ----------
 const runSync = async (pgPool, localDb) => {
-  const summary = { synced: 0, conflicts: [], failed: 0, requeued: 0, aborted: false, inventory_changed: false };
+  // resolved: order conflicts settled by rank in this run (PB 5), for the "your change was replaced" notice
+  const summary = { synced: 0, conflicts: [], resolved: [], failed: 0, requeued: 0, aborted: false, inventory_changed: false };
   console.log('🔄 Checking for offline data to sync...');
 
   for (const spec of SYNC_TABLES) {
@@ -354,9 +523,21 @@ const runSync = async (pgPool, localDb) => {
 
     for (const row of pending) {
       try {
-        const result = row.sync_status === 'pending_insert'
+        let result = row.sync_status === 'pending_insert'
           ? await pushInsert(pgPool, spec, row)
           : await pushUpdate(pgPool, spec, row);
+
+        // PB 5: an order changed in both places is settled by rank where the ranks differ
+        if (result.outcome === 'conflict' && spec.table === 'order_profiles') {
+          const settled = await settleOrderConflictByRank(pgPool, localDb, spec, row);
+          if (settled) {
+            const { version, cloud, ...entry } = settled;
+            summary.resolved.push(entry);
+            console.log(`⚖️  Conflict on order ${row[spec.id]} settled by rank: the ${settled.winner} change was kept`);
+            if (settled.winner === 'cloud') continue;
+            result = { outcome: 'synced', version, cloud };
+          }
+        }
 
         if (result.outcome === 'conflict') {
           await markAsConflict(localDb, spec, row, result.reason);
@@ -418,7 +599,7 @@ const syncOfflineData = (pgPool, localDb) => {
     .catch((err) => {
       if (isConnectionError(err)) {
         console.error('❌ Cloud unreachable during sync:', err.message);
-        return { synced: 0, conflicts: [], failed: 0, requeued: 0, aborted: true };
+        return { synced: 0, conflicts: [], resolved: [], failed: 0, requeued: 0, aborted: true };
       }
       console.error('❌ Critical Sync Error:', err.message);
       throw err;
@@ -486,11 +667,131 @@ const listConflicts = async (localDb) => {
   return result;
 };
 
+// ---------- PB 5: conflicts as shown to (and settled by) an Owner / Admin ----------
+
+// What a flagged record is called on screen: never a raw id
+const CONFLICT_TITLES = {
+  order_profiles: ['tracking_no', (v) => (v ? `Order ${v}` : 'An order saved on this computer')],
+  inventory_items: ['item_name', (v) => (v ? `Catalog item \u201c${v}\u201d` : 'A catalog item')],
+  customers: ['full_name', (v) => (v ? `Customer \u201c${v}\u201d` : 'A customer')],
+  order_items: [null, () => 'A line of an order'],
+  payments: [null, () => 'A payment'],
+  material_loss: [null, () => 'A recorded loss']
+};
+
+// listConflicts() plus what the Conflicts screen needs to show and offer, in plain words:
+//   title                     e.g. 'Order XM-2026-0123'
+//   changed                   labels of what was changed on this computer, e.g. ['Production deadline']
+//   keep_local_blocked_reason why "keep this computer's version" is not offered (null = it is)
+const describeConflicts = async (localDb, list = listConflicts) => {
+  const out = [];
+  for (const conflict of await list(localDb)) {
+    const spec = specFor(conflict.table);
+    const [titleColumn, titleOf] = CONFLICT_TITLES[conflict.table] || [null, () => 'A saved change'];
+    let titleValue = null;
+    if (spec && titleColumn) {
+      const [row] = await sqliteAll(localDb, `SELECT ${titleColumn} AS v FROM ${spec.table} WHERE ${spec.id} = ?`, [conflict.id]);
+      titleValue = row ? row.v : null;
+    }
+    const fields = spec ? changedFieldsOf(spec, conflict) : [];
+    out.push({
+      table: conflict.table,
+      id: conflict.id,
+      title: titleOf(titleValue),
+      changed: conflict.dirty_fields ? fields.map(labelOf) : [],
+      keep_local_blocked_reason: spec ? keepLocalBlockedReason(spec, {}, null, conflict.dirty_fields ? fields : []) : null,
+      last_modified: conflict.last_modified
+    });
+  }
+  return out;
+};
+
+// Settles one flagged conflict by hand (Owner / Admin; the route checks the role).
+//   keep 'cloud': this computer's change is dropped (recorded in audit_log) and the cloud row copied in
+//   keep 'local': this computer's change replaces the cloud's (before / after in audit_log)
+// Needs the cloud. -> { status, body } ready to send
+const resolveConflict = async (pgPool, localDb, { table, id, keep, actor }) => {
+  const spec = specFor(table);
+  const notFound = {
+    status: 404,
+    body: { error: 'CONFLICT_NOT_FOUND', message: 'This conflict is no longer waiting. It may already have been settled. Refresh the list.' }
+  };
+  if (!spec || spec.pullOnly) return notFound;
+  const [row] = await sqliteAll(localDb, `SELECT * FROM ${spec.table} WHERE ${spec.id} = ? AND sync_conflict IS NOT NULL`, [id]);
+  if (!row) return notFound;
+
+  const fields = changedFieldsOf(spec, row);
+  try {
+    const cloud = await readCloudRow(pgPool, spec, id, fields);
+    if (!cloud) {
+      return {
+        status: 409,
+        body: { error: 'CLOUD_RECORD_MISSING', message: 'This record is no longer in the cloud, so there is nothing to compare with. Ask the Owner to check it.' }
+      };
+    }
+    let version = null;
+    if (keep === 'local') {
+      const blocked = keepLocalBlockedReason(spec, row, cloud, fields);
+      if (blocked) return { status: 409, body: { error: 'KEEP_LOCAL_NOT_ALLOWED', message: blocked } };
+      const applied = await applyLocalOverCloud(pgPool, spec, row, cloud, fields, {
+        action: 'conflict_resolved_keep_local', actor, editor: actor
+      });
+      if (!applied) {
+        return {
+          status: 409,
+          body: { error: 'EDIT_CONFLICT', message: 'The cloud record changed again just now. Refresh the list and choose again.' }
+        };
+      }
+      version = applied.version;
+      if ((await markAsSynced(localDb, spec, row, applied.version, cloudValuesOf(spec, applied))) !== 1) {
+        await keepPendingAfterPush(localDb, spec, row, applied.version, cloudValuesOf(spec, applied));
+      }
+    } else {
+      const kept = await acceptCloudOverLocal(pgPool, localDb, spec, row, cloud, fields, {
+        action: 'conflict_resolved_keep_cloud', actor
+      });
+      if (!kept) {
+        return {
+          status: 409,
+          body: { error: 'EDIT_CONFLICT', message: 'This record was changed on this computer just now. Refresh the list and choose again.' }
+        };
+      }
+      version = cloud.version;
+    }
+    console.log(`⚖️  Conflict on ${spec.table} ${id} settled by ${actor && actor.user_id}: kept ${keep}`);
+    return {
+      status: 200,
+      body: {
+        message: keep === 'local'
+          ? 'Kept this computer\u2019s version. It is now saved in the cloud.'
+          : 'Kept the cloud version. The change made on this computer was dropped.',
+        table: spec.table,
+        id,
+        kept: keep,
+        // For the live "order_updated" push (orders only)
+        order: spec.table === 'order_profiles'
+          ? { order_id: id, tracking_no: cloud.tracking_no || null, production_status: cloud.production_status || null, version }
+          : null,
+        conflicts_remaining: (await listConflicts(localDb)).length
+      }
+    };
+  } catch (err) {
+    if (!isConnectionError(err)) throw err;
+    return {
+      status: 503,
+      body: err.commitUnknown
+        ? { error: 'COMMIT_UNKNOWN', message: 'The connection dropped while saving. Refresh the list to see whether the conflict was settled.' }
+        : { error: 'CLOUD_UNREACHABLE', message: 'Settling a conflict needs the cloud connection. Try again when online.' }
+    };
+  }
+};
+
 // Real-time: copy just these cloud rows into the local cache, so offline mode starts from
 // current numbers instead of the last 5-minute refresh. Same guards as the full refresh.
 const refreshLocalRows = (pgPool, localDb, table, ids) =>
   refreshTable(pgPool, localDb, specFor(table), ids);
 
 module.exports = {
-  syncOfflineData, isSyncRunning, listConflicts, refreshLocalRows, countPending, buildSyncStatus, getLastSync, SYNC_TABLES
+  syncOfflineData, isSyncRunning, listConflicts, describeConflicts, resolveConflict, refreshLocalRows, countPending,
+  buildSyncStatus, getLastSync, SYNC_TABLES
 };

@@ -12,7 +12,7 @@ import { normalizeOrderNumber, orderNumber } from '@xiaowu/client-core/orders';
 import { can } from '@xiaowu/client-core/permissions';
 import { useConnection } from '@/components/connection/connection-provider';
 import { OrderDetailSheet } from '@/components/orders/order-detail-sheet';
-import { OrderStatusBadge } from '@/components/orders/status-badges';
+import { DeadlineBadge, OrderStatusBadge } from '@/components/orders/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -23,6 +23,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@/components/forms/bounded-select';
 import { useCustomers } from '@/hooks/use-customers';
 import { useSession } from '@/hooks/use-session';
+import { useSocketEvent } from '@/hooks/use-socket-event';
 import { api, errorMessage } from '@/lib/api';
 import {
   DEFAULT_ORDER_SORT,
@@ -122,6 +123,9 @@ export function OrdersScreen() {
   const hasNext = orders.length === PAGE_SIZE;
 
   const reload = useCallback(() => setTick((t) => t + 1), []);
+
+  // PB 14: an order was created or changed on any branch: re-read this page (no polling)
+  useSocketEvent('order_updated', reload);
 
   // Any filter or sort change starts again at page 1
   const changed = <T,>(setter: (v: T) => void) => (value: T) => {
@@ -358,9 +362,15 @@ export function OrdersScreen() {
                     <span className="block text-xs text-muted-foreground sm:hidden">
                       Due {formatDateTime(o.production_deadline, { withTime: false })}
                     </span>
+                    <DeadlineBadge flag={o.deadline_flag} className="mt-1 sm:hidden" />
                   </TableCell>
                   <TableCell className="hidden lg:table-cell">{formatDateTime(o.date_created, { utc: true })}</TableCell>
-                  <TableCell className="hidden sm:table-cell">{formatDateTime(o.production_deadline, { withTime: false })}</TableCell>
+                  <TableCell className="hidden sm:table-cell">
+                    <span className="flex flex-wrap items-center gap-2">
+                      {formatDateTime(o.production_deadline, { withTime: false })}
+                      <DeadlineBadge flag={o.deadline_flag} />
+                    </span>
+                  </TableCell>
                   <TableCell>
                     <OrderStatusBadge status={o.production_status} />
                   </TableCell>

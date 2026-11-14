@@ -9,10 +9,9 @@
 // optimistic version checks (C3) in the routes and in services/sync.js.
 // ==========================================
 
-const ROLE_RANK = { Owner: 4, Admin: 3, Production: 2, Staff: 1 };
-const LOCK_TTL_MS = 2 * 60 * 1000;
+const { ROLE_RANK, rankOf } = require('./domain/permissions');
 
-const rankOf = (role) => ROLE_RANK[role] || 0;
+const LOCK_TTL_MS = 2 * 60 * 1000;
 
 const createOrderLockManager = ({ ttlMs = LOCK_TTL_MS, now = () => Date.now() } = {}) => {
   const locks = new Map(); // orderId -> { orderId, userId, role, socketId, acquiredAt, expiresAt }

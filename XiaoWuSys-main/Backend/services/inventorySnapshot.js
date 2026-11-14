@@ -17,9 +17,17 @@ const stockStatusOf = (net, threshold) => {
   return 'in_stock';
 };
 
+const round2 = (n) => Math.round(n * 100) / 100;
+
+// stock_value: what the stock on hand cost (quantity on hand x unit cost), so no screen multiplies money
 const withAvailability = (item) => {
   const net = computeAvailable(item);
-  return { ...item, quantity_available_net: net, stock_status: stockStatusOf(net, item.minimum_threshold || 0) };
+  return {
+    ...item,
+    quantity_available_net: net,
+    stock_status: stockStatusOf(net, item.minimum_threshold || 0),
+    stock_value: round2((item.quantity_available || 0) * (item.unit_cost || 0))
+  };
 };
 
 // ctx: anything with pgPool + localDb (an Express req, or { pgPool, localDb })
@@ -54,7 +62,8 @@ const buildInventorySnapshot = async (ctx, { category, stock_status, search } = 
       out_of_stock: count('out_of_stock'),
       unsynced: all.filter((i) => i.sync_status !== 'synced').length,
       recycle_bin: recycleBin,
-      stock_value: Math.round(all.reduce((sum, i) => sum + i.quantity_available * i.unit_cost, 0) * 100) / 100
+      stock_value: round2(all.reduce((sum, i) => sum + i.quantity_available * i.unit_cost, 0)),
+      total_units: all.reduce((sum, i) => sum + i.quantity_available, 0) // on hand, across the active catalog
     },
     categories: [...new Set(all.map((i) => i.item_category))].sort(),
     items

@@ -14,6 +14,9 @@
 //   inventory_updated { reason, changed_ids, snapshot }
 //   inventory_live    { listening }   whether cross-branch NOTIFY is currently active
 //
+// The same LISTEN connection also hears 'orders_changed' (migration 010, PB 14) and hands each
+// payload to onOrderChange, which services/orderEvents.js turns into "order_updated".
+//
 // LISTEN needs a session-level connection. Neon's pooled endpoint (hostname with
 // "-pooler", PgBouncer transaction mode) does NOT support LISTEN, so set PG_LISTEN_URL to
 // the DIRECT (non-pooled) connection string. Without it, DATABASE_URL is used if it is
@@ -25,6 +28,7 @@ const { refreshLocalRows } = require('./sync');
 
 const ROOM = 'inventory';
 const CHANNEL = 'inventory_changed';
+const ORDERS_CHANNEL = 'orders_changed';
 const DEBOUNCE_MS = 250;
 const RECONNECT_MIN_MS = 2000;
 const RECONNECT_MAX_MS = 60000;
@@ -33,7 +37,8 @@ const isPooledUrl = (url) => {
   try { return /-pooler\./i.test(new URL(url).hostname); } catch { return false; }
 };
 
-const createInventoryEvents = ({ io, pgPool, localDb, databaseUrl, listenUrl }) => {
+// onOrderChange({ order_id, op, tracking_no, production_status, version }): an order changed in the cloud
+const createInventoryEvents = ({ io, pgPool, localDb, databaseUrl, listenUrl, onOrderChange = () => {} }) => {
   const ctx = { pgPool, localDb };
   let pendingIds = new Set();
   let pendingReasons = new Set();
@@ -122,6 +127,15 @@ const createInventoryEvents = ({ io, pgPool, localDb, databaseUrl, listenUrl }) 
     c.on('error', onFailure);
     c.on('end', () => onFailure(null));
     c.on('notification', (msg) => {
+      if (msg.channel === ORDERS_CHANNEL) {
+        try {
+          const order = JSON.parse(msg.payload);
+          if (order && order.order_id) onOrderChange(order);
+        } catch (err) {
+          console.error('⚠️ Could not read an order change from the cloud:', err.message);
+        }
+        return;
+      }
       if (msg.channel !== CHANNEL) return;
       try {
         const id = JSON.parse(msg.payload).inventory_id;
@@ -134,9 +148,10 @@ const createInventoryEvents = ({ io, pgPool, localDb, databaseUrl, listenUrl }) 
     try {
       await c.connect();
       await c.query(`LISTEN ${CHANNEL}`);
+      await c.query(`LISTEN ${ORDERS_CHANNEL}`);
       retryMs = RECONNECT_MIN_MS;
       setListening(true);
-      console.log('📡 Listening for inventory changes in the cloud (real-time push ON)');
+      console.log('📡 Listening for inventory and order changes in the cloud (real-time push ON)');
       // Changes may have happened while we were disconnected: push a fresh snapshot
       notifyChanged([], 'resync');
     } catch (err) {

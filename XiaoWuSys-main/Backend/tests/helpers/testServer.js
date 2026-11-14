@@ -61,9 +61,16 @@ const startTestServer = async ({ corsOrigins, dbPath: givenPath, pgPool: givenPo
   const pushes = [];
   const localWrites = [];
   const inventoryEvents = { notifyChanged: (ids, reason) => pushes.push({ ids, reason }) };
+  // Records the live order events a real server would send over Socket.io (PB 14 / PB 5)
+  const orderEvents = {
+    updated: [],
+    overridden: [],
+    notifyUpdated: (order) => { orderEvents.updated.push(order); },
+    notifyOverridden: (notice) => { orderEvents.overridden.push(notice); return 1; }
+  };
 
   const app = createApp({
-    pgPool, localDb, localDbPath: dbPath, orderLocks: createOrderLockManager(), inventoryEvents,
+    pgPool, localDb, localDbPath: dbPath, orderLocks: createOrderLockManager(), inventoryEvents, orderEvents,
     syncAndNotify: async () => ({ synced: 0, conflicts: [], failed: 0, requeued: 0, aborted: true }),
     listConflicts, corsOrigins,
     cloudHealth: cloudHealth || disabledCloudHealth(),
@@ -107,7 +114,7 @@ const startTestServer = async ({ corsOrigins, dbPath: givenPath, pgPool: givenPo
   };
 
   return {
-    baseUrl, request, login, tokens, close, pushes, localWrites, localDb, dbPath,
+    baseUrl, request, login, tokens, close, pushes, localWrites, orderEvents, localDb, dbPath,
     get: (sql, p) => sqliteGet(localDb, sql, p),
     all: (sql, p) => sqliteAll(localDb, sql, p),
     run: (sql, p) => sqliteRun(localDb, sql, p)

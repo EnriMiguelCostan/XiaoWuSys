@@ -4,9 +4,9 @@
 // (quantity_available_net and stock_status are computed in services/inventorySnapshot.js);
 // this component only sorts, formats and shows them.
 //
-// Not ported from the MVP on purpose (rules guard: no-rule-math): the per-row "Stock value"
-// column (on hand x unit cost) and the totals footer. They need fields from the API first;
-// the whole-catalog stock value comes from summary.stock_value instead.
+// "Stock value" per row is item.stock_value from the server (Batch M6); the whole-catalog value
+// is summary.stock_value. Not ported from the MVP on purpose (rules guard: no-rule-math): the
+// totals footer over the filtered rows, which would add up stock and money here.
 import { ArrowDown, ArrowUp, ArrowUpDown, Minus, MoreHorizontal, Pencil, Plus, Trash2 } from 'lucide-react';
 import { peso } from '@xiaowu/client-core/format';
 import type { StockAction } from '@/components/catalog/stock-dialog';
@@ -25,7 +25,7 @@ import type { InventoryItem } from '@/lib/inventory';
 import { lookFor, STOCK_STATUS, TONE_CLASSES, TONE_EDGE } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
 
-export type SortKey = 'name' | 'category' | 'status' | 'on_hand' | 'held' | 'free' | 'threshold' | 'unit_cost';
+export type SortKey = 'name' | 'category' | 'status' | 'on_hand' | 'held' | 'free' | 'threshold' | 'unit_cost' | 'stock_value';
 export interface SortState {
   key: SortKey;
   dir: 1 | -1;
@@ -44,12 +44,13 @@ const SORTERS: Record<SortKey, (a: InventoryItem, b: InventoryItem) => number> =
   free: (a, b) => cmpNum(a.quantity_available_net, b.quantity_available_net) || byName(a, b),
   threshold: (a, b) => cmpNum(a.minimum_threshold, b.minimum_threshold) || byName(a, b),
   unit_cost: (a, b) => cmpNum(a.unit_cost, b.unit_cost) || byName(a, b),
+  stock_value: (a, b) => cmpNum(a.stock_value ?? 0, b.stock_value ?? 0) || byName(a, b),
 };
 export const sortItems = (items: InventoryItem[], sort: SortState) =>
   [...items].sort((a, b) => (sort.dir === 1 ? SORTERS[sort.key](a, b) : SORTERS[sort.key](b, a)));
 
 // Numbers read best largest-first; text A to Z
-const FIRST_DIR: Partial<Record<SortKey, -1>> = { on_hand: -1, held: -1, free: -1, threshold: -1, unit_cost: -1 };
+const FIRST_DIR: Partial<Record<SortKey, -1>> = { on_hand: -1, held: -1, free: -1, threshold: -1, unit_cost: -1, stock_value: -1 };
 export const nextSort = (prev: SortState, key: SortKey): SortState =>
   prev.key === key ? { key, dir: prev.dir === 1 ? -1 : 1 } : { key, dir: FIRST_DIR[key] ?? 1 };
 
@@ -63,6 +64,7 @@ const COLUMNS: { key: SortKey; label: string; num?: boolean; wide?: 'sm' | 'md' 
   { key: 'free', label: 'Free to use', num: true },
   { key: 'threshold', label: 'Low-stock alert', num: true, wide: 'lg' },
   { key: 'unit_cost', label: 'Unit cost', num: true, wide: 'lg' },
+  { key: 'stock_value', label: 'Stock value', num: true, wide: 'lg' },
 ];
 const WIDE_CLASS = { sm: 'hidden sm:table-cell', md: 'hidden md:table-cell', lg: 'hidden lg:table-cell' } as const;
 
@@ -177,6 +179,9 @@ export function InventoryTable({
                 </TableCell>
                 <TableCell className="hidden text-right tabular-nums lg:table-cell">{item.minimum_threshold.toLocaleString()}</TableCell>
                 <TableCell className="hidden text-right tabular-nums lg:table-cell">{peso(item.unit_cost)}</TableCell>
+                <TableCell className="hidden text-right tabular-nums lg:table-cell">
+                  {item.stock_value === undefined ? '—' : peso(item.stock_value)}
+                </TableCell>
                 {canEdit && (
                   <TableCell className={cn(STICKY_ACTIONS, 'bg-card text-right')}>
                     {/* modal={false}: these items open dialogs; a modal menu can leave the page unclickable */}

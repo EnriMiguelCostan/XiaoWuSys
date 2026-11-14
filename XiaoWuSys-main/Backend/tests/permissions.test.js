@@ -28,7 +28,7 @@ describe('Who may do what (rules only)', () => {
       approve: false, statuses: [], edit_deadline: true, edit_quote: false, link_design: true, add_items: true,
       record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true
     });
-    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Production').statuses, ['Completed'], 'no Cancel for Production');
+    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Production').statuses, ['Pressing', 'Completed'], 'no Cancel for Production');
     assert.deepEqual(allowedActions({ production_status: 'Delayed' }, 'Production').statuses, ['Pending']);
     assert.equal(allowedActions({ production_status: 'Approved' }, 'Owner').edit_quote, false, 'the quote is frozen after approval');
     const closed = allowedActions({ production_status: 'Cancelled' }, 'Owner');

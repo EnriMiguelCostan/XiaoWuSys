@@ -9,6 +9,8 @@ export interface DashboardOrder {
   customer_name: string;
   production_status: string;
   production_deadline: string;
+  /** PB 16, decided by the server: overdue | urgent_24h | warning_72h | normal | null */
+  deadline_flag?: string | null;
   total_quote_amount: number;
   total_paid: number;
   balance: number;

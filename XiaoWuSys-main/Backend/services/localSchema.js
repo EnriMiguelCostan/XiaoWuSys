@@ -62,6 +62,8 @@ const LOCAL_TABLES = [
       approved_by TEXT,
       approved_at TEXT,
       tracking_no TEXT,
+      last_edited_by TEXT,
+      last_edited_role TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -124,6 +126,34 @@ const LOCAL_TABLES = [
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
+  // General audit trail (migration 009). Written in the cloud; mirrored here so a row saved
+  // offline can be pushed (insert-only) like the inventory trail. No foreign key.
+  `CREATE TABLE IF NOT EXISTS audit_log (
+      audit_id TEXT PRIMARY KEY,
+      entity TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      details TEXT,
+      performed_by TEXT,
+      performed_role TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      ${SYNC_STATUS},
+      last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
+  // Status timeline (migration 010). Status changes need the cloud, so rows are only ever
+  // copied down, for reading offline. No foreign key, like the cloud table.
+  `CREATE TABLE IF NOT EXISTS order_status_history (
+      history_id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      from_status TEXT,
+      to_status TEXT NOT NULL,
+      changed_by TEXT,
+      changed_role TEXT,
+      changed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      ${SYNC_STATUS},
+      last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_local_status_history_order ON order_status_history (order_id, changed_at)',
   'CREATE INDEX IF NOT EXISTS idx_local_inventory_bin ON inventory_items (deleted_at)',
   'CREATE INDEX IF NOT EXISTS idx_local_audit_item ON inventory_audit_log (inventory_id, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_local_order_tracking ON order_profiles (tracking_no)',
@@ -153,8 +183,9 @@ const createLocalIndexes = async (db) => {
 const listLocalTables = async (db) =>
   (await all(db, "SELECT name FROM sqlite_master WHERE type = 'table'")).map((r) => r.name);
 
-// Sprint 11 / PB 13: a cache created before 'Approved' existed still has the old
-// production_status CHECK, so copying an approved order from Neon would fail. SQLite cannot
+// Sprint 11 / PB 13 and PB 14: a cache created before 'Approved' (migration 005) or 'Pressing'
+// (migration 010) existed still has the old production_status CHECK, so copying such an
+// order from Neon would fail. SQLite cannot
 // ALTER a CHECK, so the table is rebuilt once, keeping every row and column (including
 // unsynced offline rows): the new definition is the stored one with only the status list
 // replaced, and rows are copied with SELECT * (same column order).
@@ -170,7 +201,7 @@ const upgradeLocalOrderStatusCheck = (dbPath) => new Promise((resolve, reject) =
     try {
       const table = await get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'order_profiles'");
       const check = table && /production_status\s+IN\s*\([^)]*\)/i.exec(table.sql);
-      if (!check || check[0].includes("'Approved'")) return resolve(false);
+      if (!check || PRODUCTION_STATUSES.every((s) => check[0].includes(`'${s}'`))) return resolve(false);
 
       const newSql = table.sql
         .replace(/CREATE TABLE\s+(IF NOT EXISTS\s+)?["`]?order_profiles["`]?/i, 'CREATE TABLE order_profiles__upgrade')
@@ -192,7 +223,7 @@ const upgradeLocalOrderStatusCheck = (dbPath) => new Promise((resolve, reject) =
       await run(db, 'DROP TABLE order_profiles');
       await run(db, 'ALTER TABLE order_profiles__upgrade RENAME TO order_profiles');
       await run(db, 'COMMIT');
-      console.log(`🛠  Local order_profiles upgraded for the 'Approved' status (${after.n} row(s) kept)`);
+      console.log(`🛠  Local order_profiles upgraded for the current order statuses (${after.n} row(s) kept)`);
       resolve(true);
     } catch (err) {
       if (began) await run(db, 'ROLLBACK').catch(() => {});

@@ -2,13 +2,20 @@
 
 // Sections of the order detail sheet (ported from OrdersPage.jsx). Which editors appear comes
 // from allowed_actions; each save goes to Express and its message is shown as is.
-import { useState } from 'react';
-import { Link2, Pencil, Shirt, ShieldCheck } from 'lucide-react';
+//
+// PB 5: each edit form tells the sheet while it is open (onEditing), so the sheet can hold the
+// order's edit lock. When a save answers 409 EDIT_CONFLICT with can_override: true, the server
+// has decided this account may replace the other person's change: the form asks first, then
+// sends the same body again with override: true.
+import { useEffect, useState } from 'react';
+import { History, Link2, Pencil, Shirt, ShieldCheck } from 'lucide-react';
 import { formatDateTime, peso, todayInManila } from '@xiaowu/client-core/format';
 import { hasOrderNumber, NUMBER_AFTER_SYNC, shortfallLines } from '@xiaowu/client-core/orders';
 import type { OrderActions } from '@xiaowu/client-core/permissions';
 import { Field, FormProblem } from '@/components/forms/form-bits';
+import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
+import { DeadlineBadge, OrderStatusBadge } from '@/components/orders/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -22,6 +29,71 @@ import { cn } from '@/lib/utils';
 import { MONEY_INPUT_MAX, TEXT_MAX, WHOLE_NUMBER_MAX } from '@/lib/input-limits';
 
 type OnResult = (result: ResultMessage, reload: boolean) => void;
+/** Tells the sheet whether this section's edit form is open (it holds the edit lock meanwhile). */
+type OnEditing = (open: boolean) => void;
+
+function useReportEditing(open: boolean, onEditing: OnEditing | undefined) {
+  useEffect(() => {
+    if (!open || !onEditing) return undefined;
+    onEditing(true);
+    return () => onEditing(false);
+  }, [open, onEditing]);
+}
+
+// PB 5: save an edit; if the order was changed meanwhile and the server says this account may
+// replace that change (can_override), ask, then send the same body with override: true.
+type SaveBody = Record<string, unknown>;
+interface SaveReply {
+  message?: string;
+  error?: string;
+  can_override?: boolean;
+  overridden?: boolean;
+}
+
+function useOverridableSave(path: string, fallback: string, onSaved: (data: SaveReply) => void) {
+  const api = useApi();
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState('');
+  const [waiting, setWaiting] = useState<SaveBody | null>(null);
+
+  const send = async (body: SaveBody, override = false) => {
+    setProblem('');
+    setBusy(true);
+    const { ok, data } = await api<SaveReply>('PATCH', path, override ? { ...body, override: true } : body);
+    setBusy(false);
+    if (ok) {
+      setWaiting(null);
+      onSaved(data);
+      return;
+    }
+    if (!override && data.error === 'EDIT_CONFLICT' && data.can_override === true) {
+      setWaiting(body);
+      return;
+    }
+    setWaiting(null);
+    setProblem(errorMessage(data, fallback));
+  };
+
+  const confirm = (
+    <ConfirmDialog
+      open={Boolean(waiting)}
+      title="Replace their changes with mine?"
+      message={
+        'Someone else changed this order after you opened it.\n' +
+        'Your account may replace their change with yours. They will be told, and a record is kept.'
+      }
+      confirmLabel="Replace with mine"
+      busy={busy}
+      onConfirm={() => waiting && void send(waiting, true)}
+      onCancel={() => {
+        setWaiting(null);
+        setProblem('Not saved: this order was changed by someone else. Close this form to see their change.');
+      }}
+    />
+  );
+
+  return { busy, problem, setProblem, send, confirm };
+}
 
 const orderPath = (detail: OrderDetail, suffix: string) => `/orders/${encodeURIComponent(detail.order.order_id)}/${suffix}`;
 const versionOf = (detail: OrderDetail) => detail.order.version || undefined;
@@ -50,7 +122,15 @@ export function OrderInfo({ detail, customer }: { detail: OrderDetail; customer:
           sub={order.stock_reserved ? 'Materials are held for this order' : 'Reserved on approval / resume'}
         />
         <Info label="Created" value={formatDateTime(order.date_created, { utc: true })} />
-        <Info label="Deadline" value={formatDateTime(order.production_deadline, { withTime: false })} />
+        <Info
+          label="Deadline"
+          value={
+            <span className="flex flex-wrap items-center gap-2">
+              {formatDateTime(order.production_deadline, { withTime: false })}
+              <DeadlineBadge flag={order.deadline_flag} />
+            </span>
+          }
+        />
         <Info label="Quote" value={<span className="tabular-nums">{peso(order.total_quote_amount)}</span>} />
         <Info
           label="Paid / Balance"
@@ -79,11 +159,23 @@ export function OrderInfo({ detail, customer }: { detail: OrderDetail; customer:
 
 // ---------------------------------------------------------------------------------------------
 // Deadline (edit_deadline) and quote (edit_quote: Owner, before approval)
-export function DetailsEditor({ detail, actions, onResult }: { detail: OrderDetail; actions: OrderActions; onResult: OnResult }) {
-  const api = useApi();
+export function DetailsEditor({
+  detail,
+  actions,
+  onResult,
+  onEditing,
+}: {
+  detail: OrderDetail;
+  actions: OrderActions;
+  onResult: OnResult;
+  onEditing?: OnEditing;
+}) {
   const [form, setForm] = useState<{ deadline: string; quote: string } | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState('');
+  const { busy, problem, setProblem, send, confirm } = useOverridableSave(orderPath(detail, 'details'), 'The order details were not saved.', (data) => {
+    setForm(null);
+    onResult({ type: 'success', title: 'Order updated', message: data.message ?? 'The order was updated.' }, true);
+  });
+  useReportEditing(form !== null, onEditing);
   if (!actions.edit_deadline && !actions.edit_quote) return null;
 
   const { order } = detail;
@@ -123,18 +215,11 @@ export function DetailsEditor({ detail, actions, onResult }: { detail: OrderDeta
       onResult({ type: 'warning', title: 'No changes', message: 'Nothing was changed, so nothing was saved.' }, false);
       return;
     }
-    setBusy(true);
-    const { ok, data } = await api<{ message?: string }>('PATCH', orderPath(detail, 'details'), { ...body, expected_version: versionOf(detail) });
-    setBusy(false);
-    if (!ok) {
-      setProblem(errorMessage(data, 'The order details were not saved.'));
-      return;
-    }
-    setForm(null);
-    onResult({ type: 'success', title: 'Order updated', message: data.message ?? 'The order was updated.' }, true);
+    await send({ ...body, expected_version: versionOf(detail) });
   };
 
   return (
+    <>
     <form onSubmit={save} className="space-y-3 rounded-md border bg-muted/30 p-3">
       <FormProblem message={problem} />
       <div className="grid gap-3 sm:grid-cols-2">
@@ -159,38 +244,41 @@ export function DetailsEditor({ detail, actions, onResult }: { detail: OrderDeta
         </Button>
       </div>
     </form>
+    {confirm}
+    </>
   );
 }
 
 // ---------------------------------------------------------------------------------------------
 // Google Drive design link (link_design)
-export function DesignLink({ detail, actions, onResult }: { detail: OrderDetail; actions: OrderActions; onResult: OnResult }) {
-  const api = useApi();
+export function DesignLink({
+  detail,
+  actions,
+  onResult,
+  onEditing,
+}: {
+  detail: OrderDetail;
+  actions: OrderActions;
+  onResult: OnResult;
+  onEditing?: OnEditing;
+}) {
   const [draft, setDraft] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState('');
+  const { busy, problem, send, confirm } = useOverridableSave(orderPath(detail, 'design'), 'The design link was not saved.', (data) => {
+    setDraft(null);
+    onResult({ type: 'success', title: 'Design linked', message: data.message ?? 'The design file was linked.' }, true);
+  });
+  useReportEditing(draft !== null, onEditing);
   const link = detail.order.design_drive_link;
 
   const save = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (draft === null) return;
-    setProblem('');
-    setBusy(true);
-    const { ok, data } = await api<{ message?: string }>('PATCH', orderPath(detail, 'design'), {
-      design_drive_link: draft.trim(),
-      expected_version: versionOf(detail),
-    });
-    setBusy(false);
-    if (!ok) {
-      setProblem(errorMessage(data, 'The design link was not saved.'));
-      return;
-    }
-    setDraft(null);
-    onResult({ type: 'success', title: 'Design linked', message: data.message ?? 'The design file was linked.' }, true);
+    await send({ design_drive_link: draft.trim(), expected_version: versionOf(detail) });
   };
 
   if (draft !== null) {
     return (
+      <>
       <form onSubmit={save} className="space-y-2">
         <FormProblem message={problem} />
         <div className="flex flex-wrap gap-2">
@@ -213,6 +301,8 @@ export function DesignLink({ detail, actions, onResult }: { detail: OrderDetail;
           </Button>
         </div>
       </form>
+      {confirm}
+      </>
     );
   }
 
@@ -239,10 +329,21 @@ export function DesignLink({ detail, actions, onResult }: { detail: OrderDetail;
 // Materials and print details (add_items: size / name / number lines, no stock used)
 const EMPTY_PRINT_LINE = { product_type: 'Jersey print', quantity: '1', size: '', custom_name: '', custom_number: '' };
 
-export function MaterialsSection({ detail, actions, onResult }: { detail: OrderDetail; actions: OrderActions; onResult: OnResult }) {
+export function MaterialsSection({
+  detail,
+  actions,
+  onResult,
+  onEditing,
+}: {
+  detail: OrderDetail;
+  actions: OrderActions;
+  onResult: OnResult;
+  onEditing?: OnEditing;
+}) {
   const api = useApi();
   const { items, totals } = detail;
   const [line, setLine] = useState<typeof EMPTY_PRINT_LINE | null>(null);
+  useReportEditing(line !== null, onEditing);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
 
@@ -357,6 +458,40 @@ export function MaterialsSection({ detail, actions, onResult }: { detail: OrderD
             <Shirt aria-hidden /> Add print details (size / name / number)
           </Button>
         ))}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Status timeline (PB 14): every approval and status change, as recorded by the server in the
+// same transaction as the change. Oldest first; times are shown on the shop's clock.
+export function StatusTimeline({ detail }: { detail: OrderDetail }) {
+  const { order } = detail;
+  const history = detail.status_history ?? [];
+  return (
+    <section className="space-y-3" aria-labelledby="timeline-title">
+      <h3 id="timeline-title" className="flex items-center gap-2 font-semibold">
+        <History className="size-4 text-muted-foreground" aria-hidden /> Status history
+      </h3>
+      <ol className="space-y-2 border-l pl-4 text-sm">
+        <li>
+          <span className="font-medium">Order created</span>
+          <span className="block text-xs text-muted-foreground">{formatDateTime(order.date_created, { utc: true })}</span>
+        </li>
+        {history.map((h) => (
+          <li key={h.history_id}>
+            <span className="flex flex-wrap items-center gap-2">
+              <OrderStatusBadge status={h.to_status} />
+              {h.from_status && <span className="text-xs text-muted-foreground">from {h.from_status}</span>}
+            </span>
+            <span className="block text-xs text-muted-foreground wrap-anywhere">
+              {formatDateTime(h.changed_at, { utc: true })} · {h.changed_by_name}
+              {h.changed_role ? ` (${h.changed_role})` : ''}
+            </span>
+          </li>
+        ))}
+      </ol>
+      {history.length === 0 && <p className="text-xs text-muted-foreground">No status changes yet.</p>}
     </section>
   );
 }

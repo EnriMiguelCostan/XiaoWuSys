@@ -17,8 +17,9 @@ const TRACKING_NO_PATTERN = /^XM-\d{4}-\d{4,9}$/; // order number, e.g. XM-2026-
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Asia/Manila';
 
 const PAYMENT_TYPES = ['Cash', 'GCash', 'Bank Transfer'];
-// Sprint 11 / PB 13 adds 'Approved' to the lifecycle: Pending -> Approved -> Printing -> Completed
-const PRODUCTION_STATUSES = ['Pending', 'Approved', 'Printing', 'Completed', 'Delayed', 'Cancelled'];
+// Sprint 11 / PB 13 adds 'Approved'; PB 14 (migration 010) adds the optional 'Pressing' step:
+// Pending -> Approved -> Printing -> (Pressing ->) Completed
+const PRODUCTION_STATUSES = ['Pending', 'Approved', 'Printing', 'Pressing', 'Completed', 'Delayed', 'Cancelled'];
 
 // 'YYYY-MM-DDTHH:MM:SS' for a Date, as seen on a wall clock in the business timezone
 const localDateTime = (date, timeZone = BUSINESS_TIMEZONE) => {
@@ -73,7 +74,8 @@ const FIELD_LABELS = {
   loss_reason: 'Reason', reason: 'Reason', resolution: 'Resolution', status: 'Status', action: 'Action',
   product_type: 'Product type', size: 'Size', custom_name: 'Custom name', custom_number: 'Custom number',
   category: 'Category', stock_status: 'Stock status', search: 'Search', limit: 'Page size', offset: 'Page',
-  sort: 'Sort by', dir: 'Sort direction', tracking_no: 'Order number'
+  sort: 'Sort by', dir: 'Sort direction', tracking_no: 'Order number', design_drive_link: 'Design link',
+  quantity_reserved: 'Reserved stock', supplier: 'Supplier', unit: 'Unit', keep: 'Which version to keep'
 };
 const labelOf = (field) =>
   FIELD_LABELS[field] || String(field).replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());

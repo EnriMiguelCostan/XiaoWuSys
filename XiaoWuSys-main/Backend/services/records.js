@@ -20,7 +20,18 @@ const ENTITIES = {
       order_id: 'text', customer_id: 'text', date_created: 'timestamp', production_deadline: 'timestamp',
       production_status: 'text', design_drive_link: 'text', total_quote_amount: 'money',
       stock_reserved: 'bool', approved_by: 'text', approved_at: 'timestamp',
-      tracking_no: 'text' // XM-YYYY-NNNN, given by the cloud database (null until an offline order syncs)
+      tracking_no: 'text', // XM-YYYY-NNNN, given by the cloud database (null until an offline order syncs)
+      // PB 5 (migration 009): who last changed the order, and their role then. Used to decide
+      // whether a higher rank may replace a conflicting change. Null for older orders.
+      last_edited_by: 'text', last_edited_role: 'text'
+    }
+  },
+  // PB 14 (migration 010): one row per status change, written in the cloud only
+  order_status_history: {
+    id: 'history_id',
+    fields: {
+      history_id: 'text', order_id: 'text', from_status: 'text', to_status: 'text',
+      changed_by: 'text', changed_role: 'text', changed_at: 'timestamp'
     }
   },
   order_items: {

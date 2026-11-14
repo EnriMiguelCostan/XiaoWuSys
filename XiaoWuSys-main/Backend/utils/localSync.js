@@ -26,6 +26,7 @@ const LOCAL_SYNC_COLUMNS = ['dirty_fields', 'cloud_last_modified', 'sync_conflic
 //   order_profiles.approved_by/approved_at           job order approval (mirrors Neon, migration 005)
 //   order_profiles.tracking_no                       order number from the cloud (migration 007)
 //   payments.received_by / receipt_no                receiver, and receipt number from the cloud (migration 008)
+//   order_profiles.last_edited_by / last_edited_role who last changed the order (migration 009)
 const TABLE_EXTRA_COLUMNS = {
   payments: [['received_by', 'TEXT'], ['receipt_no', 'TEXT']],
   material_loss: [['cloud_stock_delta', 'INTEGER']],
@@ -33,7 +34,7 @@ const TABLE_EXTRA_COLUMNS = {
                     ['unit', "TEXT NOT NULL DEFAULT 'pcs'"], ['supplier', 'TEXT']],
   users: [['is_active', 'INTEGER NOT NULL DEFAULT 1'], ['tokens_valid_after', 'TEXT']],
   order_profiles: [['stock_reserved', 'INTEGER NOT NULL DEFAULT 0'], ['approved_by', 'TEXT'], ['approved_at', 'TEXT'],
-                   ['tracking_no', 'TEXT']]
+                   ['tracking_no', 'TEXT'], ['last_edited_by', 'TEXT'], ['last_edited_role', 'TEXT']]
 };
 
 const all = (db, sql, params = []) =>
