@@ -8,7 +8,7 @@ import { usePathname } from 'next/navigation';
 import { ChevronDown, KeyRound, LogOut, Menu, Printer, UserRound } from 'lucide-react';
 import type { SessionUser } from '@xiaowu/client-core/permissions';
 import { ChangePasswordDialog } from '@/components/account/change-password-dialog';
-import { activeHref, visibleNavItems, type NavItem } from '@/components/layout/nav-items';
+import { activeHref, HOME_PATH, visibleNavItems, type NavItem } from '@/components/layout/nav-items';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -125,7 +125,7 @@ export function AppHeader() {
           </SheetContent>
         </Sheet>
 
-        <Link href="/catalog" className="flex items-center gap-2 font-semibold tracking-tight">
+        <Link href={HOME_PATH} className="flex items-center gap-2 font-semibold tracking-tight">
           <Printer className="size-5 text-primary" aria-hidden />
           <span>XiaoMei ERP</span>
         </Link>

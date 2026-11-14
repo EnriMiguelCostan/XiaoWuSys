@@ -135,11 +135,16 @@ export const RULES = [
 // Scanning
 // ---------------------------------------------------------------------------------------------
 
+// Windows checkouts (core.autocrlf=true) end lines with \r\n. In a regex "." never matches
+// "\r", so a "// comment" on a CRLF line was not stripped and its text was scanned as code.
+// Every check works on \n-only text; line numbers are unchanged.
+const toLf = (text) => String(text).replace(/\r\n?/g, '\n');
+
 // Blank out comments but keep line numbers, so commented examples don't trip the rules.
 // Deliberately simple: a "//" inside a string cuts the rest of that line, which only ever hides
 // text, never invents a violation.
 export const stripComments = (text) =>
-  text
+  toLf(text)
     .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
     .split('\n')
     .map((line) => line.replace(/(^|[^:'"`\\])\/\/.*$/, '$1'))
@@ -169,7 +174,7 @@ export const checkSource = (relPath, text) => {
   }
   if (!TEXT_EXT.test(file)) return { violations, allowances };
 
-  const rawLines = text.split('\n');
+  const rawLines = toLf(text).split('\n');
   const codeLines = stripComments(text).split('\n');
   for (const rule of RULES) {
     if (!rule.pattern || (rule.scope && !rule.scope(file))) continue;

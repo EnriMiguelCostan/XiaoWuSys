@@ -14,15 +14,17 @@ export interface NavItem {
   capability?: Capability;
 }
 
+// Dashboard first: it is the home page (HOME_PATH below)
 export const NAV_ITEMS: readonly NavItem[] = [
+  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/catalog', label: 'Catalog', icon: Package },
   { href: '/orders/new', label: 'Create Order', icon: PlusCircle, capability: 'create_order' },
   { href: '/orders', label: 'Orders', icon: ClipboardList, capability: 'view_orders' },
-  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/accounts', label: 'Accounts', icon: Users, capability: 'manage_accounts' },
 ];
 
-export const HOME_PATH = '/catalog';
+// Where "/" and a fresh login land (the Dashboard: what needs attention today)
+export const HOME_PATH = '/dashboard';
 
 export const visibleNavItems = (user: SessionUser | null): NavItem[] =>
   NAV_ITEMS.filter((item) => !item.capability || can(user, item.capability));

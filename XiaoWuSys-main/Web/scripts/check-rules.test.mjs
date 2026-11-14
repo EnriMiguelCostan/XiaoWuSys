@@ -63,6 +63,15 @@ describe('scope and exceptions', () => {
     assert.deepEqual(rulesHit('Web/app/x.tsx', "/* remaining = quote - paid */\nconst a = 1;"), []);
   });
 
+  it('works the same on Windows (CRLF) line endings', () => {
+    // core.autocrlf checkouts: "." in a regex never matches "\r", so comments must still be stripped
+    assert.deepEqual(rulesHit('Web/app/x.tsx', "// never write: if (user.role === 'Owner')\r\nconst a = 1;\r\n"), []);
+    assert.deepEqual(rulesHit('Web/app/x.tsx', '// deadline/quote, step 2) of the order\r\nconst a = 1;\r\n'), []);
+    // ...and real violations are still found, on the right line
+    const { violations } = checkSource('Web/app/x.tsx', "const a = 1;\r\nif (user.role === 'Owner') x();\r\n");
+    assert.deepEqual(violations.map((v) => [v.line, v.rule]), [[2, 'no-role-checks']]);
+  });
+
   it('accepts a reviewed exception only with the rule id and a real reason', () => {
     const ok = checkSource('Web/app/x.tsx',
       '// rules-guard: allow no-rule-math page count for the table footer\nconst pages = Math.ceil(total / size);');

@@ -262,7 +262,9 @@ export function OrderDetailSheet({
               <code className="font-mono wrap-anywhere">{order ? orderNumber(order) : '…'}</code>
               {order && <OrderStatusBadge status={order.production_status} />}
             </SheetTitle>
-            <SheetDescription className="wrap-anywhere">{customer?.full_name ?? (order ? 'Unknown customer' : 'Loading the order…')}</SheetDescription>
+            <SheetDescription className="min-w-0 truncate" title={customer?.full_name}>
+              {customer?.full_name ?? (order ? 'Unknown customer' : 'Loading the order…')}
+            </SheetDescription>
             {order && (
               <div className="flex flex-wrap gap-2 pt-1">
                 <Button variant="outline" size="sm" onClick={copySummary}>
@@ -312,7 +314,7 @@ export function OrderDetailSheet({
           {order && ((awaitingApproval && actions.approve) || footerActions.length > 0) && (
             <div className="flex flex-wrap items-center gap-2 border-t bg-muted/30 p-4">
               {awaitingApproval && actions.approve && (
-                <div className="flex min-w-0 flex-1 flex-col gap-1">
+                <div className="flex min-w-0 flex-[1_1_16rem] flex-col gap-1">
                   <Button
                     className="w-fit"
                     disabled={busy || Boolean(approval?.blocking.length)}
@@ -320,7 +322,7 @@ export function OrderDetailSheet({
                   >
                     <ShieldCheck aria-hidden /> Approve job order
                   </Button>
-                  {approval?.blocking[0] && <span className="text-xs text-muted-foreground wrap-anywhere">{approval.blocking[0]}</span>}
+                  {approval?.blocking[0] && <span className="w-full text-xs text-muted-foreground wrap-anywhere">{approval.blocking[0]}</span>}
                 </div>
               )}
               {footerActions.length > 0 && (
