@@ -8,13 +8,14 @@
 // has decided this account may replace the other person's change: the form asks first, then
 // sends the same body again with override: true.
 import { useEffect, useState } from 'react';
-import { History, Link2, Pencil, Shirt, ShieldCheck } from 'lucide-react';
+import { History, Link2, ListPlus, Pencil, Shirt, ShieldCheck } from 'lucide-react';
 import { formatDateTime, peso, todayInManila } from '@xiaowu/client-core/format';
 import { hasOrderNumber, NUMBER_AFTER_SYNC, shortfallLines } from '@xiaowu/client-core/orders';
 import type { OrderActions } from '@xiaowu/client-core/permissions';
 import { Field, FormProblem } from '@/components/forms/form-bits';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
+import { RosterImportDialog } from '@/components/orders/roster-import-dialog';
 import { DeadlineBadge, OrderStatusBadge } from '@/components/orders/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -343,7 +344,8 @@ export function MaterialsSection({
   const api = useApi();
   const { items, totals } = detail;
   const [line, setLine] = useState<typeof EMPTY_PRINT_LINE | null>(null);
-  useReportEditing(line !== null, onEditing);
+  const [importing, setImporting] = useState(false);
+  useReportEditing(line !== null || importing, onEditing);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
 
@@ -454,10 +456,25 @@ export function MaterialsSection({
             </div>
           </form>
         ) : (
-          <Button variant="outline" size="sm" onClick={() => setLine(EMPTY_PRINT_LINE)}>
-            <Shirt aria-hidden /> Add print details (size / name / number)
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" onClick={() => setLine(EMPTY_PRINT_LINE)}>
+              <Shirt aria-hidden /> Add print details (size / name / number)
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setImporting(true)}>
+              <ListPlus aria-hidden /> Bulk import roster (CSV / Excel)
+            </Button>
+          </div>
         ))}
+      {actions.add_items && importing && (
+        <RosterImportDialog
+          orderId={detail.order.order_id}
+          onClose={() => setImporting(false)}
+          onDone={(r) => {
+            setImporting(false);
+            onResult(r, true);
+          }}
+        />
+      )}
     </section>
   );
 }

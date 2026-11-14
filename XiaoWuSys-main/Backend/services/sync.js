@@ -40,7 +40,7 @@ const SYNC_TABLES = [
     table: 'inventory_items',
     id: 'inventory_id',
     columns: ['inventory_id', 'item_name', 'item_category', 'quantity_available', 'quantity_reserved', 'minimum_threshold', 'unit_cost',
-              'unit', 'supplier', 'deleted_at', 'deleted_by', 'purged_at'],
+              'unit', 'supplier', 'deleted_at', 'deleted_by', 'purged_at', 'selling_price'],
     // M9: keep the locally reduced stock while an offline loss for this item is still unsynced
     refreshGuard: ` AND NOT EXISTS (SELECT 1 FROM material_loss ml
                       WHERE ml.inventory_id = excluded.inventory_id
@@ -56,8 +56,10 @@ const SYNC_TABLES = [
     id: 'order_id',
     // approved_by/approved_at are only ever set in Neon (approval is online-only). They are
     // listed so the refresh copies them into the cache; offline rows never have them set.
+    // subtotal_amount / discount_amount / discount_reason (migration 011): the quote's breakdown
     columns: ['order_id', 'customer_id', 'date_created', 'production_deadline', 'production_status', 'design_drive_link', 'total_quote_amount',
-              'stock_reserved', 'approved_by', 'approved_at', 'tracking_no', 'last_edited_by', 'last_edited_role'],
+              'stock_reserved', 'approved_by', 'approved_at', 'tracking_no', 'last_edited_by', 'last_edited_role',
+              'subtotal_amount', 'discount_amount', 'discount_reason'],
     // Given by the cloud database (migration 007 trigger): never pushed, copied back after a push
     cloudOwned: ['tracking_no']
   },
@@ -97,13 +99,31 @@ const SYNC_TABLES = [
     id: 'history_id',
     columns: ['history_id', 'order_id', 'from_status', 'to_status', 'changed_by', 'changed_role', 'changed_at'],
     pullOnly: true
+  },
+  {
+    // PB 15 usage rates (migration 011): edited online only (PUT /api/inventory/:id/consumable-rates
+    // needs the cloud), copied down for reading offline. Rows deleted in the cloud (a blank's
+    // list replaced, or the item purged) are removed here too.
+    table: 'consumable_rates',
+    id: 'rate_id',
+    columns: ['rate_id', 'product_inventory_id', 'consumable_inventory_id', 'quantity_per_piece', 'trigger_status'],
+    pullOnly: true,
+    prune: true
+  },
+  {
+    // PB 15 deductions (migration 011): written with the status change, which needs the cloud,
+    // so rows only travel down (the order detail shows them offline). Append-only in the cloud.
+    table: 'order_consumables_log',
+    id: 'log_id',
+    columns: ['log_id', 'order_id', 'trigger_status', 'consumable_inventory_id', 'quantity_deducted', 'shortfall', 'deducted_at'],
+    pullOnly: true
   }
 ];
 
 // Tables copied Neon -> SQLite (parents first) so offline writes satisfy foreign keys
 // M10: children are refreshed too, so offline reads show the same items/payments/losses.
-const REFRESH_TABLES = ['users', 'customers', 'inventory_items', 'order_profiles', 'order_items', 'payments', 'material_loss',
-  'order_status_history'];
+const REFRESH_TABLES = ['users', 'customers', 'inventory_items', 'consumable_rates', 'order_profiles', 'order_items', 'payments',
+  'material_loss', 'order_status_history', 'order_consumables_log'];
 
 const specFor = (table) => SYNC_TABLES.find((t) => t.table === table);
 const updatableColumns = (spec) => spec.columns.filter((c) => c !== spec.id);
@@ -304,6 +324,7 @@ const NEVER_FORCED = { inventory_items: ['quantity_available', 'quantity_reserve
 const changedFieldsOf = (spec, row) => dirtyFieldsFor(spec, row).filter((f) => !EDITOR_COLUMNS.includes(f));
 const pick = (source, fields) => Object.fromEntries(fields.map((f) => [f, source[f] === undefined ? null : source[f]]));
 const sameMoney = (a, b) => Math.round(Number(a || 0) * 100) === Math.round(Number(b || 0) * 100);
+const QUOTE_COLUMNS = ['total_quote_amount', 'subtotal_amount', 'discount_amount', 'discount_reason'];
 
 // The cloud row as it is now: its version, the contested fields and (orders) what the rank
 // and lifecycle rules need. null when the record is no longer in the cloud.
@@ -330,8 +351,12 @@ const keepLocalBlockedReason = (spec, row, cloud, fields) => {
     if (CLOSED_STATUSES.includes(cloud.production_status)) {
       return `This order is already ${cloud.production_status}, so it can no longer be changed.`;
     }
-    if (fields.includes('total_quote_amount') && QUOTE_FROZEN_STATUSES.includes(cloud.production_status)
-        && !sameMoney(row.total_quote_amount, cloud.total_quote_amount)) {
+    // PB 11 / PB 12 (migration 011): the breakdown travels with the quote and freezes with it
+    const quoteFields = QUOTE_COLUMNS.filter((f) => fields.includes(f));
+    const quoteDiffers = quoteFields.some((f) => (f === 'discount_reason'
+      ? (row[f] || null) !== (cloud[f] || null)
+      : !sameMoney(row[f], cloud[f])));
+    if (quoteFields.length > 0 && QUOTE_FROZEN_STATUSES.includes(cloud.production_status) && quoteDiffers) {
       return 'The quote cannot be changed after the job order was approved, because the downpayment was based on it.';
     }
   }
@@ -488,10 +513,23 @@ const pruneDeletedInventory = async (pgPool, localDb) => {
   );
 };
 
+// Pull-only tables whose rows can be deleted in the cloud (spec.prune): local copies of rows
+// that are gone are removed, so this computer never applies a usage rate that no longer exists.
+const prunePulledTable = async (pgPool, localDb, spec) => {
+  const { rows } = await pgPool.query(`SELECT ${spec.id} AS id FROM ${spec.table}`);
+  return sqliteRun(
+    localDb,
+    `DELETE FROM ${spec.table} WHERE sync_status = 'synced' AND ${spec.id} NOT IN (SELECT value FROM json_each(?))`,
+    [JSON.stringify(rows.map((r) => r.id))]
+  );
+};
+
 const refreshLocalCache = async (pgPool, localDb, summary) => {
   for (const table of REFRESH_TABLES) {
     try {
-      const { rows: count, changed } = await refreshTableCounting(pgPool, localDb, specFor(table));
+      const spec = specFor(table);
+      const { rows: count, changed } = await refreshTableCounting(pgPool, localDb, spec);
+      if (spec.prune) await prunePulledTable(pgPool, localDb, spec);
       if (table === 'inventory_items') {
         const pruned = await pruneDeletedInventory(pgPool, localDb);
         if (changed > 0 || pruned > 0) summary.inventory_changed = true;

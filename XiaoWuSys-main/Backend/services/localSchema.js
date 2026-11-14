@@ -24,6 +24,7 @@ const LOCAL_TABLES = [
       unit_cost REAL NOT NULL,
       unit TEXT NOT NULL DEFAULT 'pcs',
       supplier TEXT,
+      selling_price REAL NOT NULL DEFAULT 0,
       deleted_at TEXT,
       deleted_by TEXT,
       purged_at TEXT,
@@ -64,6 +65,9 @@ const LOCAL_TABLES = [
       tracking_no TEXT,
       last_edited_by TEXT,
       last_edited_role TEXT,
+      subtotal_amount REAL NOT NULL DEFAULT 0,
+      discount_amount REAL NOT NULL DEFAULT 0,
+      discount_reason TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -153,7 +157,32 @@ const LOCAL_TABLES = [
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
+  // PB 15 usage rates and deductions (migration 011). Both are written in the cloud only and
+  // copied down for reading offline. No foreign keys: the cache may drop an inventory row that
+  // a rate still names until the next refresh removes the rate too.
+  `CREATE TABLE IF NOT EXISTS consumable_rates (
+      rate_id TEXT PRIMARY KEY,
+      product_inventory_id TEXT NOT NULL,
+      consumable_inventory_id TEXT NOT NULL,
+      quantity_per_piece REAL NOT NULL,
+      trigger_status TEXT NOT NULL DEFAULT 'Pressing',
+      ${SYNC_STATUS},
+      last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS order_consumables_log (
+      log_id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      trigger_status TEXT NOT NULL,
+      consumable_inventory_id TEXT NOT NULL,
+      quantity_deducted INTEGER NOT NULL,
+      shortfall INTEGER NOT NULL DEFAULT 0,
+      deducted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      ${SYNC_STATUS},
+      last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
   'CREATE INDEX IF NOT EXISTS idx_local_status_history_order ON order_status_history (order_id, changed_at)',
+  'CREATE INDEX IF NOT EXISTS idx_local_consumable_rates_product ON consumable_rates (product_inventory_id)',
+  'CREATE INDEX IF NOT EXISTS idx_local_consumables_log_order ON order_consumables_log (order_id)',
   'CREATE INDEX IF NOT EXISTS idx_local_inventory_bin ON inventory_items (deleted_at)',
   'CREATE INDEX IF NOT EXISTS idx_local_audit_item ON inventory_audit_log (inventory_id, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_local_order_tracking ON order_profiles (tracking_no)',

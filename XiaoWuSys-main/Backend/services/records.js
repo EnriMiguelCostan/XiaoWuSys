@@ -4,6 +4,7 @@
 // One definition per entity drives the SELECT list for BOTH databases, and one serializer
 // turns rows from either into the SAME JSON shape:
 //   money      -> number (2 dp)          Postgres NUMERIC comes back as a string otherwise
+//   rate       -> number (3 dp)          usage per piece, NUMERIC(10,3) (migration 011)
 //   timestamp  -> 'YYYY-MM-DDTHH:MM:SS'  Postgres Date objects vs SQLite text otherwise
 //   + version      cloud last_modified (online) / last cloud version seen (offline)
 //   + sync_status  'synced' | 'pending_insert' | 'pending_update'
@@ -23,7 +24,25 @@ const ENTITIES = {
       tracking_no: 'text', // XM-YYYY-NNNN, given by the cloud database (null until an offline order syncs)
       // PB 5 (migration 009): who last changed the order, and their role then. Used to decide
       // whether a higher rank may replace a conflicting change. Null for older orders.
-      last_edited_by: 'text', last_edited_role: 'text'
+      last_edited_by: 'text', last_edited_role: 'text',
+      // PB 11 / PB 12 (migration 011): the quote's breakdown (total = subtotal - discount)
+      subtotal_amount: 'money', discount_amount: 'money', discount_reason: 'text'
+    }
+  },
+  // PB 15 (migration 011): how much of a consumable one piece of a blank uses, and when
+  consumable_rates: {
+    id: 'rate_id',
+    fields: {
+      rate_id: 'text', product_inventory_id: 'text', consumable_inventory_id: 'text',
+      quantity_per_piece: 'rate', trigger_status: 'text'
+    }
+  },
+  // PB 15 (migration 011): what an order's status changes took from stock (exactly once each)
+  order_consumables_log: {
+    id: 'log_id',
+    fields: {
+      log_id: 'text', order_id: 'text', trigger_status: 'text', consumable_inventory_id: 'text',
+      quantity_deducted: 'int', shortfall: 'int', deducted_at: 'timestamp'
     }
   },
   // PB 14 (migration 010): one row per status change, written in the cloud only
@@ -61,7 +80,8 @@ const ENTITIES = {
     fields: {
       inventory_id: 'text', item_name: 'text', item_category: 'text', quantity_available: 'int',
       quantity_reserved: 'int', minimum_threshold: 'int', unit_cost: 'money',
-      unit: 'text', supplier: 'text', deleted_at: 'timestamp', deleted_by: 'text'
+      unit: 'text', supplier: 'text', deleted_at: 'timestamp', deleted_by: 'text',
+      selling_price: 'money' // PB 11 (migration 011): charged per piece before volume discounts
     }
   },
   customers: {
@@ -82,7 +102,7 @@ const columnExpr = (dialect, alias, col, type) => {
       ? `to_char(${ref}, 'YYYY-MM-DD"T"HH24:MI:SS') AS ${col}`
       : `strftime('%Y-%m-%dT%H:%M:%S', ${ref}) AS ${col}`;
   }
-  if (type === 'money' && dialect === 'pg') return `${ref}::text AS ${col}`;
+  if ((type === 'money' || type === 'rate') && dialect === 'pg') return `${ref}::text AS ${col}`;
   return `${ref} AS ${col}`;
 };
 
@@ -107,6 +127,7 @@ const serialize = (table, row) => {
     const v = row[col];
     if (v === undefined || v === null) out[col] = type === 'bool' ? false : null;
     else if (type === 'money') out[col] = Math.round(Number(v) * 100) / 100;
+    else if (type === 'rate') out[col] = Math.round(Number(v) * 1000) / 1000; // NUMERIC(10,3)
     else if (type === 'int') out[col] = Number(v);
     else if (type === 'bool') out[col] = v === true || v === 1 || v === '1' || v === 't' || v === 'true';
     else out[col] = String(v);

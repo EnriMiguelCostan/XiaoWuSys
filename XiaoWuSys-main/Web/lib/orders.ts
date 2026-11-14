@@ -64,6 +64,54 @@ export interface OrderItem {
   size: string | null;
   custom_name: string | null;
   custom_number: string | null;
+  /** PB 11: unit price set when the Owner calculated the quote (0 before) */
+  price?: number;
+}
+
+/** PB 11 / PB 12: the quote as the server shows it (GET /api/orders/:id "quote"). The three
+ *  figures always agree; lines is null when the item prices do not add up to the subtotal. */
+export interface QuoteLine {
+  line_item_id: string;
+  product_type: string;
+  size: string | null;
+  custom_name: string | null;
+  custom_number: string | null;
+  quantity: number;
+  unit_price: number;
+  line_total: number;
+}
+export interface QuoteBreakdown {
+  has_quote: boolean;
+  subtotal_amount: number;
+  discount_amount: number;
+  discount_reason: string | null;
+  total_quote_amount: number;
+  lines?: QuoteLine[] | null;
+}
+
+/** POST /api/orders/:id/quote "calculation": the server's volume pricing (preview or saved) */
+export interface QuoteCalculation {
+  total_quantity: number;
+  tier: { min_quantity: number; percent_off: number; label: string };
+  lines: (QuoteLine & { selling_price: number })[];
+  subtotal_amount: number;
+  discount_amount: number;
+  discount_percent: number | null;
+  discount_reason: string | null;
+  total_quote_amount: number;
+}
+
+/** PB 15: what the order's status changes took from stock (GET /api/orders/:id) */
+export interface ConsumableUsed {
+  log_id?: string;
+  trigger_status: string;
+  consumable_inventory_id: string;
+  item_name: string;
+  unit: string | null;
+  quantity_deducted: number;
+  /** more was needed than was on hand: the stock stopped at 0 */
+  shortfall: number;
+  deducted_at?: string;
 }
 
 export interface Payment {
@@ -107,6 +155,10 @@ export interface OrderDetail {
   stock_check?: StockCheck | null;
   /** absent on an older server */
   status_history?: StatusChange[];
+  /** PB 11 / PB 12 (absent on an older server) */
+  quote?: QuoteBreakdown;
+  /** PB 15 (absent on an older server) */
+  consumables_deducted?: ConsumableUsed[];
 }
 
 /** GET /api/orders */

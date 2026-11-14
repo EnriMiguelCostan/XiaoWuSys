@@ -38,29 +38,37 @@ const capabilityForTransition = (to) => (to === 'Cancelled' ? 'void_order' : 'ch
 
 const canTransition = (from, to) => (STATUS_TRANSITIONS[from] || []).includes(to);
 
-// -> { approve, statuses: [...], edit_deadline, edit_quote, link_design, add_items,
-//      record_payment, max_payment, payment_blocked_reason, print_receipt }
+// -> { approve, statuses: [...], edit_deadline, edit_quote, generate_quote, apply_discount,
+//      link_design, add_items, record_payment, max_payment, payment_blocked_reason, print_receipt,
+//      print_quote }
 // Based on role, status and the payment totals (paymentSummary). Whether the cloud is
 // reachable is reported separately (the response's "source" and the order's sync_status).
+//   generate_quote  PB 11: work out the quote from the catalog prices (Owner, before approval)
+//   apply_discount  PB 12: lower it with a discount and a reason (Owner, before approval)
 //   record_payment  PB 21: never on a Cancelled order, never without a quote, never once fully paid
 //   max_payment     the remaining balance, so a screen can limit its amount field
+//   print_quote     the customer quotation can be printed once the order has a quote
 const allowedActions = (order, role, summary = null) => {
   const status = order && order.production_status;
   const editable = EDITABLE_STATUSES.includes(status);
   const totals = summary || paymentSummary({ quote: order ? order.total_quote_amount : 0, payments: [] });
   const blocked = paymentBlockedReason(order, totals);
   const mayPay = Boolean(status) && can(role, 'record_payment');
+  const quoteOpen = QUOTE_EDITABLE_STATUSES.includes(status);
   return {
     approve: can(role, 'approve_order') && APPROVABLE_STATUSES.includes(status),
     statuses: (STATUS_TRANSITIONS[status] || []).filter((to) => can(role, capabilityForTransition(to))),
     edit_deadline: editable && can(role, 'edit_order'),
-    edit_quote: QUOTE_EDITABLE_STATUSES.includes(status) && can(role, 'set_quote'),
+    edit_quote: quoteOpen && can(role, 'set_quote'),
+    generate_quote: quoteOpen && can(role, 'set_quote'),
+    apply_discount: quoteOpen && can(role, 'set_quote') && can(role, 'apply_discount'),
     link_design: editable && can(role, 'edit_order'),
     add_items: editable && can(role, 'edit_order'),
     record_payment: mayPay && !blocked,
     max_payment: mayPay && !blocked ? totals.remaining : 0,
     payment_blocked_reason: mayPay ? blocked : null,
-    print_receipt: can(role, 'view_orders')
+    print_receipt: can(role, 'view_orders'),
+    print_quote: can(role, 'view_orders') && Number(order && order.total_quote_amount) > 0
   };
 };
 

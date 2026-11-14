@@ -106,3 +106,11 @@ Successes and list-level failures (delete, export, restore, purge, empty) end in
 
 - The empty-catalog text for people who cannot edit named three roles. It was reworded in Batch M6 ("Items added by the people who manage the catalog will appear here."), so it cannot go stale when roles change.
 - Not checked in a browser for this audit: see `docs/migration/m5-parity-signoff.md`.
+
+## 10. Added in Batch M6 part 2 (new features, not ported from the MVP)
+
+| Feature | What the server decides | What `Web/` does |
+|---|---|---|
+| Selling price (PB 11) | `selling_price` per item (validated like `unit_cost`; audited on edit) | One more number field in Add / Edit item and a "Selling price" column; the value is shown as sent |
+| Usage rates (PB 15) | `GET /api/inventory/:id/consumable-rates` (rates with names, the consumables that may be chosen, the steps, `can_edit`); `PUT` checks every row (above 0, 3 decimals, no duplicates, not itself, still in the catalog), needs the cloud, and writes the inventory trail | "Usage rates (consumables)" in the row actions (`edit_inventory` only). The dialog lists rows, checks that amounts are numbers, sends the whole list and shows the server's answer. The rate x quantity maths and the deduction happen only on the server |
+

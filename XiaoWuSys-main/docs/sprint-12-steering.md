@@ -83,16 +83,16 @@ Code status was checked against the UAC on 2026-10-29.
 | 4 | 4 | Asynchronous cloud sync | Done (Batch 2) | Conflict resolution screens are Batch 3 (3.6) |
 | 5 | 5 | Owner overrides staff edits | Done (Batch 3 / M6) | — |
 | 6 | 6 | Create order profile | Done (Batch 1) | — |
-| 7 | 7 | Encode order details | Done | — |
+| 7 | 7 | Encode order details | Done (roster import in Batch M6 part 2) | — |
 | 8 | 8 | Link design file | Done | — |
 | 9 | 9 | Inventory capacity pre-check | Done (Batch 1) | — |
 | 10 | 9 | Capacity alert & delay options | Done | Optional wording: "Pursue Later" |
-| 11 | 10 | Generate official quote | Not started | Needs price tiers from client |
-| 12 | 10 | Apply discount / final price | Not started | Needs Owner-only rules (Batch 1) and `audit_log` (Batch 3) |
+| 11 | 10 | Generate official quote | Done (Batch M6 part 2, migration 011) | Confirm the volume tiers (50 pcs: 5%, 100 pcs: 10%) with the client |
+| 12 | 10 | Apply discount / final price | Done (Batch M6 part 2, migration 011) | — |
 | 13 | 11 | Approve job order | Done | Mark Completed in the sheet |
 | 14 | 11 | Update production status | Done (Batch 3 / M6) | Consumable deduction on status change is PB 15 |
 | 16 | 11 | Flag expiring deadline | Done (Batch 3 / M6) | — |
-| 15 | **12** | Deduct consumables | Not started | **§5 of this file** |
+| 15 | **12** | Deduct consumables | Done (Batch M6 part 2, migration 011) | The shop enters its consumables and usage rates in the Catalog (§5 "As built") |
 | 17 | **12** | Notify low stock | Done (Batch 1) | Consumables join the warning with PB 15 |
 | 18 | 13 | Record material loss | Partly | Misprint form with reason codes (§7) |
 | 19 | 13 | Differentiate defect type | Not started | Scope to agree with adviser |
@@ -262,6 +262,17 @@ The current **Vite + React + inline styles** frontend is the **MVP/Beta**. It ex
 - A formula applies the estimated consumable loss.
 - The Inventory DB is updated automatically.
 
+### As built (Batch M6 part 2, migration `011_consumables_quotes_and_discounts.sql`)
+
+- **Tables:** `consumable_rates` (`quantity_per_piece` NUMERIC(10,3) > 0, `trigger_status` `Pressing` | `Completed`, UNIQUE per blank + consumable + step, a blank never uses itself, `last_modified` trigger) and append-only `order_consumables_log` with UNIQUE (`order_id`, `trigger_status`, `consumable_inventory_id`): exactly once **per consumable**, not just per step, so a consumable added to a blank's rates later is still taken once. Both are written in the cloud only and copied down for reading offline (`pullOnly`; `consumable_rates` also removes local rows deleted in the cloud, `prune`).
+- **Rules** (`services/domain/consumables.js`): `triggersFor(from, to)`: Printing → Pressing takes the `Pressing` rates; Completed (from Printing or Pressing) takes any `Pressing` rates not taken yet plus the `Completed` rates. `needed = ceil(Σ quantity × rate)`, worked out in integer thousandths. `clampDeduction`: takes `min(on hand, needed)` and records the rest as `shortfall`.
+- **Transaction** (`PATCH /api/orders/:id/status`): the consumables are planned before any stock row is locked and locked **together with the order's materials** in one `ORDER BY inventory_id` lock (no deadlocks). Each one is re-read after the materials moved, taken with a SQL guard, logged once and written to `inventory_audit_log` (`stock_subtracted`, `details.kind = 'consumable_deducted'` with needed / taken / shortfall / before / after). Items in the Recycle Bin are skipped and not logged. The status change is never refused for a shortfall (decision taken, open question 7). The consumable ids join `inventory_updated`, so the PB 17 warning follows at once. The response and `GET /api/orders/:id` return `consumables_deducted`.
+- **Rates API:** `GET /api/inventory/:id/consumable-rates` (every role) and `PUT` (`edit_inventory`, replaces the list, needs the cloud: `503 RATES_REQUIRE_CLOUD`, `409 ITEM_NOT_SYNCED` for an item that exists only on this computer).
+- **No inventory units refactor:** consumables keep their existing free-text `unit` (ml, sheet, cone). Fractions are only in the rate; stock stays whole numbers and every deduction is rounded up.
+- **PB 11 / PB 12** shipped in the same migration: `inventory_items.selling_price`, `order_profiles.subtotal_amount` / `discount_amount` / `discount_reason` (no backfill, so no order's version moves; older quotes are shown as their own subtotal by `quoteBreakdown`). `services/domain/pricing.js` holds the volume tiers (≥ 100 pcs 10%, ≥ 50 pcs 5%, on the order's total quantity), the discount (₱ or %, reason required, never above the subtotal) and `quoteLines` for the quotation, all in centavos. `POST /api/orders/:id/quote` (Owner: `set_quote`, discounts also `apply_discount`; `dry_run` previews; cloud only, `503 QUOTE_REQUIRES_CLOUD`; frozen after approval) prices every item and writes `audit_log` `quote_generated` or `discount_applied`. A quote typed in Edit details becomes its own subtotal with no discount and writes `quote_overridden` in the same transaction (offline too, pushed by the sync). `allowed_actions` adds `generate_quote`, `apply_discount` and `print_quote`.
+- **PB 7 roster import:** `POST /api/orders/:id/items/bulk` (1–500 rows, all or none, same reservation guard as one item).
+- **Tests:** `tests/m6-part2-rules.test.js` (rules), `tests/m6-part2.test.js` (offline), `tests/m6-part2.pg.test.js` (real PostgreSQL: migration, constraints, exactly once also under two simultaneous requests, shortfall, rollback after the deduction, quotes, discounts, typed quote audit, roster reservation).
+
 ### Needed from the client before coding (blocking)
 
 - The list of consumables: each ink colour, transfer paper, thread, and so on, with the unit each is counted in (ml, sheets, cones).
@@ -337,13 +348,13 @@ The earlier draft's designs remain valid. They now belong to these backlog items
 4. ~~Batch 1.6: add CI now?~~ **Yes.**
 5. ~~**Batch 2.3:** Is "payment acknowledgement receipt" (not a BIR OR) acceptable? What should happen when two offline branches together overpay?~~ **D1:** yes, a printable "Payment Acknowledgement" that says it is not an Official Receipt. **D2:** every payment is accepted when it syncs; the order shows "Overpaid" and the Owner refunds by hand (voids/refunds are PB 23).
 6. ~~**Batch 3.1:** Can orders skip Pressing (e.g. mugs), going Printing → Completed?~~ **Yes** (answered 2026-11-12): Pressing is optional.
-7. **PB 15:** Consumable list, usage rates, and the "never block a status change" rule.
+7. ~~**PB 15:** Consumable list, usage rates, and the "never block a status change" rule.~~ **Never block** (Batch M6 part 2): a shortfall clamps the stock at 0 and is recorded. The consumable list and the rates are data the shop enters in the Catalog ("Usage rates").
 8. **PB 18:** Immediate deduction (UAC), or a report → verify flow?
 9. **Branches:** 2 (SIA 1) or 3 (SoftEng proposal, UAT)? This affects UAT device count and deployment.
 
 ## 9. Out of scope for this sprint
 
 - The Next.js / Tailwind / mobile migration itself (§3 only sets the rules).
-- PB 11, 12, 16, 18–23 and 26–27 feature work, except the remediation listed in §2.
+- PB 18–23 and 26–27 feature work, except the remediation listed in §2 (PB 11, 12 and 16 were built in Batch M6).
 - Hard deletion of anything except inventory items through the existing Recycle Bin.
 - Photo upload for evidence. Use Google Drive links.

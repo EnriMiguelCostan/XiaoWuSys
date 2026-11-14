@@ -21,7 +21,8 @@ const EXPECTED_TRIGGERS = [
   'trg_order_profiles_last_modified', 'trg_inventory_items_notify', 'trg_order_profiles_assign_tracking_no',
   'trg_payments_assign_receipt_no', // migration 008
   'trg_audit_log_append_only', // migration 009
-  'trg_order_status_history_append_only', 'trg_order_profiles_notify' // migration 010
+  'trg_order_status_history_append_only', 'trg_order_profiles_notify', // migration 010
+  'trg_consumable_rates_last_modified', 'trg_order_consumables_log_append_only' // migration 011
 ];
 
 const checkCloudSchema = async (pgPool) => {

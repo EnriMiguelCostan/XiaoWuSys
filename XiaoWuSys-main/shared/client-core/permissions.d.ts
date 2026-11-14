@@ -24,12 +24,18 @@ export interface OrderActions {
   statuses: string[];
   edit_deadline: boolean;
   edit_quote: boolean;
+  /** PB 11: work out the quote from the catalog prices (POST /api/orders/:id/quote) */
+  generate_quote: boolean;
+  /** PB 12: lower the calculated quote with a discount and a reason */
+  apply_discount: boolean;
   link_design: boolean;
   add_items: boolean;
   record_payment: boolean;
   max_payment: number;
   payment_blocked_reason: string | null;
   print_receipt: boolean;
+  /** The customer quotation can be printed (the order has a quote) */
+  print_quote: boolean;
   [key: string]: unknown;
 }
 

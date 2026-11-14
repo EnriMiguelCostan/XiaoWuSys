@@ -55,6 +55,7 @@ export function ItemFormDialog({
     quantity_available: '',
     minimum_threshold: item ? String(item.minimum_threshold) : '',
     unit_cost: item ? String(item.unit_cost) : '',
+    selling_price: item ? String(item.selling_price ?? 0) : '',
   });
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<{ message: string; tone: 'danger' | 'warning' } | null>(null);
@@ -75,8 +76,9 @@ export function ItemFormDialog({
     const quantity = toNumberInput(form.quantity_available);
     const threshold = toNumberInput(form.minimum_threshold);
     const cost = toNumberInput(form.unit_cost);
-    if ([quantity, threshold, cost].some((n) => Number.isNaN(n))) {
-      setProblem({ tone: 'danger', message: 'Quantity, low-stock alert and unit cost must be numbers.' });
+    const price = toNumberInput(form.selling_price);
+    if ([quantity, threshold, cost, price].some((n) => Number.isNaN(n))) {
+      setProblem({ tone: 'danger', message: 'Quantity, low-stock alert, unit cost and selling price must be numbers.' });
       return;
     }
 
@@ -90,6 +92,7 @@ export function ItemFormDialog({
         quantity_available: quantity,
         minimum_threshold: threshold,
         unit_cost: cost,
+        selling_price: price,
       };
     } else {
       // Send only what changed (as the MVP did), plus the version this form was opened with
@@ -100,6 +103,7 @@ export function ItemFormDialog({
       if (supplier !== (item.supplier ?? '')) body.supplier = supplier || null;
       if (form.minimum_threshold.trim() !== String(item.minimum_threshold)) body.minimum_threshold = threshold;
       if (form.unit_cost.trim() !== String(item.unit_cost)) body.unit_cost = cost;
+      if (form.selling_price.trim() !== String(item.selling_price ?? 0)) body.selling_price = price;
       if (Object.keys(body).length === 0) {
         onDone({ type: 'warning', title: 'No changes', message: 'Nothing was changed, so nothing was saved.' });
         return;
@@ -181,6 +185,9 @@ export function ItemFormDialog({
           </Field>
           <Field id="item-cost" label="Unit cost (₱)">
             <Input id="item-cost" type="number" min={0} max={MONEY_INPUT_MAX} step="0.01" inputMode="decimal" placeholder="0.00" {...bind('unit_cost')} />
+          </Field>
+          <Field id="item-price" label="Selling price per piece (₱)" hint="What the customer pays before bulk discounts. Used to calculate quotes.">
+            <Input id="item-price" type="number" min={0} max={MONEY_INPUT_MAX} step="0.01" inputMode="decimal" placeholder="0.00" {...bind('selling_price')} />
           </Field>
           {editing && (
             <p className="text-sm text-muted-foreground sm:col-span-2">

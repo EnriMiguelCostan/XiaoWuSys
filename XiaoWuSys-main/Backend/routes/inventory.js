@@ -9,16 +9,19 @@ const {
 } = require('../services/capacity');
 const { isConnectionError, sendDbError } = require('../utils/dbErrors');
 const { LOCAL_NOW, offlineUpdateBookkeeping } = require('../utils/localSync');
-const { createValidator } = require('../utils/validation');
+const { createValidator, ID_PATTERN } = require('../utils/validation');
 const {
-  selectList, serialize, locateRecord, readLocal, listRecords, countRecords,
+  selectList, serialize, locateRecord, readLocal, listRecords, countRecords, getRecord,
   withPgTransaction, withLocalTransaction, sqliteGet, sqliteRun,
   ACTIVE_ITEM_SQL, BIN_ITEM_SQL
 } = require('../services/records');
 const { STOCK_STATUSES, withAvailability, buildInventorySnapshot } = require('../services/inventorySnapshot');
 const { snapshotOf, auditCloud, auditLocal } = require('../services/inventoryAudit');
 const { purgeInCloud, applyPurgeLocally, purgeBatches, RETENTION_DAYS } = require('../services/recycleBin');
-const { rolesWith } = require('../services/domain/permissions');
+const { rolesWith, can } = require('../services/domain/permissions');
+const { CONSUMABLE_TRIGGERS, checkRateList } = require('../services/domain/consumables');
+const { loadRates } = require('../services/consumables');
+const { refreshLocalRows } = require('../services/sync');
 
 // Who may do what (role always comes from the JWT)
 const READ_ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
@@ -165,12 +168,13 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
   const unit_cost = v.nonNegativeMoney(body.unit_cost, 'unit_cost', { required: false, defaultValue: 0 });
   const unit = v.optionalString(body.unit, 'unit', 30) || 'pcs';
   const supplier = v.optionalString(body.supplier, 'supplier', 255);
+  const selling_price = v.nonNegativeMoney(body.selling_price, 'selling_price', { required: false, defaultValue: 0 }); // PB 11
   if (v.failed()) return v.send(res);
 
   const item_name = cleanName(rawName);
   const inventory_id = crypto.randomUUID();
   const values = [inventory_id, item_name, cleanName(item_category), quantity_available, minimum_threshold, unit_cost,
-    cleanName(unit), supplier ? cleanName(supplier) : null];
+    cleanName(unit), supplier ? cleanName(supplier) : null, selling_price];
 
   try {
     const result = await cloudFirst('cloud',
@@ -179,8 +183,9 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
           || (await findDuplicateLocal(req.localDb, item_name, { pendingOnly: true }).catch(() => null));
         if (dup) throw duplicateError(dup);
         const { rows } = await client.query(
-          `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, unit, supplier)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING ${selectList('inventory_items', 'pg')}`,
+          `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, unit, supplier,
+                                        selling_price)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING ${selectList('inventory_items', 'pg')}`,
           values
         );
         const record = serialize('inventory_items', rows[0]);
@@ -191,8 +196,9 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
         const dup = await findDuplicateLocal(tx, item_name);
         if (dup) throw duplicateError(dup);
         await sqliteRun(tx,
-          `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, unit, supplier, sync_status, last_modified)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+          `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, unit, supplier,
+                                        selling_price, sync_status, last_modified)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
           values);
         const record = await readLocal(tx, 'inventory_items', inventory_id);
         await auditLocal(tx, req.user, inventory_id, 'created', item_name, { item: snapshotOf(record) });
@@ -217,12 +223,13 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
 // ==========================================
 // 1b. EDIT ITEM DETAILS (Catalog card "Edit")
 // PATCH /api/inventory/:inventory_id
-// Body (any of): { item_name, item_category, minimum_threshold, unit_cost, unit, supplier, expected_version? }
+// Body (any of): { item_name, item_category, minimum_threshold, unit_cost, selling_price, unit, supplier, expected_version? }
+//   selling_price (PB 11): what the shop charges per piece before volume discounts
 // Quantities are changed through /adjust and /loss so every stock movement is traceable.
 // -> 200 { message, source, changed, item }
 //    404 not found / in bin | 409 DUPLICATE_ITEM | 409 EDIT_CONFLICT (someone else edited it first)
 // ==========================================
-const EDITABLE_FIELDS = ['item_name', 'item_category', 'minimum_threshold', 'unit_cost', 'unit', 'supplier'];
+const EDITABLE_FIELDS = ['item_name', 'item_category', 'minimum_threshold', 'unit_cost', 'selling_price', 'unit', 'supplier'];
 
 router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
   const { inventory_id } = req.params;
@@ -240,6 +247,7 @@ router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
     }
   }
   if (body.unit_cost !== undefined) updates.unit_cost = v.nonNegativeMoney(body.unit_cost, 'unit_cost');
+  if (body.selling_price !== undefined) updates.selling_price = v.nonNegativeMoney(body.selling_price, 'selling_price');
   if (body.unit !== undefined) updates.unit = v.requiredString(body.unit, 'unit', 30);
   // supplier may be cleared with null or ''
   if (body.supplier !== undefined) updates.supplier = body.supplier === null ? null : v.optionalString(body.supplier, 'supplier', 255);
@@ -741,6 +749,127 @@ router.post('/:inventory_id/adjust', requireRole(EDIT_ROLES), async (req, res) =
     });
   } catch (err) {
     sendError(res, err, 'adjusting stock');
+  }
+});
+
+// ==========================================
+// 2c. USAGE RATES OF A BLANK (PB 15: what one piece uses of each consumable, and when)
+// GET /api/inventory/:inventory_id/consumable-rates   (every role)
+//   -> { source, product: { inventory_id, item_name, unit }, rates: [{ rate_id, consumable_inventory_id,
+//        consumable_name, consumable_unit, consumable_in_recycle_bin, quantity_per_piece, trigger_status,
+//        version }], consumable_options: [{ inventory_id, item_name, unit, item_category }],
+//        triggers: ['Pressing', 'Completed'], can_edit }
+// PUT /api/inventory/:inventory_id/consumable-rates   (edit_inventory)
+//   Body: { rates: [{ consumable_inventory_id, quantity_per_piece, trigger_status }] }  (replaces the list; [] clears it)
+//   quantity_per_piece > 0 with up to 3 decimals; trigger_status 'Pressing' (default) or 'Completed'.
+//   One transaction: the blank is locked, every consumable must be an active catalog item, the old
+//   list is replaced and the change is written to the inventory trail (before / after).
+//   Needs the cloud (503 RATES_REQUIRE_CLOUD): the rates decide what every branch takes from stock.
+//   -> 200 { message, source: 'cloud', rates }
+// ==========================================
+const ratesRequireCloud = () => new Rejected(503, {
+  error: 'RATES_REQUIRE_CLOUD',
+  message: 'Changing usage rates needs the cloud connection, because every branch uses them. Nothing was changed. Try again when online.'
+});
+
+router.get('/:inventory_id/consumable-rates', requireRole(READ_ROLES), async (req, res) => {
+  const { inventory_id } = req.params;
+  try {
+    const { source, record: product } = await getRecord(req, 'inventory_items', inventory_id);
+    if (!product) throw missingItem(inventory_id);
+    const view = await loadRates(req, inventory_id);
+    const options = await listRecords(req, 'inventory_items', { where: ACTIVE_ITEM_SQL, orderBy: 'item_name, inventory_id' });
+    res.status(200).json({
+      source: [source, view.source, options.source].includes('local') ? 'local' : 'cloud',
+      product: { inventory_id: product.inventory_id, item_name: product.item_name, unit: product.unit },
+      rates: view.rates,
+      consumable_options: options.records
+        .filter((i) => i.inventory_id !== inventory_id)
+        .map((i) => ({ inventory_id: i.inventory_id, item_name: i.item_name, unit: i.unit, item_category: i.item_category })),
+      triggers: CONSUMABLE_TRIGGERS,
+      can_edit: can(req.user.role, 'edit_inventory')
+    });
+  } catch (err) {
+    sendError(res, err, 'reading usage rates');
+  }
+});
+
+router.put('/:inventory_id/consumable-rates', requireRole(EDIT_ROLES), async (req, res) => {
+  const { inventory_id } = req.params;
+  const checked = checkRateList((req.body || {}).rates, inventory_id, ID_PATTERN);
+  if (checked.errors.length > 0) {
+    return res.status(400).json({ error: 'VALIDATION_FAILED', message: checked.errors[0].message, details: checked.errors });
+  }
+  const rates = checked.rates.map((r) => ({ ...r, rate_id: crypto.randomUUID() }));
+  const consumableIds = [...new Set(rates.map((r) => r.consumable_inventory_id))];
+  const listOf = (rows) => rows.map((r) => ({
+    consumable_inventory_id: r.consumable_inventory_id, quantity_per_piece: Number(r.quantity_per_piece), trigger_status: r.trigger_status
+  }));
+
+  try {
+    const located = await locateRecord(req, 'inventory_items', inventory_id);
+    if (!located.location) throw missingItem(inventory_id);
+    if (located.location === 'local') {
+      if (!located.cloudReachable) throw ratesRequireCloud();
+      throw new Rejected(409, { error: 'ITEM_NOT_SYNCED', message: 'This item was added offline and is not in the cloud yet. Sync, then set its usage rates.' });
+    }
+
+    const result = await withPgTransaction(req.pgPool, async (client) => {
+      const product = await lockCloudItem(client, inventory_id);
+      if (!product) throw missingItem(inventory_id);
+      const found = consumableIds.length === 0 ? { rows: [] } : await client.query(
+        `SELECT inventory_id FROM inventory_items WHERE inventory_id = ANY($1::text[]) AND ${ACTIVE_ITEM_SQL}`, [consumableIds]);
+      const present = new Set(found.rows.map((r) => r.inventory_id));
+      const missing = consumableIds.filter((id) => !present.has(id));
+      if (missing.length > 0) {
+        throw new Rejected(404, {
+          error: 'INVENTORY_ITEM_NOT_FOUND',
+          message: 'One or more chosen consumables are no longer in the catalog (they may have been deleted). Choose them again.',
+          missing_inventory_ids: missing
+        });
+      }
+      const before = await client.query(
+        `SELECT consumable_inventory_id, quantity_per_piece::text AS quantity_per_piece, trigger_status
+           FROM consumable_rates WHERE product_inventory_id = $1 ORDER BY trigger_status, consumable_inventory_id`, [inventory_id]);
+      await client.query('DELETE FROM consumable_rates WHERE product_inventory_id = $1', [inventory_id]);
+      if (rates.length > 0) {
+        await client.query(
+          `INSERT INTO consumable_rates (rate_id, product_inventory_id, consumable_inventory_id, quantity_per_piece, trigger_status)
+           SELECT r.rate_id, $1::text, r.consumable_inventory_id, r.quantity_per_piece, r.trigger_status
+             FROM unnest($2::text[], $3::text[], $4::numeric[], $5::text[]) AS r(rate_id, consumable_inventory_id, quantity_per_piece, trigger_status)`,
+          [inventory_id, rates.map((r) => r.rate_id), rates.map((r) => r.consumable_inventory_id),
+            rates.map((r) => r.quantity_per_piece), rates.map((r) => r.trigger_status)]);
+      }
+      await auditCloud(client, req.user, inventory_id, 'edited', product.item_name, {
+        kind: 'consumable_rates', before: listOf(before.rows), after: listOf(rates)
+      });
+      return { product };
+    });
+
+    // This computer's copy follows at once (the next sync would do it too)
+    try {
+      await sqliteRun(req.localDb, "DELETE FROM consumable_rates WHERE product_inventory_id = ? AND sync_status = 'synced'", [inventory_id]);
+      if (rates.length > 0) await refreshLocalRows(req.pgPool, req.localDb, 'consumable_rates', rates.map((r) => r.rate_id));
+    } catch (copyErr) {
+      console.error('⚠️ Could not copy the new usage rates to this computer (the next sync will):', copyErr.message);
+    }
+
+    const view = await loadRates(req, inventory_id);
+    console.log(`🧪 Usage rates of ${inventory_id} set by ${req.user.user_id} (${rates.length} rate(s))`);
+    res.status(200).json({
+      message: rates.length === 0
+        ? `"${result.product.item_name}" no longer uses any consumables.`
+        : `Usage rates saved for "${result.product.item_name}".`,
+      source: 'cloud',
+      rates: view.rates
+    });
+  } catch (err) {
+    if (!(err instanceof Rejected) && isConnectionError(err)) {
+      return sendError(res, err.commitUnknown
+        ? new Rejected(503, { error: 'COMMIT_UNKNOWN', message: 'Connection to the cloud dropped while saving. Reload the usage rates before retrying.' })
+        : ratesRequireCloud(), 'saving usage rates');
+    }
+    sendError(res, err, 'saving usage rates');
   }
 });
 

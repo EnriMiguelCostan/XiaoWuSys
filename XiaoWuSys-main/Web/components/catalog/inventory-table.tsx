@@ -7,7 +7,7 @@
 // "Stock value" per row is item.stock_value from the server (Batch M6); the whole-catalog value
 // is summary.stock_value. Not ported from the MVP on purpose (rules guard: no-rule-math): the
 // totals footer over the filtered rows, which would add up stock and money here.
-import { ArrowDown, ArrowUp, ArrowUpDown, Minus, MoreHorizontal, Pencil, Plus, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, ArrowUpDown, FlaskConical, Minus, MoreHorizontal, Pencil, Plus, Trash2 } from 'lucide-react';
 import { peso } from '@xiaowu/client-core/format';
 import type { StockAction } from '@/components/catalog/stock-dialog';
 import { Badge } from '@/components/ui/badge';
@@ -25,7 +25,7 @@ import type { InventoryItem } from '@/lib/inventory';
 import { lookFor, STOCK_STATUS, TONE_CLASSES, TONE_EDGE } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
 
-export type SortKey = 'name' | 'category' | 'status' | 'on_hand' | 'held' | 'free' | 'threshold' | 'unit_cost' | 'stock_value';
+export type SortKey = 'name' | 'category' | 'status' | 'on_hand' | 'held' | 'free' | 'threshold' | 'unit_cost' | 'selling_price' | 'stock_value';
 export interface SortState {
   key: SortKey;
   dir: 1 | -1;
@@ -44,13 +44,14 @@ const SORTERS: Record<SortKey, (a: InventoryItem, b: InventoryItem) => number> =
   free: (a, b) => cmpNum(a.quantity_available_net, b.quantity_available_net) || byName(a, b),
   threshold: (a, b) => cmpNum(a.minimum_threshold, b.minimum_threshold) || byName(a, b),
   unit_cost: (a, b) => cmpNum(a.unit_cost, b.unit_cost) || byName(a, b),
+  selling_price: (a, b) => cmpNum(a.selling_price ?? 0, b.selling_price ?? 0) || byName(a, b),
   stock_value: (a, b) => cmpNum(a.stock_value ?? 0, b.stock_value ?? 0) || byName(a, b),
 };
 export const sortItems = (items: InventoryItem[], sort: SortState) =>
   [...items].sort((a, b) => (sort.dir === 1 ? SORTERS[sort.key](a, b) : SORTERS[sort.key](b, a)));
 
 // Numbers read best largest-first; text A to Z
-const FIRST_DIR: Partial<Record<SortKey, -1>> = { on_hand: -1, held: -1, free: -1, threshold: -1, unit_cost: -1, stock_value: -1 };
+const FIRST_DIR: Partial<Record<SortKey, -1>> = { on_hand: -1, held: -1, free: -1, threshold: -1, unit_cost: -1, selling_price: -1, stock_value: -1 };
 export const nextSort = (prev: SortState, key: SortKey): SortState =>
   prev.key === key ? { key, dir: prev.dir === 1 ? -1 : 1 } : { key, dir: FIRST_DIR[key] ?? 1 };
 
@@ -64,6 +65,7 @@ const COLUMNS: { key: SortKey; label: string; num?: boolean; wide?: 'sm' | 'md' 
   { key: 'free', label: 'Free to use', num: true },
   { key: 'threshold', label: 'Low-stock alert', num: true, wide: 'lg' },
   { key: 'unit_cost', label: 'Unit cost', num: true, wide: 'lg' },
+  { key: 'selling_price', label: 'Selling price', num: true, wide: 'lg' },
   { key: 'stock_value', label: 'Stock value', num: true, wide: 'lg' },
 ];
 const WIDE_CLASS = { sm: 'hidden sm:table-cell', md: 'hidden md:table-cell', lg: 'hidden lg:table-cell' } as const;
@@ -104,6 +106,7 @@ export function InventoryTable({
   onEdit,
   onAdjust,
   onDelete,
+  onRates,
 }: {
   rows: InventoryItem[];
   sort: SortState;
@@ -113,6 +116,8 @@ export function InventoryTable({
   onEdit: (item: InventoryItem) => void;
   onAdjust: (item: InventoryItem, action: StockAction) => void;
   onDelete: (item: InventoryItem) => void;
+  /** PB 15: open the usage rates (consumables) of this item */
+  onRates: (item: InventoryItem) => void;
 }) {
   return (
     // min-w-0 + max-w-full: very large numbers can still make the table wider than the screen;
@@ -180,6 +185,9 @@ export function InventoryTable({
                 <TableCell className="hidden text-right tabular-nums lg:table-cell">{item.minimum_threshold.toLocaleString()}</TableCell>
                 <TableCell className="hidden text-right tabular-nums lg:table-cell">{peso(item.unit_cost)}</TableCell>
                 <TableCell className="hidden text-right tabular-nums lg:table-cell">
+                  {item.selling_price === undefined ? '—' : peso(item.selling_price)}
+                </TableCell>
+                <TableCell className="hidden text-right tabular-nums lg:table-cell">
                   {item.stock_value === undefined ? '—' : peso(item.stock_value)}
                 </TableCell>
                 {canEdit && (
@@ -202,6 +210,9 @@ export function InventoryTable({
                         </DropdownMenuItem>
                         <DropdownMenuItem onSelect={() => onEdit(item)}>
                           <Pencil aria-hidden /> Edit details
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => onRates(item)}>
+                          <FlaskConical aria-hidden /> Usage rates (consumables)
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem variant="destructive" onSelect={() => onDelete(item)}>

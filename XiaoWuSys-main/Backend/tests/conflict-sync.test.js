@@ -24,7 +24,8 @@ const createScriptedCloud = () => {
     orders, audits, log,
     put: (row) => orders.set(row.order_id, {
       customer_id: 'c-1', production_status: 'Pending', total_quote_amount: '1000.00', stock_reserved: 'false',
-      date_created: '2026-11-01 00:00:00', ...row, version: nextVersion()
+      date_created: '2026-11-01 00:00:00', subtotal_amount: '0.00', discount_amount: '0.00', // NOT NULL DEFAULT 0 (migration 011)
+      ...row, version: nextVersion()
     }),
     query: async (sql, params = []) => {
       const q = flat(sql);
