@@ -1,0 +1,8 @@
+# Line endings for the Next.js app and the shared client code.
+#
+# The repository stores LF. Without this file, Windows clones with core.autocrlf=true check
+# these files out as CRLF, and tools that read them line by line (e.g. Web/scripts/check-rules.mjs)
+# can behave differently than on Linux CI. eol=lf keeps every working copy LF on every OS.
+# text=auto leaves binary files (icons, fonts) untouched.
+Web/** text=auto eol=lf
+shared/client-core/** text=auto eol=lf

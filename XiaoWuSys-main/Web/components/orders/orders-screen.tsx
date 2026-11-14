@@ -351,8 +351,10 @@ export function OrdersScreen() {
                       </Badge>
                     )}
                   </TableCell>
-                  <TableCell className="max-w-56 min-w-32 whitespace-normal wrap-anywhere">
-                    {customerName(o.customer_id)}
+                  <TableCell className="min-w-0">
+                    <span className="block max-w-[150px] truncate sm:max-w-[220px]" title={customerName(o.customer_id)}>
+                      {customerName(o.customer_id)}
+                    </span>
                     <span className="block text-xs text-muted-foreground sm:hidden">
                       Due {formatDateTime(o.production_deadline, { withTime: false })}
                     </span>
