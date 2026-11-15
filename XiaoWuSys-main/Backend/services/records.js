@@ -171,13 +171,17 @@ const sqliteRun = (db, sql, params = []) =>
 
 // ---------- Reads with C5-aware fallback ----------
 // raw: optional SQL condition valid in both dialects (e.g. ACTIVE_ITEM_SQL), never user input
+// filters: [column, value] (equals) or [column, value, 'LIKE']. The column and operator are
+// always written in code; only the value comes from the request, and it is always a parameter.
+const FILTER_OPERATORS = new Set(['=', 'LIKE']);
 const buildWhere = (filters, dialect, raw = null) => {
   const params = [];
   const clauses = filters
     .filter(([, value]) => value !== undefined && value !== null)
-    .map(([col, value]) => {
+    .map(([col, value, op = '=']) => {
+      if (!FILTER_OPERATORS.has(op)) throw new Error(`Unsupported filter operator: ${op}`);
       params.push(value);
-      return `${col} = ${dialect === 'pg' ? `$${params.length}` : '?'}`;
+      return `${col} ${op} ${dialect === 'pg' ? `$${params.length}` : '?'}`;
     });
   if (raw) clauses.push(`(${raw})`);
   return { sql: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };

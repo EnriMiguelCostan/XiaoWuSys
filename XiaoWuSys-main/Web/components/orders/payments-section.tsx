@@ -205,7 +205,7 @@ export function PaymentsSection({
         <form onSubmit={submit} className="space-y-3 rounded-md border bg-muted/30 p-3">
           <FormProblem message={problem} />
           <div className="grid gap-3 sm:grid-cols-[2fr_1fr]">
-            <div className="min-w-0 space-y-1.5">
+            <div className="flex min-w-0 flex-col gap-1.5">
               <Label htmlFor="payment-value">Amount (₱)</Label>
               <Input
                 id="payment-value"
@@ -220,7 +220,7 @@ export function PaymentsSection({
                 onChange={(e) => setAmount(e.target.value)}
               />
             </div>
-            <div className="min-w-0 space-y-1.5">
+            <div className="flex min-w-0 flex-col gap-1.5">
               <Label htmlFor="pay-type">Type</Label>
               <Select value={type} onValueChange={setType}>
                 <SelectTrigger id="pay-type" className="w-full">

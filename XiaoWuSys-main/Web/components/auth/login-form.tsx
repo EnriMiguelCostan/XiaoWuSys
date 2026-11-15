@@ -8,6 +8,7 @@ import { useRouter } from 'next/navigation';
 import { Eye, EyeOff, LogIn } from 'lucide-react';
 import { APP_NAME, BrandLogo } from '@/components/brand/brand-logo';
 import { HOME_PATH } from '@/components/layout/nav-items';
+import { ThemeToggle } from '@/components/layout/theme-toggle';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -65,6 +66,11 @@ export function LoginForm() {
       />
       {/* Theme-tinted veil: keeps text contrast readable on top of the photo in both themes */}
       <div className="absolute inset-0 -z-10 bg-background/35 dark:bg-background/55" aria-hidden />
+
+      {/* Light / dark switch, same as in the app header. A frosted pill keeps it readable on the photo. */}
+      <div className="absolute top-4 right-4 rounded-full bg-card/80 shadow-md ring-1 ring-foreground/10 backdrop-blur-md">
+        <ThemeToggle className="rounded-full" />
+      </div>
 
       <Card className="w-full max-w-md gap-6 bg-card/80 shadow-2xl ring-foreground/10 backdrop-blur-md [--card-spacing:--spacing(6)] supports-[backdrop-filter]:bg-card/75 sm:[--card-spacing:--spacing(8)]">
         <CardHeader className="justify-items-center gap-2 text-center">

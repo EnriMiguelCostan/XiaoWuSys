@@ -17,7 +17,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
+import { PasswordInput } from '@/components/forms/password-input';
 import { Label } from '@/components/ui/label';
 import { useApi } from '@/hooks/use-api';
 import { useSession } from '@/hooks/use-session';
@@ -101,16 +101,16 @@ export function ChangePasswordDialog({ open, onOpenChange }: { open: boolean; on
               </p>
             )}
             <div className="space-y-1.5">
-              <Label htmlFor="pw-current">Current password</Label>
-              <Input id="pw-current" type="password" autoComplete="current-password" required autoFocus {...field('current')} />
+              <Label htmlFor="pw-current">Enter current password</Label>
+              <PasswordInput id="pw-current" autoComplete="current-password" required autoFocus {...field('current')} />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="pw-new">New password</Label>
-              <Input id="pw-new" type="password" autoComplete="new-password" required maxLength={72} {...field('next')} />
+              <Label htmlFor="pw-new">Enter new password</Label>
+              <PasswordInput id="pw-new" autoComplete="new-password" required maxLength={72} {...field('next')} />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="pw-confirm">New password again</Label>
-              <Input id="pw-confirm" type="password" autoComplete="new-password" required maxLength={72} {...field('confirm')} />
+              <Label htmlFor="pw-confirm">Enter new password again</Label>
+              <PasswordInput id="pw-confirm" autoComplete="new-password" required maxLength={72} {...field('confirm')} />
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => close(false)} disabled={busy}>

@@ -307,6 +307,7 @@ router.use(verifyToken);
 // ==========================================
 // LIST ORDERS (M10)
 // GET /api/orders?status=Pending&customer_id=CUST-001&sort=production_deadline&dir=asc&limit=50&offset=0
+//   number_search: keyword on the order number ("12" -> XM-2026-0012, XM-2026-0120 …), closest first
 //   sort: date_created (default) | production_deadline | total_quote_amount | production_status | priority
 //   dir:  desc (default) | asc     (priority defaults to asc: most urgent first)
 //   priority (PB 16): overdue orders first, then due today / tomorrow, then due within 3 days,
@@ -341,6 +342,14 @@ const prioritySql = (now = new Date()) => {
 };
 const SORT_NAMES = [...Object.keys(ORDER_SORTS), 'priority'];
 
+// Order-number keyword search (GET /?number_search=). Both run on Postgres and SQLite.
+// The running number of XM-2026-0012 is "0012" (from character 9).
+const NUMBER_SEQUENCE_SQL = 'substr(order_profiles.tracking_no, 9)';
+// Closest match first: the running number without leading zeros, shortest first. Searching
+// "12" puts XM-2026-0012 ("12") before XM-2026-0120 ("120") and XM-2026-1203 ("1203").
+// Fixed SQL, no user input.
+const NUMBER_CLOSENESS_SQL = `length(ltrim(${NUMBER_SEQUENCE_SQL}, '0')) ASC`;
+
 router.get('/', requireRole(READ_ROLES), async (req, res) => {
   const v = createValidator();
   const status = v.oneOf(req.query.status, 'status', PRODUCTION_STATUSES, { required: false });
@@ -348,6 +357,8 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
   const includeArchived = v.oneOf(req.query.include_archived, 'include_archived', ['true', 'false'], { required: false }) === 'true';
   const customer_id = v.id(req.query.customer_id, 'customer_id', { required: false });
   const tracking_no = v.trackingNo(req.query.tracking_no, 'tracking_no', { required: false }); // PB 6: find by order number
+  // Keyword search on the order number: "12" finds XM-2026-0012, XM-2026-0120, XM-2026-1203...
+  const numberSearch = v.orderNumberSearch(req.query.number_search, 'number_search');
   const sort = v.oneOf(req.query.sort, 'sort', SORT_NAMES, { required: false }) || 'date_created';
   const dir = v.oneOf(req.query.dir, 'dir', ['asc', 'desc'], { required: false }) || (sort === 'priority' ? 'asc' : 'desc');
   const { limit, offset } = v.pagination(req.query);
@@ -355,13 +366,18 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
 
   try {
     const result = await listRecords(req, 'order_profiles', {
-      filters: [['production_status', status], ['customer_id', customer_id], ['tracking_no', tracking_no]],
+      filters: [
+        ['production_status', status], ['customer_id', customer_id], ['tracking_no', tracking_no],
+        // Digits only: look inside the running number (after "XM-2026-"), so "20" does not match
+        // every order of 2026. Anything else: anywhere in the whole number.
+        ...(numberSearch ? [[numberSearch.digitsOnly ? NUMBER_SEQUENCE_SQL : 'tracking_no', numberSearch.pattern, 'LIKE']] : [])
+      ],
       where: includeArchived ? null : 'archived_at IS NULL',
       // Ties broken by newest first, then order_id, so paging is stable. Within one urgency
       // group the nearest deadline comes first.
-      orderBy: sort === 'priority'
+      orderBy: (numberSearch ? `${NUMBER_CLOSENESS_SQL}, ` : '') + (sort === 'priority'
         ? `${prioritySql()} ${dir.toUpperCase()}, order_profiles.production_deadline ASC, order_profiles.order_id`
-        : `${ORDER_SORTS[sort]} ${dir.toUpperCase()}, order_profiles.date_created DESC, order_profiles.order_id`,
+        : `${ORDER_SORTS[sort]} ${dir.toUpperCase()}, order_profiles.date_created DESC, order_profiles.order_id`),
       limit,
       offset
     });

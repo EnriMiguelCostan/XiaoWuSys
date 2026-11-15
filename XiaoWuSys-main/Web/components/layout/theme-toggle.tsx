@@ -5,11 +5,18 @@ import { Moon, Sun } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useTheme } from '@/hooks/use-theme';
 
-export function ThemeToggle() {
+export function ThemeToggle({ className }: { className?: string }) {
   const { theme, toggle } = useTheme();
   const next = theme === 'dark' ? 'light' : 'dark';
   return (
-    <Button variant="ghost" size="icon" onClick={toggle} aria-label={`Switch to ${next} mode`} title={`Switch to ${next} mode`}>
+    <Button
+      variant="ghost"
+      size="icon"
+      className={className}
+      onClick={toggle}
+      aria-label={`Switch to ${next} mode`}
+      title={`Switch to ${next} mode`}
+    >
       {theme === 'dark' ? <Sun aria-hidden /> : <Moon aria-hidden />}
     </Button>
   );

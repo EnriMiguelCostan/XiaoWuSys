@@ -12,6 +12,7 @@ import { History, Link2, ListPlus, Pencil, Shirt, ShieldCheck } from 'lucide-rea
 import { formatDateTime, peso, todayInManila } from '@xiaowu/client-core/format';
 import { hasOrderNumber, NUMBER_AFTER_SYNC, shortfallLines } from '@xiaowu/client-core/orders';
 import type { OrderActions } from '@xiaowu/client-core/permissions';
+import { DateInput } from '@/components/forms/date-input';
 import { Field, FormProblem } from '@/components/forms/form-bits';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
@@ -116,7 +117,18 @@ export function OrderInfo({ detail, customer }: { detail: OrderDetail; customer:
   return (
     <div className="space-y-2">
       <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        <Info label="Customer" value={customer?.full_name || 'Unknown customer'} sub={customer?.contact_number} />
+        <Info label="Customer" value={customer?.full_name || 'Unknown customer'} />
+        <Info
+          label="Contact number"
+          value={
+            customer?.contact_number ? (
+              // Plain text on purpose: a tel: link made the browser ask which app to open
+              <span className="tabular-nums select-all">{customer.contact_number}</span>
+            ) : (
+              <span className="font-normal text-muted-foreground">Not given</span>
+            )
+          }
+        />
         <Info
           label="Stock"
           value={order.stock_reserved ? 'Reserved' : 'Not reserved'}
@@ -226,7 +238,7 @@ export function DetailsEditor({
       <div className="grid gap-3 sm:grid-cols-2">
         {actions.edit_deadline && (
           <Field id="edit-deadline" label="Deadline">
-            <Input id="edit-deadline" type="date" min={today} required value={form.deadline} onChange={(e) => setForm({ ...form, deadline: e.target.value })} />
+            <DateInput id="edit-deadline" min={today} required value={form.deadline} onChange={(e) => setForm({ ...form, deadline: e.target.value })} />
           </Field>
         )}
         {actions.edit_quote && (

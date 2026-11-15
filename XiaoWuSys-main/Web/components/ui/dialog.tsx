@@ -51,9 +51,18 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  dismissible = false,
+  onInteractOutside,
+  onEscapeKeyDown,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
+  /**
+   * false (default): a click / tap outside or the Escape key does NOT close the dialog, so a
+   * misclick never throws away what was typed. Only Cancel and the X close it.
+   * true: for read-only messages (e.g. ResultDialog) that are safe to dismiss anywhere.
+   */
+  dismissible?: boolean
 }) {
   return (
     <DialogPortal>
@@ -67,6 +76,14 @@ function DialogContent({
           "fixed top-1/2 left-1/2 z-50 grid w-full grid-cols-[minmax(0,1fr)] *:min-w-0 max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
+        onInteractOutside={(event) => {
+          if (!dismissible) event.preventDefault()
+          onInteractOutside?.(event)
+        }}
+        onEscapeKeyDown={(event) => {
+          if (!dismissible) event.preventDefault()
+          onEscapeKeyDown?.(event)
+        }}
         {...props}
       >
         {children}
@@ -92,7 +109,9 @@ function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="dialog-header"
-      className={cn("flex flex-col gap-2", className)}
+      // pt-2 + pr-8: room for the X button in the top-right corner, so a long title wraps
+      // before reaching it instead of running underneath it
+      className={cn("flex min-w-0 flex-col gap-2 pt-2 pr-8", className)}
       {...props}
     />
   )
@@ -133,7 +152,7 @@ function DialogTitle({
     <DialogPrimitive.Title
       data-slot="dialog-title"
       className={cn(
-        "font-heading text-base leading-none font-medium",
+        "font-heading text-base leading-snug font-medium wrap-anywhere [&>svg]:shrink-0",
         className
       )}
       {...props}

@@ -362,7 +362,13 @@ export function OrderDetailSheet({
           onClose();
         }}
       >
-        <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-2xl">
+        <SheetContent
+          side="right"
+          className="w-full gap-0 p-0 sm:max-w-2xl"
+          // While an edit form is open, a stray click outside must not close the panel and lose it
+          onInteractOutside={(e) => editing && e.preventDefault()}
+          onEscapeKeyDown={(e) => editing && e.preventDefault()}
+        >
           <SheetHeader className="border-b pr-12">
             <SheetTitle className="flex flex-wrap items-center gap-2">
               <span>Order</span>

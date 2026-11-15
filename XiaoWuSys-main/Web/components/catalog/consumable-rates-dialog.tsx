@@ -111,9 +111,15 @@ export function ConsumableRatesDialog({
     <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <FlaskConical className="size-5" aria-hidden />
-            Usage rates: <span className="min-w-0 wrap-anywhere">{item.item_name}</span>
+          <DialogTitle className="flex items-start gap-2">
+            <FlaskConical className="mt-0.5 size-5" aria-hidden />
+            <span className="min-w-0">
+              <span className="block">Usage rates</span>
+              {/* Long item names stop after two lines; the full name is in the tooltip */}
+              <span className="mt-1 line-clamp-2 block text-sm font-normal text-muted-foreground wrap-anywhere" title={item.item_name}>
+                {item.item_name}
+              </span>
+            </span>
           </DialogTitle>
           <DialogDescription>
             How much of each consumable one piece of this item uses. When an order with this item moves on, the system takes it from

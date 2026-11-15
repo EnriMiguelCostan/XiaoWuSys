@@ -144,6 +144,7 @@
   [role="checkbox"],
   [role="radio"],
   [role="link"],
+  [role="combobox"],
   a[href],
   summary,
   label[for],
@@ -155,7 +156,12 @@
   input[type="button"],
   input[type="reset"],
   input[type="color"],
-  input[type="range"] {
+  input[type="range"],
+  input[type="date"],
+  input[type="month"],
+  input[type="datetime-local"],
+  input[type="time"],
+  ::-webkit-calendar-picker-indicator {
     cursor: pointer;
   }
   button:disabled,
@@ -164,6 +170,33 @@
   select:disabled,
   input:disabled {
     cursor: not-allowed;
+  }
+}
+
+/* Light / dark switch (hooks/use-theme.ts): a balanced 450ms cross-fade, not a hard flash.
+   View Transitions: the whole old page fades out while the new one fades in. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 450ms;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* Browsers without View Transitions: colours ease for the same time while the class is on */
+.theme-fading,
+.theme-fading *,
+.theme-fading *::before,
+.theme-fading *::after {
+  transition:
+    background-color 450ms cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 450ms cubic-bezier(0.4, 0, 0.2, 1),
+    color 450ms cubic-bezier(0.4, 0, 0.2, 1),
+    fill 450ms cubic-bezier(0.4, 0, 0.2, 1),
+    stroke 450ms cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 450ms cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
   }
 }
 
