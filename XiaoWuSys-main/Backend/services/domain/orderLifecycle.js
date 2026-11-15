@@ -48,6 +48,8 @@ const canTransition = (from, to) => (STATUS_TRANSITIONS[from] || []).includes(to
 //   record_payment  PB 21: never on a Cancelled order, never without a quote, never once fully paid
 //   max_payment     the remaining balance, so a screen can limit its amount field
 //   print_quote     the customer quotation can be printed once the order has a quote
+//   void_payment    PB 23: the Owner may void (reverse) a payment; each payment also says can_void
+//   log_loss        PB 18: record a misprint / material loss against this order while it is open
 const allowedActions = (order, role, summary = null) => {
   const status = order && order.production_status;
   const editable = EDITABLE_STATUSES.includes(status);
@@ -68,7 +70,9 @@ const allowedActions = (order, role, summary = null) => {
     max_payment: mayPay && !blocked ? totals.remaining : 0,
     payment_blocked_reason: mayPay ? blocked : null,
     print_receipt: can(role, 'view_orders'),
-    print_quote: can(role, 'view_orders') && Number(order && order.total_quote_amount) > 0
+    print_quote: can(role, 'view_orders') && Number(order && order.total_quote_amount) > 0,
+    void_payment: Boolean(status) && can(role, 'void_order'),
+    log_loss: editable && can(role, 'edit_inventory')
   };
 };
 

@@ -26,7 +26,17 @@ const ENTITIES = {
       // whether a higher rank may replace a conflicting change. Null for older orders.
       last_edited_by: 'text', last_edited_role: 'text',
       // PB 11 / PB 12 (migration 011): the quote's breakdown (total = subtotal - discount)
-      subtotal_amount: 'money', discount_amount: 'money', discount_reason: 'text'
+      subtotal_amount: 'money', discount_amount: 'money', discount_reason: 'text',
+      // PB 23 (migration 012): why the Owner cancelled (voided) the order
+      cancellation_reason: 'text'
+    }
+  },
+  // PB 22 (migration 012): rent, electricity, wages... for the true-cost P&L
+  overhead_expenses: {
+    id: 'expense_id',
+    fields: {
+      expense_id: 'text', expense_date: 'timestamp', category: 'text', description: 'text', amount: 'money',
+      recorded_by: 'text'
     }
   },
   // PB 15 (migration 011): how much of a consumable one piece of a blank uses, and when
@@ -65,14 +75,18 @@ const ENTITIES = {
     fields: {
       payment_id: 'text', order_id: 'text', amount: 'money', payment_date: 'timestamp', payment_type: 'text',
       received_by: 'text', // user_id from the login token (migration 008); null for older payments
-      receipt_no: 'text'   // AR-YYYY-NNNN, given by the cloud database (null until an offline payment syncs)
+      receipt_no: 'text',  // AR-YYYY-NNNN, given by the cloud database (null until an offline payment syncs)
+      // PB 23 (migration 012): a void is a negative payment pointing at the one it reverses
+      voids_payment_id: 'text', void_reason: 'text'
     }
   },
   material_loss: {
     id: 'loss_id',
     fields: {
       loss_id: 'text', order_id: 'text', inventory_id: 'text', quantity_lost: 'int', loss_reason: 'text',
-      date_recorded: 'timestamp', financial_cost: 'money'
+      date_recorded: 'timestamp', financial_cost: 'money',
+      // PB 18 / PB 19 (migration 012): standard reason, diagnosed cause, order status at the time
+      reason_code: 'text', loss_category: 'text', production_stage: 'text', is_statistical_anomaly: 'bool'
     }
   },
   inventory_items: {

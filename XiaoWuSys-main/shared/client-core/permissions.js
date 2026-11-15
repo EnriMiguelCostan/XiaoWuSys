@@ -9,7 +9,7 @@ export const can = (user, capability) =>
 export const NO_ORDER_ACTIONS = Object.freeze({
   approve: false, statuses: [], edit_deadline: false, edit_quote: false, generate_quote: false, apply_discount: false,
   link_design: false, add_items: false, record_payment: false, max_payment: 0, payment_blocked_reason: null,
-  print_receipt: false, print_quote: false
+  print_receipt: false, print_quote: false, void_payment: false, log_loss: false
 });
 
 export const orderActions = (detail) => ({ ...NO_ORDER_ACTIONS, ...(detail && detail.allowed_actions) });

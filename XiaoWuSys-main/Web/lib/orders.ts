@@ -35,6 +35,8 @@ export interface Order {
   /** opaque text from the server: send it back as expected_version, never interpret it */
   version?: string | null;
   deadline_flag?: DeadlineFlag | string | null;
+  /** PB 23: why the Owner cancelled the order (null when none was given) */
+  cancellation_reason?: string | null;
 }
 
 /** PB 14: one status change, oldest first in OrderDetail.status_history */
@@ -125,6 +127,46 @@ export interface Payment {
   remaining_after?: number;
   status_after?: string;
   sync_status: string;
+  /** PB 23, decided by the server (voidStatusOf): a reversal was recorded for this payment */
+  voided?: boolean;
+  voided_by_receipt_no?: string | null;
+  /** this entry is itself a void (a negative reversing entry) */
+  is_void?: boolean;
+  voids_receipt_no?: string | null;
+  void_reason?: string | null;
+  /** the Owner may still void it (also needs allowed_actions.void_payment) */
+  can_void?: boolean;
+}
+
+/** PB 18 / PB 19: a misprint or material loss as the server shows it */
+export interface MaterialLoss {
+  loss_id: string;
+  order_id: string | null;
+  inventory_id: string | null;
+  item_name: string;
+  unit: string | null;
+  quantity_lost: number;
+  loss_reason: string;
+  reason_code: string | null;
+  reason_label: string | null;
+  /** 'Machine Failure' | 'Human Error' | 'Product Defect' | 'Not classified' */
+  category_label: string;
+  production_stage: string | null;
+  is_statistical_anomaly: boolean;
+  financial_cost: number | null;
+  /** UTC, like date_created */
+  date_recorded: string;
+  sync_status: string;
+}
+
+/** POST /api/inventory/:id/loss: the server's diagnosis and the replacement warning (never blocking) */
+export interface LossResponse {
+  message?: string;
+  source?: string;
+  loss?: MaterialLoss;
+  item?: { item_name: string; quantity_available: number };
+  diagnosis?: { rule: string | null; note: string; cluster_with: string[]; escalated: string[] };
+  replacement_warning?: { code: string; message: string } | null;
 }
 
 /** Computed by the server (services/domain/payments.js paymentSummary) */
@@ -159,6 +201,8 @@ export interface OrderDetail {
   quote?: QuoteBreakdown;
   /** PB 15 (absent on an older server) */
   consumables_deducted?: ConsumableUsed[];
+  /** PB 18: misprints / losses recorded against this order, newest first (absent on an older server) */
+  material_losses?: MaterialLoss[];
 }
 
 /** GET /api/orders */
@@ -212,6 +256,17 @@ export const lineText = (it: Pick<OrderItem, 'quantity' | 'product_type' | 'size
 };
 
 export const RECEIPT_AFTER_SYNC = 'Given after sync';
+
+/** PB 18: the server's standard loss reasons (REASON_CODES in services/domain/wasteDiagnostics.js).
+ *  A display list, like PAYMENT_TYPES: the server checks the code and decides the cause. */
+export const LOSS_REASONS: { code: string; label: string }[] = [
+  { code: 'misprint_alignment', label: 'Misprint / alignment error' },
+  { code: 'sizing_encoding_error', label: 'Wrong size / name / number printed' },
+  { code: 'heat_press_scorch', label: 'Heat press scorch / temperature spike' },
+  { code: 'printer_head_banding', label: 'Printer nozzle clog / banding / inkblot' },
+  { code: 'supplier_defect', label: 'Defective blank / pinhole / stain from supplier' },
+  { code: 'damaged_in_storage', label: 'Damaged or lost in storage / handling' },
+];
 
 /** Statuses where the job order still waits for the Owner's approval (display only: the
  *  approval panel; the server decides whether approving is allowed). */

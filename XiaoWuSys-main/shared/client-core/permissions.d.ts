@@ -36,6 +36,10 @@ export interface OrderActions {
   print_receipt: boolean;
   /** The customer quotation can be printed (the order has a quote) */
   print_quote: boolean;
+  /** PB 23: the Owner may void (reverse) payments; each payment also says can_void */
+  void_payment: boolean;
+  /** PB 18: record a misprint / material loss against this order (open orders, catalog editors) */
+  log_loss: boolean;
   [key: string]: unknown;
 }
 
