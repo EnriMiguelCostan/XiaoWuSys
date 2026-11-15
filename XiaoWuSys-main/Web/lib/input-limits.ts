@@ -27,3 +27,10 @@ export const TEXT_MAX = {
   username: 100, // users.username VARCHAR(100), routes/auth.js MAX_USERNAME_LENGTH
   password: 72, // bcrypt reads at most 72 bytes (routes/auth.js MAX_PASSWORD_BYTES)
 } as const;
+
+/**
+ * Earliest date any date field accepts (calendar dates across the whole app). The picker greys
+ * out anything before it, and a hand-typed earlier year (e.g. 1900) is raised to it on leaving
+ * the field. Presentation guard only: the server still validates every date it receives.
+ */
+export const EARLIEST_DATE = '2018-01-01';

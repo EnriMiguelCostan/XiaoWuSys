@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import { AccountsScreen } from '@/components/accounts/accounts-screen';
 import { RequireCapability } from '@/components/layout/require-capability';
 
-export const metadata: Metadata = { title: 'Accounts · XiaoWuSys' };
+export const metadata: Metadata = { title: 'XiaoWuSys' };
 
 // The whole module is for manage_accounts (Owner / Admin); the nav link is hidden for everyone
 // else, and Express answers 403 to every request from them anyway.

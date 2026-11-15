@@ -14,6 +14,7 @@ import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { Cell } from '@/components/dashboard/dashboard-parts';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
+import { DateInput } from '@/components/forms/date-input';
 import { Field, FormProblem } from '@/components/forms/form-bits';
 import { AnomalyBadge, LossCauseBadge } from '@/components/orders/waste-section';
 import { Badge } from '@/components/ui/badge';
@@ -234,10 +235,10 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
       <CardContent className="flex min-w-0 flex-col gap-4">
         <div className="grid min-w-0 grid-cols-2 gap-3">
           <Field id="overheads-from" label="From">
-            <Input id="overheads-from" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+            <DateInput id="overheads-from" value={from} onChange={(e) => setFrom(e.target.value)} />
           </Field>
           <Field id="overheads-to" label="To">
-            <Input id="overheads-to" type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+            <DateInput id="overheads-to" value={to} onChange={(e) => setTo(e.target.value)} />
           </Field>
         </div>
         {error && <FormProblem message={error} />}
@@ -300,7 +301,7 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
               <FormProblem message={problem} />
               <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                 <Field id="overhead-day" label="Date *">
-                  <Input id="overhead-day" type="date" required value={day} onChange={(e) => setDay(e.target.value)} disabled={busy} />
+                  <DateInput id="overhead-day" required value={day} onChange={(e) => setDay(e.target.value)} disabled={busy} />
                 </Field>
                 <Field id="overhead-category" label="Category *">
                   <Select value={category} onValueChange={setCategory} disabled={busy}>
@@ -425,10 +426,10 @@ export function PnlCard({ onResult }: { onResult: OnResult }) {
       <CardContent className="flex min-w-0 flex-col gap-4">
         <div className="grid min-w-0 grid-cols-2 gap-3">
           <Field id="pnl-from" label="From">
-            <Input id="pnl-from" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+            <DateInput id="pnl-from" value={from} onChange={(e) => setFrom(e.target.value)} />
           </Field>
           <Field id="pnl-to" label="To">
-            <Input id="pnl-to" type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+            <DateInput id="pnl-to" value={to} onChange={(e) => setTo(e.target.value)} />
           </Field>
         </div>
         <div className="flex flex-wrap gap-2">

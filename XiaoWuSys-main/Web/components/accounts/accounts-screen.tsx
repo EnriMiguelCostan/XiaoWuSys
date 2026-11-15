@@ -24,6 +24,7 @@ import { useConnection } from '@/components/connection/connection-provider';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { Field, FormProblem } from '@/components/forms/form-bits';
+import { PasswordInput } from '@/components/forms/password-input';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -365,9 +366,8 @@ function CreateAccountDialog({ roles, onClose, onResult, onDone }: AccountDialog
             />
           </Field>
           <Field id="new-password" label="Temporary password *" hint={PASSWORD_HINT}>
-            <Input
+            <PasswordInput
               id="new-password"
-              type="text"
               required
               autoComplete="new-password"
               spellCheck={false}
@@ -435,10 +435,9 @@ function ResetPasswordDialog({ account, onClose, onResult, onDone }: AccountDial
           <DialogDescription>Tell the person their new password in person or by private message. They will be signed out everywhere.</DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="max-w-full min-w-0 space-y-4">
-          <Field id="reset-password" label="New password *" hint={PASSWORD_HINT}>
-            <Input
+          <Field id="reset-password" label="Enter new password *" hint={PASSWORD_HINT}>
+            <PasswordInput
               id="reset-password"
-              type="text"
               required
               autoFocus
               autoComplete="new-password"

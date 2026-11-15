@@ -3,12 +3,12 @@
 // Orders list (ported from OrdersPage.jsx). Sorting, filtering and paging all run on the
 // server (GET /api/orders), so they are correct across pages. The detail opens as a side
 // sheet addressed by ?order=<order_id>, so an order can be linked and the Back button closes it.
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { Archive, ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, ClipboardList, CloudOff, PlusCircle, RefreshCw, Search, X } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
-import { normalizeOrderNumber, orderNumber } from '@xiaowu/client-core/orders';
+import { orderNumber } from '@xiaowu/client-core/orders';
 import { can } from '@xiaowu/client-core/permissions';
 import { LogoSpinner } from '@/components/brand/brand-logo';
 import { useConnection } from '@/components/connection/connection-provider';
@@ -44,6 +44,36 @@ const ALL = 'all';
 
 type Loaded = { key: string; list: OrderList | null; error: string };
 
+// Order-number keyword search: what GET /api/orders?number_search= accepts
+const NUMBER_SEARCH_CHARS = /^[A-Za-z0-9-]*$/;
+const SEARCH_DELAY_MS = 300; // wait for a short pause in typing before asking the server
+
+/**
+ * Where the search text sits inside an order number, to highlight it. Mirrors the server:
+ * digits only -> inside the running number (after "XM-2026-"); anything else -> anywhere.
+ */
+function matchRange(number: string, query: string): [number, number] | null {
+  const q = query.trim().toUpperCase();
+  if (!q) return null;
+  const text = number.toUpperCase();
+  const from = /^\d+$/.test(q) && /^XM-\d{4}-/.test(text) ? 8 : 0;
+  const at = text.indexOf(q, from);
+  return at < 0 ? null : [at, at + q.length];
+}
+
+function HighlightedNumber({ number, query }: { number: string; query: string }) {
+  const range = matchRange(number, query);
+  if (!range) return <>{number}</>;
+  const [start, end] = range;
+  return (
+    <>
+      {number.slice(0, start)}
+      <mark className="rounded-sm bg-warning/30 px-0.5 text-foreground">{number.slice(start, end)}</mark>
+      {number.slice(end)}
+    </>
+  );
+}
+
 function SortHead({
   label,
   k,
@@ -65,7 +95,7 @@ function SortHead({
         type="button"
         onClick={() => onSort(k)}
         className={cn(
-          'inline-flex items-center gap-1 text-xs font-semibold tracking-wide uppercase hover:text-foreground',
+          'inline-flex cursor-pointer items-center gap-1 text-xs font-semibold tracking-wide uppercase hover:text-foreground',
           active ? 'text-foreground' : 'text-muted-foreground'
         )}
       >
@@ -100,7 +130,7 @@ export function OrdersScreen() {
   const qs = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(page * PAGE_SIZE), sort: sort.key, dir: sort.dir });
   if (status !== ALL) qs.set('status', status);
   if (customerId !== ALL) qs.set('customer_id', customerId);
-  if (numberFilter) qs.set('tracking_no', numberFilter);
+  if (numberFilter) qs.set('number_search', numberFilter);
   if (showArchived) qs.set('include_archived', 'true');
   const query = qs.toString();
   const requestKey = `${query}|${tick}|${syncGeneration}`;
@@ -125,6 +155,11 @@ export function OrdersScreen() {
   const list = loaded?.list ?? null;
   const orders = list?.orders ?? [];
   const hasNext = orders.length === PAGE_SIZE;
+  // While searching, list ONLY the orders whose number matches (the server already filters;
+  // this also hides a stale page still on screen while the search result loads)
+  const shownOrders = numberFilter
+    ? orders.filter((o) => Boolean(o.tracking_no && matchRange(o.tracking_no, numberFilter)))
+    : orders;
 
   const reload = useCallback(() => setTick((t) => t + 1), []);
 
@@ -142,26 +177,73 @@ export function OrdersScreen() {
   const sortByColumn = (key: OrderSortKey) =>
     setSortTo(sort.key === key ? { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: SORT_FIRST_DIR[key] });
 
-  const findNumber = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (numberDraft.trim() === '') {
-      setNumberError('');
-      changed(setNumberFilter)('');
-      return;
-    }
-    const value = normalizeOrderNumber(numberDraft);
-    if (!value) {
-      setNumberError('An order number looks like XM-2026-0123.');
+  // Order number: searches as you type (after a short pause); Enter or the button searches now.
+  // "12" finds XM-2026-0012, XM-2026-0120…; the closest match comes first.
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+  }, []);
+
+  const applyNumberSearch = (text: string) => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    const value = text.trim();
+    if (!NUMBER_SEARCH_CHARS.test(value)) {
+      setNumberError('Use numbers, letters and dashes only, like 12 or XM-2026-0012.');
       return;
     }
     setNumberError('');
-    setNumberDraft(value);
-    changed(setNumberFilter)(value);
+    if (value.toUpperCase() !== numberFilter) changed(setNumberFilter)(value.toUpperCase());
+  };
+
+  const typeNumber = (text: string) => {
+    setNumberDraft(text);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    // Box emptied (backspace, or the search box's own clear button): show every order right away
+    if (text.trim() === '') {
+      applyNumberSearch('');
+      return;
+    }
+    searchTimer.current = setTimeout(() => applyNumberSearch(text), SEARCH_DELAY_MS);
+  };
+
+  const resetNumberSearch = useCallback(() => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    setNumberDraft('');
+    setNumberError('');
+    setNumberFilter((current) => {
+      if (current) setPage(0);
+      return '';
+    });
+  }, []);
+
+  // A click / tap anywhere outside the search box and its results ends the search and shows
+  // every order again. Clicking a result (or inside the order it opens, or a dropdown list)
+  // does not count as "outside", so a found order can still be opened.
+  const searchFormRef = useRef<HTMLFormElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const searching = Boolean(numberDraft || numberFilter);
+  useEffect(() => {
+    if (!searching) return undefined;
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Element | null;
+      if (!target || !(target instanceof Element)) return;
+      if (searchFormRef.current?.contains(target) || resultsRef.current?.contains(target)) return;
+      if (target.closest('[role="dialog"], [role="alertdialog"], [data-radix-popper-content-wrapper], [data-slot$="-overlay"]')) return;
+      resetNumberSearch();
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [searching, resetNumberSearch]);
+
+  const findNumber = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    applyNumberSearch(numberDraft);
   };
 
   const isDefaultSort = sort.key === DEFAULT_ORDER_SORT.key && sort.dir === DEFAULT_ORDER_SORT.dir;
   const filtersActive = status !== ALL || customerId !== ALL || Boolean(numberFilter) || !isDefaultSort;
   const clearFilters = () => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
     setStatus(ALL);
     setCustomerId(ALL);
     setNumberFilter('');
@@ -214,7 +296,7 @@ export function OrdersScreen() {
 
       {/* Filters and sort (all applied by the server) */}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4" role="search" aria-label="Filter and sort orders">
-        <div className="min-w-0 space-y-1.5">
+        <div className="flex min-w-0 flex-col gap-1.5">
           <Label htmlFor="orders-status">Status</Label>
           <Select value={status} onValueChange={setStatusTo}>
             <SelectTrigger id="orders-status" className="w-full bg-card">
@@ -230,7 +312,7 @@ export function OrdersScreen() {
             </SelectContent>
           </Select>
         </div>
-        <div className="min-w-0 space-y-1.5">
+        <div className="flex min-w-0 flex-col gap-1.5">
           <Label htmlFor="orders-customer">Customer</Label>
           <Select value={customerId} onValueChange={setCustomerTo}>
             <BoundedSelectTrigger id="orders-customer" className="bg-card">
@@ -246,7 +328,7 @@ export function OrdersScreen() {
             </BoundedSelectContent>
           </Select>
         </div>
-        <div className="min-w-0 space-y-1.5">
+        <div className="flex min-w-0 flex-col gap-1.5">
           <Label htmlFor="orders-sort">Sort by</Label>
           <Select
             value={sortValue}
@@ -268,23 +350,27 @@ export function OrdersScreen() {
             </SelectContent>
           </Select>
         </div>
-        <form onSubmit={findNumber} className="min-w-0 space-y-1.5" role="search" aria-label="Find an order by its number">
+        <form ref={searchFormRef} onSubmit={findNumber} className="flex min-w-0 flex-col gap-1.5" role="search" aria-label="Find an order by its number">
           <Label htmlFor="orders-number">Order number</Label>
           <div className="flex gap-2">
             <Input
               id="orders-number"
               maxLength={TEXT_MAX.orderNumber}
+              type="search"
+              inputMode="search"
+              autoComplete="off"
               value={numberDraft}
-              onChange={(e) => setNumberDraft(e.target.value)}
-              placeholder="XM-2026-0123"
+              onChange={(e) => typeNumber(e.target.value)}
+              placeholder="e.g. 12 or XM-2026-0012"
               aria-invalid={Boolean(numberError)}
+              aria-describedby={numberError ? 'orders-number-error' : undefined}
               className="min-w-0 bg-card"
             />
             <Button type="submit" variant="outline" size="icon" aria-label="Find order">
               <Search aria-hidden />
             </Button>
           </div>
-          {numberError && <p className="text-xs text-danger">{numberError}</p>}
+          {numberError && <p id="orders-number-error" className="text-xs text-danger">{numberError}</p>}
         </form>
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -318,7 +404,8 @@ export function OrdersScreen() {
         </p>
       )}
 
-      {/* Orders table */}
+      {/* Orders table + paging: "the results" (clicking in here keeps an order-number search) */}
+      <div ref={resultsRef} className="space-y-6">
       {!list && loading ? (
         <div className="rounded-lg border bg-card">
           <LogoSpinner label="Loading orders…" />
@@ -337,18 +424,18 @@ export function OrdersScreen() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {orders.length === 0 && !loading && !loaded?.error && (
+              {shownOrders.length === 0 && !loading && !loaded?.error && (
                 <TableRow>
                   <TableCell colSpan={6} className="py-10 text-center whitespace-normal text-muted-foreground">
                     {numberFilter
-                      ? `No order has the number ${numberFilter}.`
+                      ? `No order number contains "${numberFilter}".`
                       : status !== ALL || customerId !== ALL
                         ? 'No orders match these filters.'
                         : 'No orders yet.'}
                   </TableCell>
                 </TableRow>
               )}
-              {orders.map((o) => (
+              {shownOrders.map((o) => (
                 <TableRow
                   key={o.order_id}
                   onClick={() => openOrder(o.order_id)}
@@ -364,7 +451,7 @@ export function OrdersScreen() {
                       }}
                       className="font-mono text-sm font-medium underline-offset-4 hover:underline focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
                     >
-                      {orderNumber(o)}
+                      <HighlightedNumber number={orderNumber(o)} query={numberFilter} />
                     </button>
                     {o.sync_status !== 'synced' && (
                       <Badge variant="outline" className={cn('ml-2', TONE_CLASSES.info.badge)}>
@@ -376,6 +463,11 @@ export function OrdersScreen() {
                     <span className="block max-w-[150px] truncate sm:max-w-[220px]" title={customerName(o.customer_id)}>
                       {customerName(o.customer_id)}
                     </span>
+                    {customerById.get(o.customer_id)?.contact_number && (
+                      <span className="block text-xs text-muted-foreground tabular-nums">
+                        {customerById.get(o.customer_id)?.contact_number}
+                      </span>
+                    )}
                     <span className="block text-xs text-muted-foreground sm:hidden">
                       Due {formatDateTime(o.production_deadline, { withTime: false })}
                     </span>
@@ -415,6 +507,7 @@ export function OrdersScreen() {
           </Button>
         </div>
       )}
+      </div>
 
       <OrderDetailSheet
         orderId={openId}

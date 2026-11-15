@@ -153,6 +153,17 @@ const createValidator = () => {
       if (!TRACKING_NO_PATTERN.test(text)) return fail(field, 'must look like XM-2026-0123.');
       return text;
     },
+    // Order-number keyword search (PB 6+): "12", "0012", "2026-00", "xm-2026-0012".
+    // -> { digitsOnly, pattern } where pattern is a LIKE pattern, or null when empty.
+    // Only letters, digits and dashes are accepted, so the pattern never contains % or _
+    // typed by the user (no wildcard tricks).
+    orderNumberSearch: (value, field) => {
+      if (isMissing(value)) return null;
+      const text = typeof value === 'string' ? value.trim().toUpperCase() : '';
+      if (text === '') return null;
+      if (!/^[A-Z0-9-]{1,20}$/.test(text)) return fail(field, 'can only contain letters, numbers and dashes, like 12 or XM-2026-0012.');
+      return { digitsOnly: /^\d+$/.test(text), pattern: `%${text}%` };
+    },
     oneOf: (value, field, allowed, { required = true } = {}) => {
       if (isMissing(value)) return required ? fail(field, 'is required. Please choose one.') : undefined;
       if (!allowed.includes(value)) return fail(field, `must be one of these: ${allowed.join(', ')}.`);

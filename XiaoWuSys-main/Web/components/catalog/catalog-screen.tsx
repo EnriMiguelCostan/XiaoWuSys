@@ -210,7 +210,7 @@ export function CatalogScreen() {
             aria-pressed={status === card.key}
             className={cn(
               // min-w-0: a grid item may shrink below its content, so a huge number can't widen the row
-              'flex min-w-0 flex-col items-start gap-1 rounded-lg border bg-card p-4 text-left transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none',
+              'flex min-w-0 cursor-pointer flex-col items-start gap-1 rounded-lg border bg-card p-4 text-left transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none',
               status === card.key && 'border-primary ring-1 ring-primary'
             )}
           >

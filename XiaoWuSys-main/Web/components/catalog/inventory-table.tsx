@@ -86,7 +86,7 @@ function SortHead({ col, sort, onSort }: { col: (typeof COLUMNS)[number]; sort: 
         type="button"
         onClick={() => onSort(col.key)}
         className={cn(
-          'inline-flex items-center gap-1 text-xs font-semibold tracking-wide uppercase hover:text-foreground',
+          'inline-flex cursor-pointer items-center gap-1 text-xs font-semibold tracking-wide uppercase hover:text-foreground',
           active ? 'text-foreground' : 'text-muted-foreground'
         )}
       >
@@ -123,7 +123,11 @@ export function InventoryTable({
     // min-w-0 + max-w-full: very large numbers can still make the table wider than the screen;
     // then it scrolls sideways inside this box instead of stretching the page.
     <div className="max-w-full min-w-0 overflow-x-auto rounded-lg border bg-card">
-      <Table aria-label="Stock items">
+      {/* Thin column dividers guide the eye down each column (header and rows alike) */}
+      <Table
+        aria-label="Stock items"
+        className="[&_td:not(:last-child)]:border-r [&_th:not(:last-child)]:border-r"
+      >
         {/* Opaque header: the sticky Actions cell must not let scrolled columns show through */}
         <TableHeader className="bg-muted">
           <TableRow>

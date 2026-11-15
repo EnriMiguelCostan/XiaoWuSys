@@ -16,6 +16,7 @@ import { Clock, Plus, PlusCircle, Trash2, TriangleAlert, XCircle } from 'lucide-
 import { MOBILE_PATTERN, todayInManila } from '@xiaowu/client-core/format';
 import { NUMBER_AFTER_SYNC, orderNumber } from '@xiaowu/client-core/orders';
 import { can } from '@xiaowu/client-core/permissions';
+import { DateInput } from '@/components/forms/date-input';
 import { Field, FormProblem } from '@/components/forms/form-bits';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { ShortageTable } from '@/components/orders/shortage-table';
@@ -346,7 +347,7 @@ export function CreateOrderScreen() {
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
             <Field id="order-deadline" label="Production deadline *">
-              <Input id="order-deadline" type="date" min={today} required value={deadline} onChange={(e) => setDeadline(e.target.value)} />
+              <DateInput id="order-deadline" min={today} required value={deadline} onChange={(e) => setDeadline(e.target.value)} />
             </Field>
             {canSetQuote ? (
               <Field id="order-price" label="Quote (₱, optional)" hint="One price for the whole order. You can set it later too.">
@@ -372,8 +373,8 @@ export function CreateOrderScreen() {
             ) : (
               lines.map((line, index) => (
                 <div key={line.key} className="flex flex-wrap items-end gap-2">
-                  <div className="min-w-0 flex-[3_1_14rem] space-y-1.5">
-                    <Label htmlFor={`line-material-${line.key}`} className={cn(index > 0 && 'sr-only')}>
+                  <div className="flex min-w-0 flex-[3_1_14rem] flex-col gap-1.5">
+                    <Label htmlFor={`line-material-${line.key}`} className={cn('self-start', index > 0 && 'sr-only')}>
                       Material
                     </Label>
                     <Select value={line.inventory_id} onValueChange={(v) => setLine(line.key, { inventory_id: v })}>
@@ -394,8 +395,8 @@ export function CreateOrderScreen() {
                       </BoundedSelectContent>
                     </Select>
                   </div>
-                  <div className="w-24 space-y-1.5">
-                    <Label htmlFor={`line-qty-${line.key}`} className={cn(index > 0 && 'sr-only')}>
+                  <div className="flex w-24 flex-col gap-1.5">
+                    <Label htmlFor={`line-qty-${line.key}`} className={cn('self-start', index > 0 && 'sr-only')}>
                       Qty
                     </Label>
                     <Input
@@ -454,9 +455,8 @@ export function CreateOrderScreen() {
           <FormProblem message={haltProblem} />
           {haltMode === 'delay' && (
             <Field id="delayed-deadline" label="New production deadline *">
-              <Input
+              <DateInput
                 id="delayed-deadline"
-                type="date"
                 min={today}
                 autoFocus
                 value={delayedDeadline}

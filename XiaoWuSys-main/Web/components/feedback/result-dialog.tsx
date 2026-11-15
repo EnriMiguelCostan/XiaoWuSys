@@ -26,7 +26,7 @@ export function ResultDialog({ result, onClose }: { result: ResultMessage | null
 
   return (
     <Dialog open={Boolean(result)} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-md" dismissible>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Icon className={cn('size-5 shrink-0', TONE_CLASSES[look.tone].text)} aria-hidden />

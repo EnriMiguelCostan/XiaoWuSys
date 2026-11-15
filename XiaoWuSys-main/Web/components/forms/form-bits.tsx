@@ -18,8 +18,8 @@ export function Field({
   children: React.ReactNode;
 }) {
   return (
-    <div className={cn('max-w-full min-w-0 space-y-1.5', className)}>
-      <Label htmlFor={id}>{label}</Label>
+    <div className={cn('flex max-w-full min-w-0 flex-col gap-1.5', className)}>
+      <Label htmlFor={id} className="self-start">{label}</Label>
       {children}
       {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
     </div>
