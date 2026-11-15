@@ -5,9 +5,11 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ChevronDown, KeyRound, LogOut, Menu, Printer, UserRound } from 'lucide-react';
+import { ChevronDown, KeyRound, LogOut, Menu, UserRound } from 'lucide-react';
 import type { SessionUser } from '@xiaowu/client-core/permissions';
 import { ChangePasswordDialog } from '@/components/account/change-password-dialog';
+import { APP_NAME, BrandLogo } from '@/components/brand/brand-logo';
+import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import { activeHref, HOME_PATH, visibleNavItems, type NavItem } from '@/components/layout/nav-items';
 import { ThemeToggle } from '@/components/layout/theme-toggle';
 import { Badge } from '@/components/ui/badge';
@@ -77,6 +79,8 @@ export function AppHeader() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  // Logging out is confirmed first, so a mis-click on the menu item costs nothing
+  const [confirmLogout, setConfirmLogout] = useState(false);
 
   const items = visibleNavItems(user);
   const current = activeHref(pathname, items);
@@ -84,6 +88,11 @@ export function AppHeader() {
   const signOut = async () => {
     setSigningOut(true);
     await logout(); // the auth gate takes the user to /login
+  };
+
+  const askLogout = () => {
+    setMenuOpen(false);
+    setConfirmLogout(true);
   };
 
   const openPassword = () => {
@@ -104,7 +113,10 @@ export function AppHeader() {
           </SheetTrigger>
           <SheetContent side="left" className="w-72 gap-0 p-0">
             <SheetHeader className="border-b">
-              <SheetTitle>XiaoMei ERP</SheetTitle>
+              <SheetTitle className="flex items-center gap-2">
+                <BrandLogo alt="" className="h-7" />
+                {APP_NAME}
+              </SheetTitle>
               <SheetDescription asChild>
                 <div className="text-sm">
                   <WhoAmI user={user} />
@@ -119,16 +131,19 @@ export function AppHeader() {
               <Button variant="ghost" className="justify-start" onClick={openPassword}>
                 <KeyRound aria-hidden /> Change my password
               </Button>
-              <Button variant="ghost" className="justify-start" onClick={signOut} disabled={signingOut}>
+              <Button variant="ghost" className="justify-start" onClick={askLogout} disabled={signingOut}>
                 <LogOut aria-hidden /> {signingOut ? 'Logging out…' : 'Log out on this device'}
               </Button>
             </div>
           </SheetContent>
         </Sheet>
 
-        <Link href={HOME_PATH} className="flex items-center gap-2 font-semibold tracking-tight">
-          <Printer className="size-5 text-primary" aria-hidden />
-          <span>XiaoMei ERP</span>
+        <Link
+          href={HOME_PATH}
+          className="flex items-center gap-2 rounded-md font-semibold tracking-tight focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+        >
+          <BrandLogo alt="" className="h-8" preload />
+          <span>{APP_NAME}</span>
         </Link>
 
         <nav aria-label="Sections" className="ml-4 hidden md:block">
@@ -154,7 +169,7 @@ export function AppHeader() {
               <DropdownMenuItem onSelect={openPassword}>
                 <KeyRound aria-hidden /> Change my password
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={signOut} disabled={signingOut}>
+              <DropdownMenuItem onSelect={askLogout} disabled={signingOut}>
                 <LogOut aria-hidden /> Log out on this device
               </DropdownMenuItem>
             </DropdownMenuContent>
@@ -163,6 +178,16 @@ export function AppHeader() {
       </div>
 
       <ChangePasswordDialog open={passwordOpen} onOpenChange={setPasswordOpen} />
+      <ConfirmDialog
+        open={confirmLogout}
+        title="Log out?"
+        message="You will need to log in again to keep working on this device."
+        confirmLabel="Log out"
+        danger
+        busy={signingOut}
+        onConfirm={signOut}
+        onCancel={() => setConfirmLogout(false)}
+      />
     </header>
   );
 }

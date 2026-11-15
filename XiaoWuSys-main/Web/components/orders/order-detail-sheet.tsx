@@ -24,6 +24,7 @@ import { Archive, ArchiveRestore, CircleCheck, CircleX, Copy, Flame, Lock, Print
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { orderNumber, shortfallLines } from '@xiaowu/client-core/orders';
 import { orderActions } from '@xiaowu/client-core/permissions';
+import { LogoSpinner } from '@/components/brand/brand-logo';
 import { useConnection } from '@/components/connection/connection-provider';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
@@ -54,7 +55,6 @@ import {
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { Skeleton } from '@/components/ui/skeleton';
 import { useApi } from '@/hooks/use-api';
 import { useOrderEditLock } from '@/hooks/use-order-edit-lock';
 import { useSocketEvent } from '@/hooks/use-socket-event';
@@ -401,11 +401,7 @@ export function OrderDetailSheet({
               </p>
             )}
             {!detail && !loadError && (
-              <div className="space-y-3" role="status" aria-label="Loading the order">
-                <Skeleton className="h-24 w-full" />
-                <Skeleton className="h-32 w-full" />
-                <Skeleton className="h-24 w-full" />
-              </div>
+              <LogoSpinner label="Loading the order…" className="min-h-64" />
             )}
 
             {detail && order && (

@@ -130,4 +130,60 @@
   html {
     @apply font-sans;
   }
+
+  /* Affordance: everything the user can click shows the hand cursor. Disabled controls show
+     "not-allowed" so it is clear why nothing happens. */
+  button,
+  [role="button"],
+  [role="tab"],
+  [role="menuitem"],
+  [role="menuitemcheckbox"],
+  [role="menuitemradio"],
+  [role="option"],
+  [role="switch"],
+  [role="checkbox"],
+  [role="radio"],
+  [role="link"],
+  a[href],
+  summary,
+  label[for],
+  select,
+  input[type="checkbox"],
+  input[type="radio"],
+  input[type="file"],
+  input[type="submit"],
+  input[type="button"],
+  input[type="reset"],
+  input[type="color"],
+  input[type="range"] {
+    cursor: pointer;
+  }
+  button:disabled,
+  [aria-disabled="true"],
+  [data-disabled],
+  select:disabled,
+  input:disabled {
+    cursor: not-allowed;
+  }
+}
+
+/* Loading indicator: the XiaoWuSys logo turning at a medium pace (components/brand/brand-logo.tsx) */
+@keyframes xws-logo-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes xws-logo-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+.xws-logo-spin {
+  animation: xws-logo-spin 1.6s linear infinite;
+  will-change: transform;
+}
+@media (prefers-reduced-motion: reduce) {
+  .xws-logo-spin {
+    animation: xws-logo-pulse 1.6s ease-in-out infinite;
+  }
 }
