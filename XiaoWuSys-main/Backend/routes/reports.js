@@ -524,7 +524,7 @@ const buildPnl = async (req, period) => {
     generated_at: new Date().toISOString(),
     ...pnl,
     notes: [
-      'Costs use each item’s current unit cost in the catalog.',
+      'Costs use each item’s unit cost when the order was completed or the consumable was taken (today’s catalog cost for older records).',
       'Blanks are counted when their order is marked Completed.',
       ...(source === 'local' ? ['Offline: this is this computer’s copy. Generate it again when online for every branch’s figures.'] : []),
       ...(pending > 0 ? [`${pending} payment(s) saved offline are included and will sync later.`] : [])

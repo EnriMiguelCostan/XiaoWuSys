@@ -23,12 +23,12 @@ describe('Who may do what (rules only)', () => {
     assert.deepEqual(allowedActions(pending, 'Owner'), {
       approve: true, statuses: ['Cancelled'], edit_deadline: true, edit_quote: true, generate_quote: true, apply_discount: true,
       link_design: true, add_items: true, record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true,
-      print_quote: true, void_payment: true, log_loss: true
+      print_quote: true, void_payment: true, log_loss: true, archive_order: false, restore_order: false
     });
     assert.deepEqual(allowedActions(pending, 'Admin'), {
       approve: false, statuses: [], edit_deadline: true, edit_quote: false, generate_quote: false, apply_discount: false,
       link_design: true, add_items: true, record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true,
-      print_quote: true, void_payment: false, log_loss: true
+      print_quote: true, void_payment: false, log_loss: true, archive_order: false, restore_order: false
     });
     assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Owner').print_quote, false, 'no quotation to print yet');
     assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Production').statuses, ['Pressing', 'Completed'], 'no Cancel for Production');

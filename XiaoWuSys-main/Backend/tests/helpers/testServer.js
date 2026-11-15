@@ -69,8 +69,9 @@ const startTestServer = async ({ corsOrigins, dbPath: givenPath, pgPool: givenPo
     notifyOverridden: (notice) => { orderEvents.overridden.push(notice); return 1; }
   };
 
+  const orderLocks = createOrderLockManager(); // exposed so a test can hold an edit lock (PB 26 load test)
   const app = createApp({
-    pgPool, localDb, localDbPath: dbPath, orderLocks: createOrderLockManager(), inventoryEvents, orderEvents,
+    pgPool, localDb, localDbPath: dbPath, orderLocks, inventoryEvents, orderEvents,
     syncAndNotify: async () => ({ synced: 0, conflicts: [], failed: 0, requeued: 0, aborted: true }),
     listConflicts, corsOrigins,
     cloudHealth: cloudHealth || disabledCloudHealth(),
@@ -114,7 +115,7 @@ const startTestServer = async ({ corsOrigins, dbPath: givenPath, pgPool: givenPo
   };
 
   return {
-    baseUrl, request, login, tokens, close, pushes, localWrites, orderEvents, localDb, dbPath,
+    baseUrl, request, login, tokens, close, pushes, localWrites, orderEvents, orderLocks, localDb, dbPath,
     get: (sql, p) => sqliteGet(localDb, sql, p),
     all: (sql, p) => sqliteAll(localDb, sql, p),
     run: (sql, p) => sqliteRun(localDb, sql, p)

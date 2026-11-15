@@ -91,6 +91,9 @@ describe('permissions only read what the server decided', () => {
     assert.deepEqual([NO_ORDER_ACTIONS.void_payment, NO_ORDER_ACTIONS.log_loss], [false, false]);
     assert.equal(orderActions({ allowed_actions: { record_payment: true } }).void_payment, false);
     assert.equal(orderActions({ allowed_actions: { void_payment: true } }).void_payment, true);
+    // PB 23 / D2: archive buttons too
+    assert.deepEqual([NO_ORDER_ACTIONS.archive_order, NO_ORDER_ACTIONS.restore_order], [false, false]);
+    assert.equal(orderActions({ allowed_actions: { restore_order: true } }).archive_order, false);
   });
 
   it('roleHelp() is display text for server role names, empty for unknown ones', () => {

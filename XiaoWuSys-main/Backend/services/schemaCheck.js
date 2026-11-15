@@ -24,6 +24,7 @@ const EXPECTED_TRIGGERS = [
   'trg_order_status_history_append_only', 'trg_order_profiles_notify', // migration 010
   'trg_consumable_rates_last_modified', 'trg_order_consumables_log_append_only', // migration 011
   'trg_overhead_expenses_last_modified' // migration 012
+  // migration 013 adds columns only (archived_at / archived_by, unit_cost): checked through ENTITIES
 ];
 
 const checkCloudSchema = async (pgPool) => {

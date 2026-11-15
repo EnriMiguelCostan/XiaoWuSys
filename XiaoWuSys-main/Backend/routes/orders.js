@@ -15,8 +15,9 @@ const { withAvailability } = require('../services/inventorySnapshot');
 const { rolesWith, can, capabilitiesFor, outranks } = require('../services/domain/permissions');
 const {
   STATUS_TRANSITIONS, CLOSED_STATUSES, EDITABLE_STATUSES, QUOTE_FROZEN_STATUSES, APPROVABLE_STATUSES, capabilityForTransition, allowedActions,
-  withDeadlineFlag, deadlineWindows
+  withDeadlineFlag, deadlineWindows, ARCHIVED_REASON
 } = require('../services/domain/orderLifecycle');
+const { refreshLocalRows } = require('../services/sync');
 const { writeAudit, writeAuditLocal } = require('../services/auditLog');
 const { computeQuote, quoteBreakdown, quoteLines, manualQuoteColumns, DISCOUNT_REASON_MAX } = require('../services/domain/pricing');
 const { planConsumables, applyConsumables, consumablesSentence, loadOrderConsumables } = require('../services/consumables');
@@ -29,6 +30,10 @@ const { loadOrderLosses } = require('../services/waste');
 const VERSION_SQL = `to_char(last_modified, '${PG_VERSION_FORMAT}')`;
 const READ_ROLES = rolesWith('view_orders');
 const CANCEL_REASON_MAX = 1000; // PB 23
+const CUSTOMER_ARCHIVED = {
+  error: 'RECORD_ARCHIVED',
+  message: 'This customer is archived. Restore the customer first to create a new order for them.'
+};
 const VOID_REASON_MAX = 1000;
 const WRITE_ROLES = rolesWith('edit_order');
 const APPROVE_ROLES = rolesWith('approve_order'); // PB 13: only an Owner may approve a job order (§4.3)
@@ -251,6 +256,30 @@ const requireOrderEditAccess = (req, res, next) => {
   next();
 };
 
+// PB 23 / D2: an archived order is read-only until an Owner / Admin restores it.
+// Checked before the route runs (cloud first, this computer's copy when offline); the payment
+// and void transactions check it again on the locked row, so an archive at the same moment wins.
+const RECORD_ARCHIVED = { error: 'RECORD_ARCHIVED', message: ARCHIVED_REASON };
+const refuseArchivedOrder = async (req, res, next) => {
+  const { order_id } = req.params;
+  try {
+    let row;
+    try {
+      row = (await req.pgPool.query('SELECT archived_at IS NOT NULL AS archived FROM order_profiles WHERE order_id = $1', [order_id])).rows[0];
+    } catch (err) {
+      if (!isConnectionError(err)) throw err;
+    }
+    if (!row) {
+      const local = await sqliteGet(req.localDb, 'SELECT archived_at FROM order_profiles WHERE order_id = ?', [order_id]);
+      row = local ? { archived: Boolean(local.archived_at) } : null;
+    }
+    if (row && row.archived) return res.status(409).json(RECORD_ARCHIVED);
+    next();
+  } catch (err) {
+    sendDbError(res, err, 'checking whether the order is archived');
+  }
+};
+
 // M7: rejects malformed :order_id before any query runs
 router.param('order_id', (req, res, next, value) => {
   const v = createValidator();
@@ -315,6 +344,8 @@ const SORT_NAMES = [...Object.keys(ORDER_SORTS), 'priority'];
 router.get('/', requireRole(READ_ROLES), async (req, res) => {
   const v = createValidator();
   const status = v.oneOf(req.query.status, 'status', PRODUCTION_STATUSES, { required: false });
+  // PB 23 / D2: archived orders are hidden unless asked for
+  const includeArchived = v.oneOf(req.query.include_archived, 'include_archived', ['true', 'false'], { required: false }) === 'true';
   const customer_id = v.id(req.query.customer_id, 'customer_id', { required: false });
   const tracking_no = v.trackingNo(req.query.tracking_no, 'tracking_no', { required: false }); // PB 6: find by order number
   const sort = v.oneOf(req.query.sort, 'sort', SORT_NAMES, { required: false }) || 'date_created';
@@ -325,6 +356,7 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
   try {
     const result = await listRecords(req, 'order_profiles', {
       filters: [['production_status', status], ['customer_id', customer_id], ['tracking_no', tracking_no]],
+      where: includeArchived ? null : 'archived_at IS NULL',
       // Ties broken by newest first, then order_id, so paging is stable. Within one urgency
       // group the nearest deadline comes first.
       orderBy: sort === 'priority'
@@ -335,6 +367,7 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
     });
     res.status(200).json({
       source: result.source, orders: result.records.map((o) => withDeadlineFlag(o)), limit, offset, sort, dir, unsynced: result.unsynced,
+      include_archived: includeArchived,
       capabilities: capabilitiesFor(req.user.role)
     });
   } catch (err) {
@@ -401,6 +434,75 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
 });
 
 // ==========================================
+// ARCHIVE / RESTORE AN ORDER (PB 23, D2: never deleted, kept forever)
+// POST /api/orders/:order_id/archive    only Completed / Cancelled orders (409 ORDER_STILL_OPEN)
+// POST /api/orders/:order_id/restore
+// Owner / Admin (manage_accounts), online only (503 ARCHIVE_REQUIRES_CLOUD). One transaction:
+// the order is locked FOR UPDATE, changed, and audit_log 'order_archived' / 'order_restored'
+// is written. An archived order is hidden from GET /api/orders (unless include_archived=true)
+// and refuses every change with 409 RECORD_ARCHIVED until it is restored.
+// -> 200 { message, order, allowed_actions }
+// ==========================================
+const ARCHIVE_ROLES = rolesWith('manage_accounts');
+const ARCHIVE_REQUIRES_CLOUD = {
+  error: 'ARCHIVE_REQUIRES_CLOUD',
+  message: 'Archiving and restoring need the cloud connection, so every branch sees the same lists. Try again when online.'
+};
+
+const archiveRoute = (archive) => async (req, res) => {
+  const { order_id } = req.params;
+  try {
+    const located = await locateRecord(req, 'order_profiles', order_id);
+    if (!located.location) return notFound(res, 'Order', order_id);
+    if (!located.cloudReachable) return res.status(503).json(ARCHIVE_REQUIRES_CLOUD);
+    if (located.location === 'local') {
+      return res.status(409).json({ error: 'ORDER_NOT_SYNCED', message: 'This order was saved offline and is not in the cloud yet. Sync first.' });
+    }
+    const order = await withPgTransaction(req.pgPool, async (client) => {
+      const { rows } = await client.query(
+        `SELECT ${selectList('order_profiles', 'pg')} FROM order_profiles WHERE order_id = $1 FOR UPDATE`, [order_id]);
+      if (rows.length === 0) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
+      const current = serialize('order_profiles', rows[0]);
+      if (archive && !CLOSED_STATUSES.includes(current.production_status)) {
+        throw new Rejected(409, { error: 'ORDER_STILL_OPEN', message: 'Only completed or cancelled orders can be archived.' });
+      }
+      if (archive && current.archived_at) throw new Rejected(409, { error: 'ALREADY_ARCHIVED', message: 'This order is already archived.' });
+      if (!archive && !current.archived_at) throw new Rejected(409, { error: 'NOT_ARCHIVED', message: 'This order is not archived.' });
+      const updated = await client.query(
+        `UPDATE order_profiles
+            SET archived_at = ${archive ? 'NOW()' : 'NULL'}, archived_by = $2, last_edited_by = $3, last_edited_role = $4
+          WHERE order_id = $1 RETURNING ${selectList('order_profiles', 'pg')}`,
+        [order_id, archive ? req.user.user_id : null, ...editorOf(req)]);
+      await writeAudit(client, {
+        entity: 'order_profiles',
+        entity_id: order_id,
+        action: archive ? 'order_archived' : 'order_restored',
+        actor: req.user,
+        details: { tracking_no: current.tracking_no, production_status: current.production_status, archived_at_before: current.archived_at }
+      });
+      return serialize('order_profiles', updated.rows[0]);
+    });
+    // This computer's copy follows at once (the next refresh would do it too)
+    await refreshLocalRows(req.pgPool, req.localDb, 'order_profiles', [order_id])
+      .catch((err) => console.error('⚠️ Could not refresh the local copy of an archived order:', err.message));
+    pushOrderChange(req, order);
+    const view = await loadPaymentView(req, order);
+    res.status(200).json({
+      message: archive ? 'Order archived. It is hidden from the Orders list and kept for the records.' : 'Order restored.',
+      source: 'cloud',
+      order: withDeadlineFlag(order),
+      allowed_actions: allowedActions(order, req.user.role, view.summary)
+    });
+  } catch (err) {
+    if (err instanceof Rejected) return res.status(err.status).json(err.body);
+    if (isConnectionError(err)) return res.status(503).json(err.commitUnknown ? COMMIT_UNKNOWN : ARCHIVE_REQUIRES_CLOUD);
+    sendDbError(res, err, archive ? 'archiving an order' : 'restoring an order');
+  }
+};
+router.post('/:order_id/archive', requireRole(ARCHIVE_ROLES), requireOrderEditAccess, archiveRoute(true));
+router.post('/:order_id/restore', requireRole(ARCHIVE_ROLES), requireOrderEditAccess, archiveRoute(false));
+
+// ==========================================
 // CREATE ORDER PROFILE (Sprint 6 / PB 6, capacity-gated in Sprint 9 / PB 9 & PB 10)
 // Body: { customer_id, production_deadline, required_items: [{ inventory_id, quantity_needed }],
 //         total_quote_amount?, resolution? }
@@ -439,6 +541,9 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 
   // ---- Online: lock stock rows (fixed order = no deadlocks), check, insert, reserve ----
   const createInCloud = () => withPgTransaction(req.pgPool, async (client) => {
+    // FOR SHARE: an archive of this customer at the same moment waits, then sees this new open order
+    const owner = await client.query('SELECT archived_at IS NOT NULL AS archived FROM customers WHERE customer_id = $1 FOR SHARE', [customer_id]);
+    if (owner.rows[0] && owner.rows[0].archived) throw new Rejected(409, CUSTOMER_ARCHIVED);
     const stock = await client.query(
       `SELECT inventory_id, item_name, quantity_available, quantity_reserved FROM inventory_items
         WHERE inventory_id = ANY($1::text[]) AND ${ACTIVE_ITEM_SQL} ORDER BY inventory_id FOR UPDATE`,
@@ -512,6 +617,9 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
     // 2.) M7: the customer must exist (Neon, or the local cache when offline)
     const customer = await locateRecord(req, 'customers', customer_id);
     if (!customer.location) return notFound(res, 'Customer', customer_id);
+    // PB 23 / D2: an archived customer takes no new orders (checked again on the locked row online)
+    const { record: who } = await getRecord(req, 'customers', customer_id);
+    if (who && who.archived_at) return res.status(409).json(CUSTOMER_ARCHIVED);
 
     let result;
     if (customer.location === 'local') {
@@ -582,7 +690,7 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 // -> 200 { message, order, stock_changes, consumables_deducted: [{ log_id, trigger_status,
 //          consumable_inventory_id, item_name, unit, needed, quantity_deducted, shortfall }] }
 // ==========================================
-router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAccess, async (req, res) => {
+router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
   const { order_id } = req.params;
   const body = req.body || {};
   const v = createValidator();
@@ -700,6 +808,13 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
         }
         stockReserved = false;
       }
+      // PB 22: the blanks' unit cost at completion, so a later catalog cost change never moves a past P&L
+      if (status === 'Completed') {
+        await client.query(
+          `UPDATE order_items oi SET unit_cost = ii.unit_cost
+             FROM inventory_items ii
+            WHERE oi.order_id = $1 AND oi.inventory_id = ii.inventory_id`, [order_id]);
+      }
       // PB 15: never blocks the change; a shortfall clamps the stock at 0 and is recorded
       const consumables = await applyConsumables(client, req, { order_id, planned: consumablePlan.planned, rowsById });
       changedIds = [...new Set([...stockChanges.map((c) => c.inventory_id), ...consumables.map((c) => c.consumable_inventory_id)])];
@@ -772,7 +887,7 @@ router.get('/:order_id/items', requireRole(READ_ROLES), async (req, res) => {
   }
 });
 
-router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess, async (req, res) => {
+router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
   const { order_id } = req.params;
   const body = req.body || {};
 
@@ -929,7 +1044,7 @@ const checkBulkItems = (list) => {
   return { errors: errors.slice(0, BULK_ERRORS_SHOWN), rows };
 };
 
-router.post('/:order_id/items/bulk', requireRole(WRITE_ROLES), requireOrderEditAccess, async (req, res) => {
+router.post('/:order_id/items/bulk', requireRole(WRITE_ROLES), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
   const { order_id } = req.params;
   const checked = checkBulkItems((req.body || {}).items);
   if (checked.errors.length > 0) {
@@ -1078,7 +1193,7 @@ router.get('/:order_id/payments', requireRole(WRITE_ROLES), async (req, res) => 
 
 const SERVER_FILLED_PAYMENT_FIELDS = ['received_by', 'receipt_no', 'voids_payment_id', 'void_reason'];
 
-router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), async (req, res) => {
+router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), refuseArchivedOrder, async (req, res) => {
   const { order_id } = req.params;
   const body = req.body || {};
 
@@ -1100,11 +1215,13 @@ router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), asy
   // ---- Online: lock the order, check, insert with a SQL guard ----
   const recordInCloud = () => withPgTransaction(req.pgPool, async (client) => {
     const ord = await client.query(
-      `SELECT production_status, ROUND(COALESCE(total_quote_amount, 0) * 100)::bigint AS quote_centavos
+      `SELECT production_status, ROUND(COALESCE(total_quote_amount, 0) * 100)::bigint AS quote_centavos,
+              archived_at IS NOT NULL AS archived
          FROM order_profiles WHERE order_id = $1 FOR UPDATE`,
       [order_id]
     );
     if (ord.rowCount === 0) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
+    if (ord.rows[0].archived) throw new Rejected(409, RECORD_ARCHIVED);
     const quote = toPesos(Number(ord.rows[0].quote_centavos));
     const paidRes = await client.query(
       'SELECT COALESCE(ROUND(SUM(amount) * 100), 0)::bigint AS paid_centavos FROM payments WHERE order_id = $1',
@@ -1136,9 +1253,10 @@ router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), asy
   // ---- Offline: the same checks against the local copy (pending payments included) ----
   const recordLocally = () => withLocalTransaction(req.localDbPath, async (tx) => {
     const ord = await sqliteGet(tx,
-      'SELECT production_status, ROUND(COALESCE(total_quote_amount, 0) * 100) AS quote_centavos FROM order_profiles WHERE order_id = ?',
+      'SELECT production_status, ROUND(COALESCE(total_quote_amount, 0) * 100) AS quote_centavos, archived_at FROM order_profiles WHERE order_id = ?',
       [order_id]);
     if (!ord) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
+    if (ord.archived_at) throw new Rejected(409, RECORD_ARCHIVED);
     const paidRow = await sqliteGet(tx,
       'SELECT COALESCE(SUM(ROUND(amount * 100)), 0) AS paid_centavos FROM payments WHERE order_id = ?', [order_id]);
     const problem = checkPayment({
@@ -1232,7 +1350,7 @@ router.param('payment_id', (req, res, next, value) => {
   next();
 });
 
-router.post('/:order_id/payments/:payment_id/void', requireRole(rolesWith('void_order')), requireOrderEditAccess, async (req, res) => {
+router.post('/:order_id/payments/:payment_id/void', requireRole(rolesWith('void_order')), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
   const { order_id, payment_id } = req.params;
   const body = req.body || {};
   const v = createValidator();
@@ -1257,9 +1375,10 @@ router.post('/:order_id/payments/:payment_id/void', requireRole(rolesWith('void_
 
     const result = await withPgTransaction(req.pgPool, async (client) => {
       const ord = await client.query(
-        'SELECT production_status, tracking_no, total_quote_amount::text AS quote FROM order_profiles WHERE order_id = $1 FOR UPDATE',
+        'SELECT production_status, tracking_no, total_quote_amount::text AS quote, archived_at IS NOT NULL AS archived FROM order_profiles WHERE order_id = $1 FOR UPDATE',
         [order_id]);
       if (ord.rowCount === 0) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
+      if (ord.rows[0].archived) throw new Rejected(409, RECORD_ARCHIVED);
       const target = await client.query(
         `SELECT ${selectList('payments', 'pg')} FROM payments WHERE payment_id = $1 AND order_id = $2 FOR UPDATE`, [payment_id, order_id]);
       if (target.rowCount === 0) {
@@ -1344,7 +1463,7 @@ router.post('/:order_id/payments/:payment_id/void', requireRole(rolesWith('void_
 //      login token on the locked row, audit_log row written, "order_overridden" sent to them).
 // -> 200 { message, source, order, version }
 // ==========================================
-router.patch('/:order_id/design', requireRole(WRITE_ROLES), requireOrderEditAccess, async (req, res) => {
+router.patch('/:order_id/design', requireRole(WRITE_ROLES), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
   const { order_id } = req.params;
   const { design_drive_link, expected_version, override } = req.body || {};
 
@@ -1451,7 +1570,7 @@ router.patch('/:order_id/design', requireRole(WRITE_ROLES), requireOrderEditAcce
 // Works offline (synced later, pushing only the changed fields; the sync settles a clash by rank).
 // -> 200 { message, source, order, changed, overridden }
 // ==========================================
-router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAccess, async (req, res) => {
+router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
   const { order_id } = req.params;
   const body = req.body || {};
   const v = createValidator();
@@ -1613,7 +1732,7 @@ const QUOTE_REQUIRES_CLOUD = {
   message: 'Calculating the quote needs the cloud connection, so the latest prices are used. Nothing was changed. Try again when online.'
 };
 
-router.post('/:order_id/quote', requireRole(rolesWith('set_quote')), requireOrderEditAccess, async (req, res) => {
+router.post('/:order_id/quote', requireRole(rolesWith('set_quote')), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
   const { order_id } = req.params;
   const body = req.body || {};
   const v = createValidator();
@@ -1767,7 +1886,7 @@ router.post('/:order_id/quote', requireRole(rolesWith('set_quote')), requireOrde
 // -> 200 { message, source:'cloud', order, reserved:[{inventory_id,item_name,quantity}],
 //          newly_reserved, inventory:[InventoryItem...] }
 // ==========================================
-router.post('/:order_id/approve', requireRole(APPROVE_ROLES), requireOrderEditAccess, async (req, res) => {
+router.post('/:order_id/approve', requireRole(APPROVE_ROLES), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
   const { order_id } = req.params;
   const { expected_version } = req.body || {};
 

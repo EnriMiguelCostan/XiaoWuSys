@@ -110,7 +110,7 @@ const applyConsumables = async (client, req, { order_id, planned, rowsById }) =>
     if (!locked || locked.deleted_at || locked.purged_at) continue;
     // Read again: completing the order may have just used some of the same item as a material
     const now = await client.query(
-      'SELECT quantity_available, item_name, unit FROM inventory_items WHERE inventory_id = $1', [p.consumable_inventory_id]);
+      'SELECT quantity_available, item_name, unit, unit_cost FROM inventory_items WHERE inventory_id = $1', [p.consumable_inventory_id]);
     const row = now.rows[0];
     const before = Number(row.quantity_available);
     const { quantity_deducted, shortfall } = clampDeduction(p.needed, before);
@@ -122,10 +122,11 @@ const applyConsumables = async (client, req, { order_id, planned, rowsById }) =>
       if (taken.rowCount !== 1) throw new Error(`consumable ${p.consumable_inventory_id} changed while locked`);
     }
     const log_id = crypto.randomUUID();
+    // unit_cost (PB 22, migration 013): today's cost is kept on the row, so the P&L never moves later
     await client.query(
-      `INSERT INTO order_consumables_log (log_id, order_id, trigger_status, consumable_inventory_id, quantity_deducted, shortfall)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [log_id, order_id, p.trigger_status, p.consumable_inventory_id, quantity_deducted, shortfall]);
+      `INSERT INTO order_consumables_log (log_id, order_id, trigger_status, consumable_inventory_id, quantity_deducted, shortfall, unit_cost)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [log_id, order_id, p.trigger_status, p.consumable_inventory_id, quantity_deducted, shortfall, row.unit_cost]);
     await auditCloud(client, req.user, p.consumable_inventory_id, 'stock_subtracted', row.item_name, {
       kind: 'consumable_deducted',
       order_id,

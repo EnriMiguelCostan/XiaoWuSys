@@ -31,10 +31,11 @@ const createScriptedCloud = () => {
         return { rows: [], rowCount: 1 };
       }
       if (/^INSERT INTO /.test(q)) return { rows: [], rowCount: 1 };
-      if (/AS version, tracking_no::text AS tracking_no FROM order_profiles WHERE order_id = \$1$/.test(q)) {
+      // Other cloud-owned columns (archived_at / archived_by, migration 013) may follow the number
+      if (/AS version, tracking_no::text AS tracking_no(, \w+::text AS \w+)* FROM order_profiles WHERE order_id = \$1$/.test(q)) {
         return { rows: [{ version: '2026-10-29T08:00:00.000001', tracking_no: numbers.get(params[0]) || null }], rowCount: 1 };
       }
-      if (/^UPDATE order_profiles .* RETURNING .* AS version, tracking_no::text AS tracking_no$/.test(q)) {
+      if (/^UPDATE order_profiles .* RETURNING .* AS version, tracking_no::text AS tracking_no(, \w+::text AS \w+)*$/.test(q)) {
         return { rows: [{ version: '2026-10-29T09:00:00.000001', tracking_no: 'XM-2026-0007' }], rowCount: 1 };
       }
       if (/AS version FROM \w+ WHERE \w+ = \$1$/.test(q)) return { rows: [{ version: '2026-10-29T08:00:00.000001' }], rowCount: 1 };

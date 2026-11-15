@@ -50,7 +50,22 @@ const canTransition = (from, to) => (STATUS_TRANSITIONS[from] || []).includes(to
 //   print_quote     the customer quotation can be printed once the order has a quote
 //   void_payment    PB 23: the Owner may void (reverse) a payment; each payment also says can_void
 //   log_loss        PB 18: record a misprint / material loss against this order while it is open
+//   archive_order   PB 23 / D2: hide a closed order from the everyday lists (Owner, Admin; kept forever)
+//   restore_order   bring an archived order back. While archived, nothing else may change it.
+const ARCHIVED_REASON = 'This order is archived. Restore it first if you need to change it.';
+const isArchived = (record) => Boolean(record && record.archived_at);
+
 const allowedActions = (order, role, summary = null) => {
+  if (isArchived(order)) {
+    // Read-only: printing stays, every change waits for a restore
+    return {
+      approve: false, statuses: [], edit_deadline: false, edit_quote: false, generate_quote: false, apply_discount: false,
+      link_design: false, add_items: false, record_payment: false, max_payment: 0,
+      payment_blocked_reason: can(role, 'record_payment') ? ARCHIVED_REASON : null,
+      print_receipt: can(role, 'view_orders'), print_quote: can(role, 'view_orders') && Number(order.total_quote_amount) > 0,
+      void_payment: false, log_loss: false, archive_order: false, restore_order: can(role, 'manage_accounts')
+    };
+  }
   const status = order && order.production_status;
   const editable = EDITABLE_STATUSES.includes(status);
   const totals = summary || paymentSummary({ quote: order ? order.total_quote_amount : 0, payments: [] });
@@ -72,7 +87,9 @@ const allowedActions = (order, role, summary = null) => {
     print_receipt: can(role, 'view_orders'),
     print_quote: can(role, 'view_orders') && Number(order && order.total_quote_amount) > 0,
     void_payment: Boolean(status) && can(role, 'void_order'),
-    log_loss: editable && can(role, 'edit_inventory')
+    log_loss: editable && can(role, 'edit_inventory'),
+    archive_order: CLOSED_STATUSES.includes(status) && can(role, 'manage_accounts'),
+    restore_order: false
   };
 };
 
@@ -126,5 +143,7 @@ module.exports = {
   APPROVABLE_STATUSES,
   capabilityForTransition,
   canTransition,
-  allowedActions
+  allowedActions,
+  isArchived,
+  ARCHIVED_REASON
 };

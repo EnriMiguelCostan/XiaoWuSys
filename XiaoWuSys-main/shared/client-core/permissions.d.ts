@@ -40,6 +40,10 @@ export interface OrderActions {
   void_payment: boolean;
   /** PB 18: record a misprint / material loss against this order (open orders, catalog editors) */
   log_loss: boolean;
+  /** PB 23 / D2: archive a closed order (Owner, Admin) */
+  archive_order: boolean;
+  /** bring an archived order back (Owner, Admin); an archived order allows nothing else */
+  restore_order: boolean;
   [key: string]: unknown;
 }
 

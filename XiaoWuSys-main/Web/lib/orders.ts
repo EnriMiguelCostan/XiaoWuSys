@@ -37,6 +37,9 @@ export interface Order {
   deadline_flag?: DeadlineFlag | string | null;
   /** PB 23: why the Owner cancelled the order (null when none was given) */
   cancellation_reason?: string | null;
+  /** PB 23 / D2: archived (hidden from the list, read-only until restored, kept forever). UTC. */
+  archived_at?: string | null;
+  archived_by?: string | null;
 }
 
 /** PB 14: one status change, oldest first in OrderDetail.status_history */

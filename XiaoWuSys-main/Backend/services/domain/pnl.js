@@ -13,7 +13,9 @@
 //   overhead_cost     overhead expenses dated in the period, by category
 //   total_expenses = cogs_blanks + cogs_consumables + waste_cost + overhead_cost
 //   net_profit     = gross_income - total_expenses        profitable = net_profit >= 0
-// Unit costs are today's catalog costs (the catalog keeps no cost history).
+// Unit costs: the cost kept on the row when it happened (order_items.unit_cost at completion,
+// order_consumables_log.unit_cost when taken; migration 013), else today's catalog cost for
+// rows from before migration 013 (COALESCE), so later catalog edits never move a past report.
 // Server timestamps (payment_date, changed_at, deducted_at, date_recorded) are UTC; an
 // expense_date is already a shop day.
 // ==========================================
@@ -49,7 +51,9 @@ const computePnl = ({
   from, to, payments = [], orders = [], orderItems = [], completions = [], consumablesLog = [], losses = [],
   overheads = [], unitCosts = new Map()
 }) => {
-  const costC = (inventory_id) => toCentavos(unitCosts.get(inventory_id) || 0);
+  // COALESCE(row cost at the time, today's catalog cost)
+  const costC = (inventory_id, atTheTime = null) =>
+    toCentavos(atTheTime !== null && atTheTime !== undefined ? atTheTime : unitCosts.get(inventory_id) || 0);
 
   let incomeC = 0;
   let voidsC = 0;
@@ -78,13 +82,13 @@ const computePnl = ({
   let blanksC = 0;
   for (const it of orderItems) {
     if (!completedIds.has(it.order_id) || !it.inventory_id) continue;
-    blanksC += costC(it.inventory_id) * (Number(it.quantity) || 0);
+    blanksC += costC(it.inventory_id, it.unit_cost) * (Number(it.quantity) || 0);
   }
 
   let consumablesC = 0;
   for (const l of consumablesLog) {
     if (!inPeriod(shopDayOf(l.deducted_at), from, to)) continue;
-    consumablesC += costC(l.consumable_inventory_id) * (Number(l.quantity_deducted) || 0);
+    consumablesC += costC(l.consumable_inventory_id, l.unit_cost) * (Number(l.quantity_deducted) || 0);
   }
 
   let wasteC = 0;

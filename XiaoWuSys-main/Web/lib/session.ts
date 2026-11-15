@@ -158,3 +158,37 @@ let endedNotice: string | null = null;
 
 /** Why the last session ended (e.g. it expired), for the login screen. Cleared by the next login. */
 export const getEndedNotice = (): string | null => endedNotice;
+
+// ---------------------------------------------------------------------------------------------
+// Theme (Decision N8): light or dark, remembered on this device. Kept here because this is the
+// only file allowed to use the browser's storage (rules guard: token-storage-in-session-only).
+// Display only: it never affects what the server allows.
+// ---------------------------------------------------------------------------------------------
+export type Theme = 'light' | 'dark';
+const THEME_KEY = 'xiaomei_theme';
+const themeListeners = new Set<() => void>();
+
+/** The theme chosen on this device; light until someone picks dark (the shop's default). */
+export const getTheme = (): Theme => (read(THEME_KEY) === 'dark' ? 'dark' : 'light');
+
+/** What the server render sees. */
+export const getServerTheme = (): Theme => 'light';
+
+export const setTheme = (theme: Theme) => {
+  write(THEME_KEY, theme);
+  themeListeners.forEach((fn) => fn());
+};
+
+const onThemeStorage = (event: StorageEvent) => {
+  if (event.key === null || event.key === THEME_KEY) themeListeners.forEach((fn) => fn());
+};
+
+/** A change in another tab is picked up too. */
+export const subscribeTheme = (listener: () => void): (() => void) => {
+  themeListeners.add(listener);
+  if (themeListeners.size === 1 && typeof window !== 'undefined') window.addEventListener('storage', onThemeStorage);
+  return () => {
+    themeListeners.delete(listener);
+    if (themeListeners.size === 0 && typeof window !== 'undefined') window.removeEventListener('storage', onThemeStorage);
+  };
+};

@@ -31,6 +31,8 @@ const LOCAL_SYNC_COLUMNS = ['dirty_fields', 'cloud_last_modified', 'sync_conflic
 //   order_profiles.subtotal_amount / discount_amount / discount_reason   the quote's breakdown (migration 011)
 //   material_loss.reason_code / loss_category / production_stage / is_statistical_anomaly   diagnostics (migration 012)
 //   order_profiles.cancellation_reason, payments.voids_payment_id / void_reason   voids (migration 012)
+//   order_profiles / customers .archived_at / archived_by   archiving (migration 013)
+//   order_items / order_consumables_log .unit_cost   unit cost at the time, for the P&L (migration 013)
 const TABLE_EXTRA_COLUMNS = {
   payments: [['received_by', 'TEXT'], ['receipt_no', 'TEXT'], ['voids_payment_id', 'TEXT'], ['void_reason', 'TEXT']],
   material_loss: [['cloud_stock_delta', 'INTEGER'], ['reason_code', 'TEXT'], ['loss_category', 'TEXT'], ['production_stage', 'TEXT'],
@@ -41,7 +43,10 @@ const TABLE_EXTRA_COLUMNS = {
   order_profiles: [['stock_reserved', 'INTEGER NOT NULL DEFAULT 0'], ['approved_by', 'TEXT'], ['approved_at', 'TEXT'],
                    ['tracking_no', 'TEXT'], ['last_edited_by', 'TEXT'], ['last_edited_role', 'TEXT'],
                    ['subtotal_amount', 'REAL NOT NULL DEFAULT 0'], ['discount_amount', 'REAL NOT NULL DEFAULT 0'],
-                   ['discount_reason', 'TEXT'], ['cancellation_reason', 'TEXT']]
+                   ['discount_reason', 'TEXT'], ['cancellation_reason', 'TEXT'], ['archived_at', 'TEXT'], ['archived_by', 'TEXT']],
+  customers: [['archived_at', 'TEXT'], ['archived_by', 'TEXT']],
+  order_items: [['unit_cost', 'REAL']],
+  order_consumables_log: [['unit_cost', 'REAL']]
 };
 
 const all = (db, sql, params = []) =>

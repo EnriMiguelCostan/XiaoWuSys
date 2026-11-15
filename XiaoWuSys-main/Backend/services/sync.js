@@ -49,7 +49,9 @@ const SYNC_TABLES = [
   {
     table: 'customers',
     id: 'customer_id',
-    columns: ['customer_id', 'full_name', 'contact_number', 'platform_source']
+    // archived_at / archived_by (migration 013): archiving needs the cloud, so they only travel down
+    columns: ['customer_id', 'full_name', 'contact_number', 'platform_source', 'archived_at', 'archived_by'],
+    cloudOwned: ['archived_at', 'archived_by']
   },
   {
     table: 'order_profiles',
@@ -59,14 +61,17 @@ const SYNC_TABLES = [
     // subtotal_amount / discount_amount / discount_reason (migration 011): the quote's breakdown
     columns: ['order_id', 'customer_id', 'date_created', 'production_deadline', 'production_status', 'design_drive_link', 'total_quote_amount',
               'stock_reserved', 'approved_by', 'approved_at', 'tracking_no', 'last_edited_by', 'last_edited_role',
-              'subtotal_amount', 'discount_amount', 'discount_reason', 'cancellation_reason'],
-    // Given by the cloud database (migration 007 trigger): never pushed, copied back after a push
-    cloudOwned: ['tracking_no']
+              'subtotal_amount', 'discount_amount', 'discount_reason', 'cancellation_reason', 'archived_at', 'archived_by'],
+    // Given by the cloud database (migration 007 trigger): never pushed, copied back after a push.
+    // archived_at / archived_by (migration 013): archiving needs the cloud, so a push never clears them.
+    cloudOwned: ['tracking_no', 'archived_at', 'archived_by']
   },
   {
     table: 'order_items',
     id: 'line_item_id',
-    columns: ['line_item_id', 'order_id', 'inventory_id', 'product_type', 'quantity', 'size', 'custom_name', 'custom_number', 'price']
+    // unit_cost (migration 013): set in the cloud when the order is Completed; never pushed
+    columns: ['line_item_id', 'order_id', 'inventory_id', 'product_type', 'quantity', 'size', 'custom_name', 'custom_number', 'price', 'unit_cost'],
+    cloudOwned: ['unit_cost']
   },
   {
     table: 'payments',
@@ -126,7 +131,7 @@ const SYNC_TABLES = [
     // so rows only travel down (the order detail shows them offline). Append-only in the cloud.
     table: 'order_consumables_log',
     id: 'log_id',
-    columns: ['log_id', 'order_id', 'trigger_status', 'consumable_inventory_id', 'quantity_deducted', 'shortfall', 'deducted_at'],
+    columns: ['log_id', 'order_id', 'trigger_status', 'consumable_inventory_id', 'quantity_deducted', 'shortfall', 'deducted_at', 'unit_cost'],
     pullOnly: true
   }
 ];

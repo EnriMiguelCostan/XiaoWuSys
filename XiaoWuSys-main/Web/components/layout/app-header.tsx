@@ -9,6 +9,7 @@ import { ChevronDown, KeyRound, LogOut, Menu, Printer, UserRound } from 'lucide-
 import type { SessionUser } from '@xiaowu/client-core/permissions';
 import { ChangePasswordDialog } from '@/components/account/change-password-dialog';
 import { activeHref, HOME_PATH, visibleNavItems, type NavItem } from '@/components/layout/nav-items';
+import { ThemeToggle } from '@/components/layout/theme-toggle';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -134,7 +135,8 @@ export function AppHeader() {
           <NavLinks items={items} current={current} orientation="horizontal" />
         </nav>
 
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-1">
+          <ThemeToggle />
           {/* modal={false}: "Change my password" opens a dialog; a modal menu can leave the page unclickable */}
           <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild>
