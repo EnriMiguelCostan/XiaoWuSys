@@ -17,8 +17,10 @@
 // status changes took from stock (PB 15) and the roster import (PB 7, in the materials section).
 // M6 part 3: misprints logged against the order (PB 18 / PB 19), payment voids (PB 23, in the
 // payments section) and the reason the Owner gives when cancelling (PB 23, saved and audited).
+// M6 part 4: Archive / Restore (PB 23, D2) from allowed_actions.archive_order / restore_order.
+// An archived order is read-only: the server sends no edit actions until it is restored.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CircleCheck, CircleX, Copy, Flame, Lock, Printer, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-react';
+import { Archive, ArchiveRestore, CircleCheck, CircleX, Copy, Flame, Lock, Printer, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { orderNumber, shortfallLines } from '@xiaowu/client-core/orders';
 import { orderActions } from '@xiaowu/client-core/permissions';
@@ -109,6 +111,7 @@ export function OrderDetailSheet({
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
   const [confirmApprove, setConfirmApprove] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState<'archive' | 'restore' | null>(null);
   const [shortage, setShortage] = useState<{ title: string; message: string; shortages: Shortage[] } | null>(null);
   // PB 5: which edit forms are open (the lock is held while any is), and a counter that
   // closes them all when the lock is refused or taken over
@@ -311,6 +314,22 @@ export function OrderDetailSheet({
     setResult({ type: 'error', title: 'Not approved', message: errorMessage(data, 'Could not approve this job order.') });
   };
 
+  // ---- Archive / Restore (PB 23, D2; Owner / Admin, online only) ----
+  const archive = async (kind: 'archive' | 'restore') => {
+    if (!order) return;
+    setBusy(true);
+    const { ok, data } = await api<{ message?: string }>('POST', `/orders/${encodeURIComponent(order.order_id)}/${kind}`);
+    setBusy(false);
+    setConfirmArchive(null);
+    setResult(
+      ok
+        ? { type: 'success', title: kind === 'archive' ? 'Order archived' : 'Order restored', message: data.message ?? '' }
+        : { type: 'error', title: kind === 'archive' ? 'Not archived' : 'Not restored', message: errorMessage(data, 'Nothing was changed.') }
+    );
+    reloadDetail();
+    onChanged();
+  };
+
   const popupBlocked: ResultMessage = { type: 'error', title: 'Could not open the print window', message: 'Allow pop-ups for this site, then try again.' };
   const printPayment = (p: Payment) => {
     if (detail && !printReceipt(detail, p, customer)) setResult(popupBlocked);
@@ -361,6 +380,16 @@ export function OrderDetailSheet({
                 <Button variant="outline" size="sm" onClick={printOrder}>
                   <Printer aria-hidden /> Print job order
                 </Button>
+                {actions.archive_order && (
+                  <Button variant="outline" size="sm" onClick={() => setConfirmArchive('archive')} disabled={busy}>
+                    <Archive aria-hidden /> Archive
+                  </Button>
+                )}
+                {actions.restore_order && (
+                  <Button variant="outline" size="sm" onClick={() => setConfirmArchive('restore')} disabled={busy}>
+                    <ArchiveRestore aria-hidden /> Restore
+                  </Button>
+                )}
               </div>
             )}
           </SheetHeader>
@@ -387,6 +416,12 @@ export function OrderDetailSheet({
                     <span className="wrap-anywhere">
                       A {otherLock.role} user is editing this order right now. You can look, but your changes may be refused until they finish.
                     </span>
+                  </p>
+                )}
+                {order.archived_at && (
+                  <p role="status" className={cn('flex items-start gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.muted.banner)}>
+                    <Archive className="mt-0.5 size-4 shrink-0" aria-hidden />
+                    <span>Archived on {formatDateTime(order.archived_at, { utc: true })}. It is kept for the records and cannot be changed until it is restored.</span>
                   </p>
                 )}
                 <OrderInfo detail={detail} customer={customer} />
@@ -513,6 +548,19 @@ export function OrderDetailSheet({
           </form>
         </DialogContent>
       </Dialog>
+      <ConfirmDialog
+        open={Boolean(confirmArchive)}
+        title={confirmArchive === 'restore' ? 'Restore this order?' : 'Archive this order?'}
+        message={
+          confirmArchive === 'restore'
+            ? 'The order comes back to the Orders list and can be changed again.'
+            : 'The order is hidden from the Orders list and can no longer be changed. It is never deleted, and it can be restored later.'
+        }
+        confirmLabel={confirmArchive === 'restore' ? 'Restore order' : 'Archive order'}
+        busy={busy}
+        onConfirm={() => confirmArchive && archive(confirmArchive)}
+        onCancel={() => setConfirmArchive(null)}
+      />
       <ConfirmDialog
         open={confirmApprove}
         title="Approve this job order?"

@@ -28,7 +28,9 @@ const ENTITIES = {
       // PB 11 / PB 12 (migration 011): the quote's breakdown (total = subtotal - discount)
       subtotal_amount: 'money', discount_amount: 'money', discount_reason: 'text',
       // PB 23 (migration 012): why the Owner cancelled (voided) the order
-      cancellation_reason: 'text'
+      cancellation_reason: 'text',
+      // PB 23 / D2 (migration 013): archived (hidden, read-only, kept forever) and by whom
+      archived_at: 'timestamp', archived_by: 'text'
     }
   },
   // PB 22 (migration 012): rent, electricity, wages... for the true-cost P&L
@@ -52,7 +54,8 @@ const ENTITIES = {
     id: 'log_id',
     fields: {
       log_id: 'text', order_id: 'text', trigger_status: 'text', consumable_inventory_id: 'text',
-      quantity_deducted: 'int', shortfall: 'int', deducted_at: 'timestamp'
+      quantity_deducted: 'int', shortfall: 'int', deducted_at: 'timestamp',
+      unit_cost: 'money' // PB 22 (migration 013): the consumable's cost when it was taken (null on older rows)
     }
   },
   // PB 14 (migration 010): one row per status change, written in the cloud only
@@ -67,7 +70,8 @@ const ENTITIES = {
     id: 'line_item_id',
     fields: {
       line_item_id: 'text', order_id: 'text', inventory_id: 'text', product_type: 'text', quantity: 'int',
-      size: 'text', custom_name: 'text', custom_number: 'text', price: 'money'
+      size: 'text', custom_name: 'text', custom_number: 'text', price: 'money',
+      unit_cost: 'money' // PB 22 (migration 013): the blank's cost when the order was Completed (null before)
     }
   },
   payments: {
@@ -100,7 +104,10 @@ const ENTITIES = {
   },
   customers: {
     id: 'customer_id',
-    fields: { customer_id: 'text', full_name: 'text', contact_number: 'text', platform_source: 'text' }
+    fields: {
+      customer_id: 'text', full_name: 'text', contact_number: 'text', platform_source: 'text',
+      archived_at: 'timestamp', archived_by: 'text' // PB 23 / D2 (migration 013)
+    }
   }
 };
 
@@ -307,7 +314,22 @@ const withPgTransaction = async (pgPool, fn) => {
 // swallow other requests' statements into this transaction. Instead, open a short-lived
 // dedicated connection. BEGIN IMMEDIATE takes the write lock up front; the main connection
 // waits (busyTimeout) instead of interleaving.
-const withLocalTransaction = (dbPath, fn) =>
+// PB 26: transactions of THIS server on the same file run one after the other (an in-process
+// queue). Without it, a burst of offline writes (100+ at once) had every request open its own
+// connection and race for SQLite's single write lock; past busyTimeout the losers failed with
+// SQLITE_BUSY. Each transaction is a few milliseconds, so queueing is far faster than racing.
+// Never call withLocalTransaction from inside another one (it would wait for itself).
+const localQueues = new Map(); // dbPath -> promise of the last queued transaction
+const withLocalTransaction = (dbPath, fn) => {
+  const previous = localQueues.get(dbPath) || Promise.resolve();
+  const run = previous.then(() => runLocalTransaction(dbPath, fn));
+  const settled = run.then(() => {}, () => {});
+  localQueues.set(dbPath, settled);
+  settled.then(() => { if (localQueues.get(dbPath) === settled) localQueues.delete(dbPath); });
+  return run;
+};
+
+const runLocalTransaction = (dbPath, fn) =>
   new Promise((resolve, reject) => {
     const db = new sqlite3.Database(dbPath, async (openErr) => {
       if (openErr) return reject(openErr);

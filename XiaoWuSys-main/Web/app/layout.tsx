@@ -3,6 +3,7 @@ import type { Metadata, Viewport } from 'next';
 import { GeistMono } from 'geist/font/mono';
 import { GeistSans } from 'geist/font/sans';
 import { SessionProvider } from '@/components/providers/session-provider';
+import { ThemeSync } from '@/components/providers/theme-sync';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import './globals.css';
 
@@ -24,6 +25,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     // elements, not in the page content.
     <html lang="en" className={`${GeistSans.variable} ${GeistMono.variable}`} suppressHydrationWarning>
       <body className="min-h-dvh bg-background font-sans text-foreground antialiased" suppressHydrationWarning>
+        <ThemeSync />
         <SessionProvider>
           <TooltipProvider>{children}</TooltipProvider>
         </SessionProvider>

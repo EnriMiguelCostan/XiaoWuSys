@@ -6,8 +6,10 @@
 //
 //   pgTarget()                 -> { url, skip }  (skip: false, or the reason the suite is skipped)
 //   resetDatabase(pool, opts)  -> empty schema + schema.sql + migrations (all, or those before opts.before)
-//   startPgTestServer(pool)    -> the real Express app on a random port, cloud = this pool,
-//                                 with a throw-away SQLite cache and signed test tokens
+//   startPgTestServer(pool, { realSync })
+//                              -> the real Express app on a random port, cloud = this pool,
+//                                 with a throw-away SQLite cache and signed test tokens.
+//                                 realSync: POST /api/sync runs the real single-flight sync
 // ==========================================
 const fs = require('fs');
 const os = require('os');
@@ -42,11 +44,11 @@ const resetDatabase = async (pool, { before = null } = {}) => {
   for (const file of migrationFiles().filter((f) => before === null || f < before)) await pool.query(readMigration(file));
 };
 
-const startPgTestServer = async (pool) => {
+const startPgTestServer = async (pool, { realSync = false } = {}) => {
   const { prepareDatabase } = require('./testServer');
   const { createApp } = require('../../app');
   const { createOrderLockManager } = require('../../services/orderLocks');
-  const { listConflicts } = require('../../services/sync');
+  const { listConflicts, syncOfflineData } = require('../../services/sync');
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaowusys-pg-'));
   const dbPath = path.join(dir, 'cache.db');
@@ -60,11 +62,14 @@ const startPgTestServer = async (pool) => {
     notifyUpdated: (order) => { orderEvents.updated.push(order); },
     notifyOverridden: (notice) => { orderEvents.overridden.push(notice); return 1; }
   };
+  const orderLocks = createOrderLockManager();
   const app = createApp({
-    pgPool: pool, localDb, localDbPath: dbPath, orderLocks: createOrderLockManager(),
+    pgPool: pool, localDb, localDbPath: dbPath, orderLocks,
     inventoryEvents: { notifyChanged: (ids, reason) => pushes.push({ ids, reason }) },
     orderEvents,
-    syncAndNotify: async () => ({ synced: 0, conflicts: [], failed: 0, requeued: 0, aborted: false, unresolved_conflicts: 0 }),
+    syncAndNotify: realSync
+      ? () => syncOfflineData(pool, localDb)
+      : async () => ({ synced: 0, conflicts: [], failed: 0, requeued: 0, aborted: false, unresolved_conflicts: 0 }),
     listConflicts,
     cloudHealth: { state: () => 'reachable', since: () => since }
   });
@@ -97,7 +102,7 @@ const startPgTestServer = async (pool) => {
     fs.rmSync(dir, { recursive: true, force: true });
   };
 
-  return { baseUrl, request, tokenFor, close, localDb, orderEvents, pushes };
+  return { baseUrl, request, tokenFor, close, localDb, orderEvents, pushes, orderLocks };
 };
 
 module.exports = { pgTarget, resetDatabase, startPgTestServer, migrationFiles, readMigration };

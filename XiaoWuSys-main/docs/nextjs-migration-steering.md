@@ -23,7 +23,7 @@ Done: `repomix-output.xml` was regenerated from `main@805a619` on 2026-11-12. Do
 | N5 | Language | **TypeScript in `Web/`** (shadcn default; lets us type the decision payloads). The shared client core stays plain JS with JSDoc so React Native can use it as-is. |
 | N6 | Shared non-UI code | Move `Frontend/src/lib/*` and the non-DOM parts of `api.js` into `shared/client-core/`, consumed by both apps through a `file:` dependency. |
 | N7 | Old Vite app during migration | **Frozen**: bug fixes only, no new features. Deleted one release after cutover. |
-| N8 | Dark mode | Build the token layer dark-ready in M0, but **ship dark mode as its own small PB after parity** (it was postponed until this move; don't mix it into the port). |
+| N8 | Dark mode | Build the token layer dark-ready in M0, but **ship dark mode as its own small PB after parity** (it was postponed until this move; don't mix it into the port). **Shipped in Batch M6 part 4:** Light / Dark button in the header, remembered per device in `lib/session.ts`. |
 | N9 | Batch 3 / PB 15 UI | Built **only in Next.js**, after the screens they extend are ported (see §5). |
 
 ---

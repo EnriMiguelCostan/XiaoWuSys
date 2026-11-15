@@ -48,6 +48,8 @@ const LOCAL_TABLES = [
       full_name TEXT NOT NULL,
       contact_number TEXT,
       platform_source TEXT,
+      archived_at TEXT,
+      archived_by TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -69,6 +71,8 @@ const LOCAL_TABLES = [
       discount_amount REAL NOT NULL DEFAULT 0,
       discount_reason TEXT,
       cancellation_reason TEXT,
+      archived_at TEXT,
+      archived_by TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -82,6 +86,7 @@ const LOCAL_TABLES = [
       custom_name TEXT,
       custom_number TEXT,
       price REAL DEFAULT 0.00,
+      unit_cost REAL,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -195,6 +200,7 @@ const LOCAL_TABLES = [
       consumable_inventory_id TEXT NOT NULL,
       quantity_deducted INTEGER NOT NULL,
       shortfall INTEGER NOT NULL DEFAULT 0,
+      unit_cost REAL,
       deducted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP

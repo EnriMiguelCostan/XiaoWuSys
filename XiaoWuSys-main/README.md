@@ -109,9 +109,9 @@ cd Backend
 npm test
 ```
 
-There are 165 automated tests in `Backend/tests/`. Most start the real API on a throw-away SQLite database filled with the shop's own data (`tests/fixtures/data.js`), with the cloud switched off, and call it over HTTP like the browser does. The sync and connection tests use a small scripted stand-in for the cloud.
+There are 175 automated tests in `Backend/tests/`, including `tests/load-stress.test.js` (PB 26), which fires 150+ simultaneous requests at the API. Most start the real API on a throw-away SQLite database filled with the shop's own data (`tests/fixtures/data.js`), with the cloud switched off, and call it over HTTP like the browser does. The sync and connection tests use a small scripted stand-in for the cloud.
 
-`tests/migrations.pg.test.js`, `tests/payments.pg.test.js`, `tests/batch3.pg.test.js`, `tests/m6-part2.pg.test.js` and `tests/m6-part3.pg.test.js` add 53 more that apply `schema.sql` and every migration to a real, throw-away PostgreSQL and check order and receipt numbering, two payments sent at the same moment, the Pressing step and its status history, the Owner override with its audit trail, offline conflicts settled by rank, consumables taken from stock exactly once (also when two screens press the same order at once), the volume quote and the Owner's discount with their audit rows, the roster import, misprint diagnostics (machine-step clusters, also two at once, and statistical anomalies), payment voids as reversing entries (one per payment, also two at once), overheads and the Owner's profit and loss report. They run when `TEST_DATABASE_URL` is set, which **wipes that database**, so it must be on `localhost` or have "test" in its name (never Neon):
+`tests/migrations.pg.test.js`, `tests/payments.pg.test.js`, `tests/batch3.pg.test.js`, `tests/m6-part2.pg.test.js`, `tests/m6-part3.pg.test.js` and `tests/m6-part4.pg.test.js` add 60 more that apply `schema.sql` and every migration to a real, throw-away PostgreSQL and check order and receipt numbering, two payments sent at the same moment, the Pressing step and its status history, the Owner override with its audit trail, offline conflicts settled by rank, consumables taken from stock exactly once (also when two screens press the same order at once), the volume quote and the Owner's discount with their audit rows, the roster import, misprint diagnostics (machine-step clusters, also two at once, and statistical anomalies), payment voids as reversing entries (one per payment, also two at once), overheads and the Owner's profit and loss report, archiving, the unit cost kept for the P&L, 120+ simultaneous requests on real row locks, and many "Sync now" presses at once. They run when `TEST_DATABASE_URL` is set, which **wipes that database**, so it must be on `localhost` or have "test" in its name (never Neon):
 
 ```bash
 TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/xiaowusys_test npm test
@@ -145,6 +145,8 @@ They cover:
 - misprints and material losses: reason codes, the diagnosed cause, the replacement-stock warning, the waste card and `waste.csv`;
 - voids: the cancellation reason with its audit row, payment voids (Owner only, online only, downpayment guard);
 - overhead expenses and the Owner-only profit and loss report with `pnl.csv`;
+- archiving closed orders and customers (hidden, read-only, never deleted);
+- load and stress: 150+ simultaneous requests with exact stock maths and no server errors;
 - security headers and CORS.
 
 ## Useful commands (in `Backend/`)

@@ -99,9 +99,9 @@ Code status was checked against the UAC on 2026-10-29.
 | 20 | 13 | Log financial waste cost | Done (Batch M6 part 3) | Dashboard waste card, `waste.csv` (§7a) |
 | 21 | 14 | Process payment | Done (Batch 2) | Refunds and voids are PB 23 |
 | 22 | 14 | Generate P&L report | Done (Batch M6 part 3) | Overheads + Owner-only P&L, `pnl.csv`, printable (§7a) |
-| 23 | 14 | Void transaction | Mostly (Batch M6 part 3) | Cancel reason + audit, payment voids; archiving still open (§7a) |
-| 26 | 15 | QA & load testing | Partly | 100+ concurrent-request test |
-| 27 | 16 | UAT | Not started | Beta on branch devices, owner sign-off |
+| 23 | 14 | Void transaction | Done (Batch M6 parts 3 and 4) | Cancel reason + audit, payment voids (§7a), archiving (§7b) |
+| 26 | 15 | QA & load testing | Done (Batch M6 part 4) | 150+ concurrent requests offline, 120+ on real PostgreSQL (§7b) |
+| 27 | 16 | UAT | Partly | Demo database shows every feature (§7b); beta on branch devices and the Owner's sign-off remain |
 
 **Work order:** gap remediation Batches 1 → 2 → 3 (§2) first, then the Sprint 12 features (§5, §6).
 Each batch is its own branch and PR, and needs the team's go-ahead before coding starts.
@@ -347,6 +347,14 @@ The earlier draft's designs remain valid. They now belong to these backlog items
 - **PB 23:** `PATCH /status` to Cancelled accepts `cancellation_reason` (the screen requires it; older callers may omit it) and always writes `audit_log` `order_voided` with the released stock. `POST /api/orders/:id/payments/:payment_id/void` (Owner, online only) adds a negative reversing payment with its own AR number and `audit_log` `payment_voided`; `409 VOID_BREAKS_DOWNPAYMENT` for an order in Approved / Printing / Pressing unless `confirm_break_downpayment`. Each payment in the order detail says `voided`, `is_void` and `can_void`; `allowed_actions.void_payment` is the Owner's. **Still open:** archiving orders and customers (D2).
 - **PB 22:** `GET` / `POST /api/reports/overheads` (Owner, Admin; POST also works offline) and `DELETE /api/reports/overheads/:id` (Owner, online only, audited). `GET /api/reports/pnl` and `/export/pnl.csv` are **Owner only** (403 for everyone else); `services/domain/pnl.js` adds up, in centavos, payments after voids, blanks of orders completed in the period, consumables taken in the period, waste by cause and overheads by category. Costs use today's catalog unit cost (no cost history).
 - **Tests:** `tests/m6-part3-rules.test.js`, `tests/m6-part3.test.js` (offline), `tests/m6-part3.pg.test.js` (real PostgreSQL: migration, constraints, clusters also at the same moment, anomaly, cancel audit, voids also at the same moment, overheads, P&L).
+
+### 7b. As built (Batch M6 part 4, migration `013_archive_and_historical_cogs.sql`)
+
+- **PB 23 / D2 archiving:** `order_profiles` and `customers` get `archived_at` / `archived_by` (partial indexes for the everyday lists). `POST /api/orders/:id/archive | restore` and `POST /api/customers/:id/archive | restore` (Owner, Admin: `manage_accounts`; online only, `503 ARCHIVE_REQUIRES_CLOUD`; audited as `order_archived` / `order_restored` / `customer_archived` / `customer_restored`). Only Completed / Cancelled orders, and only customers without open orders (`409 ORDER_STILL_OPEN`). An archived order refuses every write with `409 RECORD_ARCHIVED` (checked before each write route, and again on the locked row for payments and voids); an archived customer refuses new orders (the order transaction takes the customer row `FOR SHARE`, so an archive at the same moment waits and then sees the new order). Lists hide archived records unless `include_archived=true`. `allowed_actions.archive_order` / `restore_order`; an archived order gets no other action. Archived records are never purged. The columns are cloud-owned in `SYNC_TABLES`, so a push from a branch can never clear an archive.
+- **PB 22 cost history:** `order_items.unit_cost` is set when the order becomes Completed and `order_consumables_log.unit_cost` when a consumable is taken, in the same transaction. `computePnl` uses the row's cost and falls back to today's catalog cost only for older rows, so a later catalog price change never moves a past P&L.
+- **PB 26:** `tests/load-stress.test.js` (155 simultaneous requests on the offline server) and `tests/m6-part4.pg.test.js` (120+ on real PostgreSQL, one edit wins out of 20 with the same version, a 60-row offline burst pushed exactly once under 15 simultaneous "Sync now" presses). **Found and fixed:** under a burst of offline writes every request opened its own SQLite connection and raced for the write lock; past the 5 s busy timeout the losers failed (`LOCAL_CACHE_ERROR`) and the burst took 145 s. `withLocalTransaction` now queues this server's transactions per file: the same burst takes about 1.3 s with no failures.
+- **N8 dark mode:** the header's Light / Dark button, remembered per device (`lib/session.ts`), switches the `.dark` class on `<html>`; every colour comes from the existing tokens.
+- **PB 27:** `npm run demo:seed` fills every step and feature of migrations 009–012 (see `scripts/seedDemo.js`).
 
 ---
 

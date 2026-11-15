@@ -84,7 +84,9 @@ const FIELD_LABELS = {
   reason_code: 'Reason', loss_category: 'Cause', production_stage: 'Production step',
   cancellation_reason: 'Reason for cancelling', void_reason: 'Reason for voiding', confirm_break_downpayment: 'Confirmation',
   expense_date: 'Date', description: 'Description', from: 'Start date', to: 'End date', payment_id: 'Payment',
-  expense_id: 'Expense'
+  expense_id: 'Expense',
+  // migration 013 (PB 23 archiving)
+  include_archived: 'Show archived', archived_at: 'Archived on', customer: 'Customer'
 };
 const labelOf = (field) =>
   FIELD_LABELS[field] || String(field).replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());

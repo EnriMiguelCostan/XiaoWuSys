@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, ClipboardList, CloudOff, PlusCircle, RefreshCw, Search, X } from 'lucide-react';
+import { Archive, ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, ClipboardList, CloudOff, PlusCircle, RefreshCw, Search, X } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { normalizeOrderNumber, orderNumber } from '@xiaowu/client-core/orders';
 import { can } from '@xiaowu/client-core/permissions';
@@ -20,6 +20,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Toggle } from '@/components/ui/toggle';
 import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@/components/forms/bounded-select';
 import { useCustomers } from '@/hooks/use-customers';
 import { useSession } from '@/hooks/use-session';
@@ -90,6 +91,8 @@ export function OrdersScreen() {
   const [numberDraft, setNumberDraft] = useState('');
   const [numberError, setNumberError] = useState('');
   const [sort, setSort] = useState<OrderSort>(DEFAULT_ORDER_SORT);
+  // PB 23 / D2: the server hides archived orders unless include_archived=true
+  const [showArchived, setShowArchived] = useState(false);
   const [page, setPage] = useState(0);
   const [tick, setTick] = useState(0);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
@@ -98,6 +101,7 @@ export function OrdersScreen() {
   if (status !== ALL) qs.set('status', status);
   if (customerId !== ALL) qs.set('customer_id', customerId);
   if (numberFilter) qs.set('tracking_no', numberFilter);
+  if (showArchived) qs.set('include_archived', 'true');
   const query = qs.toString();
   const requestKey = `${query}|${tick}|${syncGeneration}`;
 
@@ -164,6 +168,7 @@ export function OrdersScreen() {
     setNumberDraft('');
     setNumberError('');
     setSort(DEFAULT_ORDER_SORT);
+    setShowArchived(false);
     setPage(0);
   };
 
@@ -282,11 +287,25 @@ export function OrdersScreen() {
           {numberError && <p className="text-xs text-danger">{numberError}</p>}
         </form>
       </div>
-      {filtersActive && (
-        <Button variant="ghost" size="sm" onClick={clearFilters}>
-          <X aria-hidden /> Clear filters
-        </Button>
-      )}
+      <div className="flex flex-wrap items-center gap-2">
+        <Toggle
+          variant="outline"
+          size="sm"
+          pressed={showArchived}
+          onPressedChange={(on) => {
+            setShowArchived(on);
+            setPage(0);
+          }}
+          aria-label="Show archived orders"
+        >
+          <Archive aria-hidden /> Show archived
+        </Toggle>
+        {(filtersActive || showArchived) && (
+          <Button variant="ghost" size="sm" onClick={clearFilters}>
+            <X aria-hidden /> Clear filters
+          </Button>
+        )}
+      </div>
 
       {list?.source === 'local' && (
         <p className={cn('flex items-center gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.warning.banner)}>
@@ -373,6 +392,11 @@ export function OrdersScreen() {
                   </TableCell>
                   <TableCell>
                     <OrderStatusBadge status={o.production_status} />
+                    {o.archived_at && (
+                      <Badge variant="outline" className={cn('ml-1', TONE_CLASSES.muted.badge)}>
+                        Archived
+                      </Badge>
+                    )}
                   </TableCell>
                   <TableCell className="hidden text-right tabular-nums md:table-cell">{peso(o.total_quote_amount)}</TableCell>
                 </TableRow>
