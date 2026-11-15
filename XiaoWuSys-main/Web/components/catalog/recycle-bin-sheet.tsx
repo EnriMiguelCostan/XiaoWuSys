@@ -7,13 +7,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ChevronLeft, ChevronRight, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
 import { formatDateTime } from '@xiaowu/client-core/format';
+import { LogoSpinner } from '@/components/brand/brand-logo';
 import { FormProblem } from '@/components/forms/form-bits';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { Skeleton } from '@/components/ui/skeleton';
 import { useApi } from '@/hooks/use-api';
 import { errorMessage } from '@/lib/api';
 import type { RecycleBinPage } from '@/lib/inventory';
@@ -173,8 +173,7 @@ export function RecycleBinSheet({
           )}
           {loaded?.error && <FormProblem message={loaded.error} />}
 
-          {loading && !page &&
-            Array.from({ length: 4 }, (_, i) => <Skeleton key={i} className="h-16 w-full" />)}
+          {loading && !page && <LogoSpinner label="Loading the Recycle Bin…" className="flex-1" />}
 
           {!loading && page && page.items.length === 0 && (
             <p className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">The Recycle Bin is empty.</p>

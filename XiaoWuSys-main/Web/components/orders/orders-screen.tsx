@@ -10,6 +10,7 @@ import { Archive, ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Cl
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { normalizeOrderNumber, orderNumber } from '@xiaowu/client-core/orders';
 import { can } from '@xiaowu/client-core/permissions';
+import { LogoSpinner } from '@/components/brand/brand-logo';
 import { useConnection } from '@/components/connection/connection-provider';
 import { OrderDetailSheet } from '@/components/orders/order-detail-sheet';
 import { DeadlineBadge, OrderStatusBadge } from '@/components/orders/status-badges';
@@ -18,7 +19,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Toggle } from '@/components/ui/toggle';
 import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@/components/forms/bounded-select';
@@ -320,10 +320,8 @@ export function OrdersScreen() {
 
       {/* Orders table */}
       {!list && loading ? (
-        <div className="space-y-2 rounded-lg border bg-card p-4" role="status" aria-label="Loading orders">
-          {Array.from({ length: 6 }, (_, i) => (
-            <Skeleton key={i} className="h-10 w-full" />
-          ))}
+        <div className="rounded-lg border bg-card">
+          <LogoSpinner label="Loading orders…" />
         </div>
       ) : (
         <div className={cn('max-w-full min-w-0 overflow-x-auto rounded-lg border bg-card transition-opacity', loading && 'opacity-60')} aria-busy={loading}>

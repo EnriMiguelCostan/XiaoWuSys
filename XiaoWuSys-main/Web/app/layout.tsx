@@ -8,8 +8,8 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'XiaoMei ERP',
-  description: 'Orders, stock and payments for XiaoMei Printshop',
+  title: 'XiaoWuSys',
+  description: 'XiaoWuSys: orders, stock and payments for Xiao Mei Printing Services',
 };
 
 // Tablets on the shop Wi-Fi (Q4): no pinch-zoom lock, fit the device width.

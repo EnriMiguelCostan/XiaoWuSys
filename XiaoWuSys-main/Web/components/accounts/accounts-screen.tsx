@@ -19,6 +19,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { CloudOff, KeyRound, RefreshCw, UserCheck, UserPlus, Users, UserX } from 'lucide-react';
 import { formatDateTime } from '@xiaowu/client-core/format';
 import { roleHelp } from '@xiaowu/client-core/permissions';
+import { LogoSpinner } from '@/components/brand/brand-logo';
 import { useConnection } from '@/components/connection/connection-provider';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
@@ -35,7 +36,6 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useApi } from '@/hooks/use-api';
 import { useSession } from '@/hooks/use-session';
@@ -161,10 +161,8 @@ export function AccountsScreen() {
       )}
 
       {!list && loading ? (
-        <div className="space-y-2 rounded-lg border bg-card p-4" role="status" aria-label="Loading accounts">
-          {Array.from({ length: 5 }, (_, i) => (
-            <Skeleton key={i} className="h-10 w-full" />
-          ))}
+        <div className="rounded-lg border bg-card">
+          <LogoSpinner label="Loading accounts…" />
         </div>
       ) : (
         list && (

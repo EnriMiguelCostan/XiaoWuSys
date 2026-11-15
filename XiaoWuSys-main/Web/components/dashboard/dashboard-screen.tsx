@@ -15,6 +15,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { AlarmClock, CalendarClock, CloudOff, Copy, Download, PackageX, RefreshCw, ShoppingCart, TriangleAlert, Wallet } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { can } from '@xiaowu/client-core/permissions';
+import { LogoSpinner } from '@/components/brand/brand-logo';
 import { useConnection } from '@/components/connection/connection-provider';
 import { Cell, LowStockBanner, OrdersTableCard, SummaryCard } from '@/components/dashboard/dashboard-parts';
 import { OverheadsCard, PnlCard, WasteCard } from '@/components/dashboard/finance-sections';
@@ -23,7 +24,6 @@ import { OrderStatusBadge } from '@/components/orders/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useApi } from '@/hooks/use-api';
 import { useFallbackPolling } from '@/hooks/use-fallback-polling';
@@ -148,11 +148,8 @@ export function DashboardScreen() {
             {error}
           </p>
         ) : (
-          <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" role="status" aria-label="Loading the dashboard">
-            {Array.from({ length: 4 }, (_, i) => (
-              <Skeleton key={i} className="h-32 w-full" />
-            ))}
-            <Skeleton className="h-64 w-full sm:col-span-2 xl:col-span-4" />
+          <div className="flex min-h-[50dvh] items-center justify-center">
+            <LogoSpinner label="Loading the dashboard…" size="lg" />
           </div>
         )}
         <ResultDialog result={result} onClose={() => setResult(null)} />

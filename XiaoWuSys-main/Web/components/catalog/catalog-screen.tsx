@@ -10,6 +10,7 @@
 import { useMemo, useState } from 'react';
 import { CloudOff, Download, FileUp, PackagePlus, RefreshCw, Search, SlidersHorizontal, Trash2, X } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
+import { LogoSpinner } from '@/components/brand/brand-logo';
 import { ConsumableRatesDialog } from '@/components/catalog/consumable-rates-dialog';
 import { ImportDialog } from '@/components/catalog/import-dialog';
 import { InventoryTable, nextSort, sortItems, type SortKey, type SortState } from '@/components/catalog/inventory-table';
@@ -300,10 +301,8 @@ export function CatalogScreen() {
         </h2>
 
         {!snapshot && loading && (
-          <div className="space-y-2 rounded-lg border bg-card p-4" role="status" aria-label="Loading the catalog">
-            {Array.from({ length: 6 }, (_, i) => (
-              <Skeleton key={i} className="h-10 w-full" />
-            ))}
+          <div className="rounded-lg border bg-card">
+            <LogoSpinner label="Loading the catalog…" />
           </div>
         )}
 
