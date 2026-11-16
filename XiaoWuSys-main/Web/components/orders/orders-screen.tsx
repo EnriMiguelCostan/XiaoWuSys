@@ -6,12 +6,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { Archive, ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, ClipboardList, CloudOff, PlusCircle, RefreshCw, Search, X } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, ClipboardList, CloudOff, PlusCircle, RefreshCw, Search, X } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { orderNumber } from '@xiaowu/client-core/orders';
 import { can } from '@xiaowu/client-core/permissions';
 import { LogoSpinner } from '@/components/brand/brand-logo';
 import { useConnection } from '@/components/connection/connection-provider';
+import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { OrderDetailSheet } from '@/components/orders/order-detail-sheet';
 import { DeadlineBadge, OrderStatusBadge } from '@/components/orders/status-badges';
 import { Badge } from '@/components/ui/badge';
@@ -121,8 +122,11 @@ export function OrdersScreen() {
   const [numberDraft, setNumberDraft] = useState('');
   const [numberError, setNumberError] = useState('');
   const [sort, setSort] = useState<OrderSort>(DEFAULT_ORDER_SORT);
-  // PB 23 / D2: the server hides archived orders unless include_archived=true
+  // PB 23 / D2: archived orders are hidden; "Show archived" lists ONLY the archived ones
+  // (include_archived=only), each with an Unarchive button for the Owner / Admin
   const [showArchived, setShowArchived] = useState(false);
+  const [unarchiving, setUnarchiving] = useState<string | null>(null);
+  const [result, setResult] = useState<ResultMessage | null>(null);
   const [page, setPage] = useState(0);
   const [tick, setTick] = useState(0);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
@@ -131,7 +135,7 @@ export function OrdersScreen() {
   if (status !== ALL) qs.set('status', status);
   if (customerId !== ALL) qs.set('customer_id', customerId);
   if (numberFilter) qs.set('number_search', numberFilter);
-  if (showArchived) qs.set('include_archived', 'true');
+  if (showArchived) qs.set('include_archived', 'only');
   const query = qs.toString();
   const requestKey = `${query}|${tick}|${syncGeneration}`;
 
@@ -163,8 +167,25 @@ export function OrdersScreen() {
 
   const reload = useCallback(() => setTick((t) => t + 1), []);
 
-  // PB 14: an order was created or changed on any branch: re-read this page (no polling)
-  useSocketEvent('order_updated', reload);
+  // PB 14: an order was created or changed on any branch: re-read this page (no polling).
+  // While an order is open, the list sits under the blurred backdrop: reloading it there would
+  // make the browser re-blur the page (scroll lag on low-end computers) for a change nobody can
+  // see yet. So it is held, and done once when the order closes. The open order itself still
+  // updates live (the detail sheet listens on its own).
+  const openIdRef = useRef(openId);
+  const heldReload = useRef(false);
+  useEffect(() => {
+    openIdRef.current = openId;
+    if (!openId && heldReload.current) {
+      heldReload.current = false;
+      reload();
+    }
+  }, [openId, reload]);
+  const onOrderUpdated = useCallback(() => {
+    if (openIdRef.current) heldReload.current = true;
+    else reload();
+  }, [reload]);
+  useSocketEvent('order_updated', onOrderUpdated);
 
   // Any filter or sort change starts again at page 1
   const changed = <T,>(setter: (v: T) => void) => (value: T) => {
@@ -267,6 +288,20 @@ export function OrdersScreen() {
     params.delete('order');
     const rest = params.toString();
     router.push(rest ? `${pathname}?${rest}` : pathname, { scroll: false });
+  };
+
+  // Owner / Admin: bring an archived order back to the everyday list (the server re-checks)
+  const canUnarchive = can(user, 'manage_accounts');
+  const unarchive = async (orderId: string, label: string) => {
+    setUnarchiving(orderId);
+    const { ok, data } = await api<{ message?: string }>('POST', `/orders/${encodeURIComponent(orderId)}/restore`);
+    setUnarchiving(null);
+    setResult(
+      ok
+        ? { type: 'success', title: 'Order unarchived', message: `${label} is back in the Orders list.` }
+        : { type: 'error', title: 'Not unarchived', message: errorMessage(data, 'Nothing was changed.') }
+    );
+    reload();
   };
 
   const customerName = (id: string) => customerById.get(id)?.full_name || 'Unknown customer';
@@ -386,6 +421,7 @@ export function OrdersScreen() {
         >
           <Archive aria-hidden /> Show archived
         </Toggle>
+        {showArchived && <span className="text-xs text-muted-foreground">Showing archived orders only.</span>}
         {(filtersActive || showArchived) && (
           <Button variant="ghost" size="sm" onClick={clearFilters}>
             <X aria-hidden /> Clear filters
@@ -429,7 +465,9 @@ export function OrdersScreen() {
                   <TableCell colSpan={6} className="py-10 text-center whitespace-normal text-muted-foreground">
                     {numberFilter
                       ? `No order number contains "${numberFilter}".`
-                      : status !== ALL || customerId !== ALL
+                      : showArchived
+                        ? 'No archived orders.'
+                        : status !== ALL || customerId !== ALL
                         ? 'No orders match these filters.'
                         : 'No orders yet.'}
                   </TableCell>
@@ -487,6 +525,20 @@ export function OrdersScreen() {
                         Archived
                       </Badge>
                     )}
+                    {o.archived_at && canUnarchive && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="ml-2 h-6 px-2 text-xs"
+                        disabled={unarchiving !== null}
+                        onClick={(e) => {
+                          e.stopPropagation(); // do not open the order
+                          void unarchive(o.order_id, orderNumber(o));
+                        }}
+                      >
+                        <ArchiveRestore aria-hidden /> {unarchiving === o.order_id ? 'Unarchiving…' : 'Unarchive'}
+                      </Button>
+                    )}
                   </TableCell>
                   <TableCell className="hidden text-right tabular-nums md:table-cell">{peso(o.total_quote_amount)}</TableCell>
                 </TableRow>
@@ -508,6 +560,8 @@ export function OrdersScreen() {
         </div>
       )}
       </div>
+
+      <ResultDialog result={result} onClose={() => setResult(null)} />
 
       <OrderDetailSheet
         orderId={openId}

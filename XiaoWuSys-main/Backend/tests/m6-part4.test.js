@@ -45,6 +45,11 @@ describe('M6 part 4 offline: archived orders and customers', () => {
     const all = await t.request('GET', '/api/orders?include_archived=true', { token: staff });
     assert.deepEqual(all.body.orders.map((o) => o.order_id).sort(), [orderId, openId].sort());
     assert.equal(all.body.orders.find((o) => o.order_id === orderId).archived_at, '2026-11-01T02:00:00');
+    // "Show archived" in the Orders tab: archived orders ONLY
+    const only = await t.request('GET', '/api/orders?include_archived=only', { token: staff });
+    assert.equal(only.status, 200, only.text);
+    assert.deepEqual(only.body.orders.map((o) => o.order_id), [orderId]);
+    assert.equal(only.body.archived_only, true);
     assert.equal((await t.request('GET', '/api/orders?include_archived=maybe', { token: staff })).status, 400);
   });
 

@@ -39,7 +39,7 @@ const TABLE_EXTRA_COLUMNS = {
                   ['is_statistical_anomaly', 'INTEGER DEFAULT 0']],
   inventory_items: [['deleted_at', 'TEXT'], ['deleted_by', 'TEXT'], ['purged_at', 'TEXT'],
                     ['unit', "TEXT NOT NULL DEFAULT 'pcs'"], ['supplier', 'TEXT'], ['selling_price', 'REAL NOT NULL DEFAULT 0']],
-  users: [['is_active', 'INTEGER NOT NULL DEFAULT 1'], ['tokens_valid_after', 'TEXT']],
+  users: [['is_active', 'INTEGER NOT NULL DEFAULT 1'], ['tokens_valid_after', 'TEXT'], ['removed_at', 'TEXT'], ['removed_by', 'TEXT']],
   order_profiles: [['stock_reserved', 'INTEGER NOT NULL DEFAULT 0'], ['approved_by', 'TEXT'], ['approved_at', 'TEXT'],
                    ['tracking_no', 'TEXT'], ['last_edited_by', 'TEXT'], ['last_edited_role', 'TEXT'],
                    ['subtotal_amount', 'REAL NOT NULL DEFAULT 0'], ['discount_amount', 'REAL NOT NULL DEFAULT 0'],

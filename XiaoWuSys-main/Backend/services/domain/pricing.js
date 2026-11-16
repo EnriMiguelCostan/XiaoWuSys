@@ -21,7 +21,7 @@ const VOLUME_TIERS = [
   { min_quantity: 50, percent_off: 5, label: 'Bulk price (50 pieces or more): 5% off' },
   { min_quantity: 0, percent_off: 0, label: 'Regular price' }
 ];
-const DISCOUNT_REASON_MAX = 500;
+const DISCOUNT_REASON_MAX = 150; // printed on the quote; matches Web/lib/input-limits.ts DISCOUNT_LIMITS
 
 const tierFor = (totalQuantity) => VOLUME_TIERS.find((t) => totalQuantity >= t.min_quantity);
 

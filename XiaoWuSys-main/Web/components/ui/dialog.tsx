@@ -5,6 +5,7 @@ import { cn } from "cn"
 import { Dialog as DialogPrimitive } from "radix-ui"
 
 import { Button } from "@/components/ui/button"
+import { isToastTarget } from "@/lib/toast"
 import { XIcon } from "lucide-react"
 
 function Dialog({
@@ -77,7 +78,11 @@ function DialogContent({
           className
         )}
         onInteractOutside={(event) => {
-          if (!dismissible) event.preventDefault()
+          // Clicking a pop-up notice (components/feedback/toaster.tsx) is not "outside"
+          if (!dismissible || isToastTarget(event.target)) {
+            event.preventDefault()
+            return
+          }
           onInteractOutside?.(event)
         }}
         onEscapeKeyDown={(event) => {

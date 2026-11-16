@@ -26,7 +26,7 @@ const SYNC_TABLES = [
     // while the internet is down (password hashes only, never plain passwords).
     table: 'users',
     id: 'user_id',
-    columns: ['user_id', 'username', 'password_hash', 'role', 'is_active', 'tokens_valid_after'],
+    columns: ['user_id', 'username', 'password_hash', 'role', 'is_active', 'tokens_valid_after', 'removed_at', 'removed_by'],
     pullOnly: true
   },
   {

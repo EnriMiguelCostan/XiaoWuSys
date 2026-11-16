@@ -19,6 +19,7 @@ import {
 import type { SessionUser } from '@xiaowu/client-core/permissions';
 import { apiBase } from '@/lib/config';
 import { endSessionIfCurrent, getSession } from '@/lib/session';
+import { toast } from '@/lib/toast';
 
 export type { ApiBody, ApiResult, HttpMethod };
 
@@ -36,7 +37,50 @@ export function api<T = ApiBody>(method: HttpMethod, path: string, body?: unknow
     token,
     onUnauthorized: () => endSessionIfCurrent(token, SESSION_ENDED_NOTICE),
   });
-  return call<T>(method, path, body);
+  const done = trackWork(method, path, body);
+  return call<T>(method, path, body).finally(done);
+}
+
+// ---------------------------------------------------------------------------------------------
+// "Something is happening" (HCI: visibility of system status). When a save, removal or
+// calculation the person started takes longer than a moment, one small "Saving…" notice appears
+// until every such request has answered. Fast requests never flash it. Reads (GET) and requests
+// that have their own indicator (login, logout, Sync now) are not tracked.
+// The answer itself is still shown by the screen (success notice or ResultDialog).
+// ---------------------------------------------------------------------------------------------
+const SHOW_AFTER_MS = 600;
+const OWN_INDICATOR = ['/auth/login', '/auth/logout', '/sync'];
+let inFlight = 0;
+let showTimer: ReturnType<typeof setTimeout> | null = null;
+let workToast: number | null = null;
+let workLabel = 'Saving…';
+
+function trackWork(method: HttpMethod, path: string, body: unknown): () => void {
+  if (method === 'GET' || typeof window === 'undefined' || OWN_INDICATOR.includes(path)) return () => {};
+  const dryRun = Boolean(body && typeof body === 'object' && (body as { dry_run?: unknown }).dry_run);
+  workLabel = dryRun ? 'Calculating…' : method === 'DELETE' || /\/remove$/.test(path) ? 'Removing…' : 'Saving…';
+  inFlight += 1;
+  if (inFlight === 1 && !showTimer && workToast === null) {
+    showTimer = setTimeout(() => {
+      showTimer = null;
+      if (inFlight > 0) workToast = toast.loading(workLabel, 'Please wait while the server answers.');
+    }, SHOW_AFTER_MS);
+  }
+  let finished = false;
+  return () => {
+    if (finished) return;
+    finished = true;
+    inFlight = Math.max(0, inFlight - 1);
+    if (inFlight > 0) return;
+    if (showTimer) {
+      clearTimeout(showTimer);
+      showTimer = null;
+    }
+    if (workToast !== null) {
+      toast.dismiss(workToast);
+      workToast = null;
+    }
+  };
 }
 
 /**

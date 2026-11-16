@@ -15,6 +15,10 @@ const MOBILE_PATTERN = /^0\d{10}$/;           // e.g. 09171234567
 const ID_PATTERN = /^[A-Za-z0-9_.:@-]{1,50}$/; // matches VARCHAR(50) IDs (UUIDs, 'CUST-001', ...)
 const TRACKING_NO_PATTERN = /^XM-\d{4}-\d{4,9}$/; // order number, e.g. XM-2026-0123 (migration 007)
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Asia/Manila';
+// The date window every calendar accepts: 2018 to 2034 (8 years either side of 2026).
+// Same as Web/lib/input-limits.ts EARLIEST_DATE / LATEST_DATE; keep the two in step.
+const EARLIEST_DAY = '2018-01-01';
+const LATEST_DAY = '2034-12-31';
 
 const PAYMENT_TYPES = ['Cash', 'GCash', 'Bank Transfer'];
 // Sprint 11 / PB 13 adds 'Approved'; PB 14 (migration 010) adds the optional 'Pressing' step:
@@ -59,6 +63,9 @@ const parseDeadline = (value, now = new Date()) => {
     return {
       error: `cannot be a date that has already passed. Please choose today (${friendlyDate(nowLocal.slice(0, 10))}) or a later date.`
     };
+  }
+  if (normalized.slice(0, 10) > LATEST_DAY) {
+    return { error: `is too far ahead. Please choose a date on or before ${friendlyDate(LATEST_DAY)}.` };
   }
   return { value: normalized };
 };
@@ -180,6 +187,9 @@ const createValidator = () => {
         return fail(field, 'is not a real date. Please pick one from the calendar.');
       }
       const ymd = value.trim();
+      if (ymd < EARLIEST_DAY || ymd > LATEST_DAY) {
+        return fail(field, `must be between ${friendlyDate(EARLIEST_DAY)} and ${friendlyDate(LATEST_DAY)}.`);
+      }
       if (latest && ymd > latest) return fail(field, `cannot be later than today (${friendlyDate(latest)}).`);
       return ymd;
     },
@@ -213,6 +223,8 @@ const createValidator = () => {
 module.exports = {
   createValidator,
   parseDeadline,
+  EARLIEST_DAY,
+  LATEST_DAY,
   localDateTime,
   PAYMENT_TYPES,
   PRODUCTION_STATUSES,

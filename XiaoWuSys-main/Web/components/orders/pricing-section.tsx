@@ -24,8 +24,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { useApi } from '@/hooks/use-api';
 import { errorMessage } from '@/lib/api';
-import { toNumberInput } from '@/lib/inventory';
-import { MONEY_INPUT_MAX } from '@/lib/input-limits';
+import { DISCOUNT_LIMITS, MONEY_INPUT_MAX, TWO_DECIMALS } from '@/lib/input-limits';
 import type { OrderDetail, QuoteBreakdown, QuoteCalculation } from '@/lib/orders';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
@@ -54,6 +53,35 @@ function Totals({ quote }: { quote: Pick<QuoteBreakdown, 'subtotal_amount' | 'di
       <dd className="text-right font-semibold tabular-nums">{peso(quote.total_quote_amount)}</dd>
     </dl>
   );
+}
+
+/**
+ * What is wrong with the discount the Owner typed, in plain words ('' when it is fine). The
+ * server checks everything again (and that the discount is not bigger than the subtotal).
+ */
+function discountProblem(mode: DiscountMode, value: string, reason: string): string {
+  if (mode === 'none') return '';
+  const text = value.trim();
+  const D = DISCOUNT_LIMITS;
+  if (mode === 'percent') {
+    if (!text) return 'Enter the discount percentage, like 5 or 12.5.';
+    if (!TWO_DECIMALS.test(text)) return 'The discount (%) must be a number with at most 2 decimals, like 5 or 12.5.';
+    const n = Number(text);
+    if (n === 0) return 'A 0% discount is no discount: choose “No discount” instead.';
+    if (n < D.percentMin || n > D.percentMax) return `The discount (%) must be from ${D.percentMin} to ${D.percentMax}.`;
+  } else {
+    if (!text) return 'Enter the discount in pesos, like 150 or 150.50.';
+    if (!TWO_DECIMALS.test(text)) return 'The discount (₱) must be a peso amount with at most 2 decimals, like 150 or 150.50.';
+    const n = Number(text);
+    if (n === 0) return 'A ₱0 discount is no discount: choose “No discount” instead.';
+    if (n > MONEY_INPUT_MAX) return 'That discount is too large.';
+  }
+  const why = reason.trim();
+  if (!why) return 'Write the reason for the discount (for example “Loyal school customer”).';
+  if (why.length < D.reasonMin) return `The reason is too short. Write at least ${D.reasonMin} characters.`;
+  if (why.length > D.reasonMax) return `Keep the reason to ${D.reasonMax} characters or fewer.`;
+  if (!/[A-Za-z]/.test(why)) return 'The reason must be written in words, not only numbers or symbols.';
+  return '';
 }
 
 export function QuoteSection({
@@ -86,14 +114,15 @@ export function QuoteSection({
       if (actions.apply_discount) body.discount_amount = 0; // "no discount" removes an old one
       return body;
     }
-    const n = toNumberInput(value);
-    if (n === undefined || Number.isNaN(n)) {
-      setProblem(mode === 'percent' ? 'The discount must be a percentage, like 5 or 12.5.' : 'The discount must be a peso amount, like 150 or 150.50.');
+    const problem = discountProblem(mode, value, reason);
+    if (problem) {
+      setProblem(problem);
       return null;
     }
+    const n = Number(value.trim());
     if (mode === 'percent') body.discount_percent = n;
     else body.discount_amount = n;
-    body.discount_reason = reason.trim() || undefined;
+    body.discount_reason = reason.trim().replace(/\s+/g, ' ');
     return body;
   };
 
@@ -185,8 +214,9 @@ export function QuoteSection({
                       id="discount-input"
                       type="number"
                       min={0}
-                      max={mode === 'percent' ? 100 : MONEY_INPUT_MAX}
+                      max={mode === 'percent' ? DISCOUNT_LIMITS.percentMax : MONEY_INPUT_MAX}
                       step="0.01"
+                      placeholder={mode === 'percent' ? 'e.g. 10' : 'e.g. 150'}
                       inputMode="decimal"
                       value={value}
                       onChange={(e) => {
@@ -195,10 +225,15 @@ export function QuoteSection({
                       }}
                     />
                   </Field>
-                  <Field id="discount-reason" label="Reason (required)">
+                  <Field
+                    id="discount-reason"
+                    label="Reason (required)"
+                    hint={`${reason.length}/${DISCOUNT_LIMITS.reasonMax} characters · printed on the quote`}
+                  >
                     <Input
                       id="discount-reason"
-                      maxLength={500}
+                      maxLength={DISCOUNT_LIMITS.reasonMax}
+                      autoComplete="off"
                       placeholder="e.g. Loyal school customer"
                       value={reason}
                       onChange={(e) => {

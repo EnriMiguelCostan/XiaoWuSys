@@ -163,7 +163,7 @@ export const CONNECTION = {
 | Receipt / job order print | `lib/print.ts` + `receiptHtml()` from client-core | Same title, footer, provisional text. Never the word "BIR". |
 | `Dashboard.jsx` | `dashboard/page.tsx`: `Card` KPIs, Overpaid panel (only rendered when the server returns rows), CSV export buttons | `downloadFile` stays in `Web/` (DOM). |
 | `UsersPage.jsx` + `ChangePasswordDialog` | `accounts/page.tsx` + dialog in shell | Assignable roles come from `assignable_roles` in the response. |
-| `Dialogs.jsx` `ResultDialog`, `ConfirmDialog` | `components/feedback/*` on shadcn `Dialog` / `AlertDialog` | "Every result ends in a ResultDialog" rule kept; no silent toasts for results. |
+| `Dialogs.jsx` `ResultDialog`, `ConfirmDialog` | `components/feedback/*` on shadcn `Dialog` / `AlertDialog` | Every result still goes through `ResultDialog`. Updated Nov 2026: a **success** shows as a pop-up notice (`components/feedback/toaster.tsx`, `lib/toast.ts`) that closes by itself; **warnings and errors** stay dialogs until OK. A save that takes over 0.6 s shows a "Saving…" notice (`lib/api.ts`). |
 
 ### 3.4 Per-screen porting audit (do this before porting each screen)
 

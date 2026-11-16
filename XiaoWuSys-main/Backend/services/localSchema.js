@@ -39,6 +39,8 @@ const LOCAL_TABLES = [
       role TEXT NOT NULL CHECK (role IN ('Owner', 'Admin', 'Production', 'Staff')),
       is_active INTEGER NOT NULL DEFAULT 1,
       tokens_valid_after TEXT,
+      removed_at TEXT,
+      removed_by TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
