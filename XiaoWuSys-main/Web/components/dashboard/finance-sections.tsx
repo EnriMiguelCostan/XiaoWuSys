@@ -9,7 +9,7 @@
 //   PnlCard        PB 22: the Owner's true-cost Profit & Loss "Magic Button" (GET /api/reports/pnl),
 //                  with the Excel download and a printable statement.
 import { useCallback, useEffect, useState } from 'react';
-import { Download, Printer, ReceiptText, Sparkles, Trash2, TrendingDown, TrendingUp } from 'lucide-react';
+import { Download, Eye, Printer, ReceiptText, Sparkles, Trash2, TrendingDown, TrendingUp } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { Cell } from '@/components/dashboard/dashboard-parts';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
@@ -20,13 +20,14 @@ import { AnomalyBadge, LossCauseBadge } from '@/components/orders/waste-section'
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useApi } from '@/hooks/use-api';
 import { downloadFile, errorMessage } from '@/lib/api';
-import { MONEY_INPUT_MAX, TEXT_MAX } from '@/lib/input-limits';
+import { EXPENSE_DESCRIPTION_MAX, MONEY_INPUT_MAX, TWO_DECIMALS } from '@/lib/input-limits';
 import { printPnlReport } from '@/lib/print';
 import { monthLabel, type OverheadExpense, type OverheadList, type ProfitAndLoss, type WasteSummary } from '@/lib/reports';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
@@ -156,6 +157,7 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
   const [tick, setTick] = useState(0);
   const [loaded, setLoaded] = useState<OverheadsLoaded | null>(null);
   const [removing, setRemoving] = useState<OverheadExpense | null>(null);
+  const [viewing, setViewing] = useState<OverheadExpense | null>(null);
   const [busy, setBusy] = useState(false);
   // New expense form
   const [day, setDay] = useState('');
@@ -193,13 +195,23 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
     e.preventDefault();
     setProblem('');
     const value = Number(pesos.trim());
-    if (pesos.trim() === '' || Number.isNaN(value)) return setProblem('Enter the cost in pesos, as a number.');
+    const text = description.trim().replace(/\s+/g, ' ');
+    if (!day) return setProblem('Choose the date of the expense.');
     if (!category) return setProblem('Choose a category.');
+    if (!text) return setProblem('Write a short description, like “November rent”.');
+    if (text.length < 3) return setProblem('The description is too short. Write at least 3 characters.');
+    if (text.length > EXPENSE_DESCRIPTION_MAX) return setProblem(`Keep the description to ${EXPENSE_DESCRIPTION_MAX} characters or fewer.`);
+    if (!/[A-Za-z]/.test(text)) return setProblem('The description must be written in words, not only numbers or symbols.');
+    if (/\S{41,}/.test(text)) return setProblem('The description has a very long word with no spaces. Please write it in normal words.');
+    if (pesos.trim() === '' || Number.isNaN(value)) return setProblem('Enter the cost in pesos, as a number.');
+    if (!TWO_DECIMALS.test(pesos.trim())) return setProblem('The cost must be a peso amount with at most 2 decimals, like 1500 or 1500.50.');
+    if (value <= 0) return setProblem('The cost must be more than ₱0.');
+    if (value > MONEY_INPUT_MAX) return setProblem('That cost is too large.');
     setBusy(true);
     const { ok, data: res } = await api<{ message?: string; source?: string }>('POST', '/reports/overheads', {
       expense_date: day,
       category,
-      description: description.trim(),
+      description: text,
       amount: value,
     });
     setBusy(false);
@@ -256,11 +268,9 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
                       <TableHead className="w-28 pl-3">Date</TableHead>
                       <TableHead>Expense</TableHead>
                       <TableHead className="w-32 text-right">Cost</TableHead>
-                      {data.can_delete && (
-                        <TableHead className="w-12 pr-3">
-                          <span className="sr-only">Remove</span>
-                        </TableHead>
-                      )}
+                      <TableHead className={cn('pr-3', data.can_delete ? 'w-20' : 'w-12')}>
+                        <span className="sr-only">Actions</span>
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -277,15 +287,24 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
                           )}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">{peso(x.amount)}</TableCell>
-                        {data.can_delete && (
-                          <TableCell className="pr-3 text-right">
-                            {x.can_delete && (
+                        <TableCell className="pr-3 text-right">
+                          <div className="flex justify-end gap-0.5">
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              onClick={() => setViewing(x)}
+                              aria-label={`View ${x.category}: ${x.description}`}
+                              title="View the whole expense"
+                            >
+                              <Eye aria-hidden />
+                            </Button>
+                            {data.can_delete && x.can_delete && (
                               <Button variant="ghost" size="icon-sm" onClick={() => setRemoving(x)} aria-label={`Remove ${x.category}: ${x.description}`}>
                                 <Trash2 aria-hidden />
                               </Button>
                             )}
-                          </TableCell>
-                        )}
+                          </div>
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -297,7 +316,7 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
               <strong className="tabular-nums">{peso(data.total)}</strong>
             </p>
 
-            <form onSubmit={add} className="space-y-3 rounded-md border bg-muted/30 p-3" aria-label="Record an expense">
+            <form onSubmit={add} noValidate className="space-y-3 rounded-md border bg-muted/30 p-3" aria-label="Record an expense">
               <FormProblem message={problem} />
               <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                 <Field id="overhead-day" label="Date *">
@@ -317,11 +336,12 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
                     </SelectContent>
                   </Select>
                 </Field>
-                <Field id="overhead-description" label="Description *">
+                <Field id="overhead-description" label="Description *" hint={`${description.length}/${EXPENSE_DESCRIPTION_MAX} characters`}>
                   <Input
                     id="overhead-description"
                     required
-                    maxLength={TEXT_MAX.expenseDescription}
+                    autoComplete="off"
+                    maxLength={EXPENSE_DESCRIPTION_MAX}
                     placeholder="e.g. November rent"
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
@@ -352,6 +372,33 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
           </>
         )}
       </CardContent>
+      <Dialog open={Boolean(viewing)} onOpenChange={(open) => !open && setViewing(null)}>
+        <DialogContent className="min-w-0 sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Expense details</DialogTitle>
+            <DialogDescription>Recorded for the profit and loss report.</DialogDescription>
+          </DialogHeader>
+          {viewing && (
+            <dl className="grid min-w-0 grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+              <dt className="text-muted-foreground">Date</dt>
+              <dd>{formatDateTime(viewing.expense_date, { withTime: false })}</dd>
+              <dt className="text-muted-foreground">Category</dt>
+              <dd className="font-medium">{viewing.category}</dd>
+              <dt className="text-muted-foreground">Description</dt>
+              <dd className="min-w-0 whitespace-pre-wrap wrap-anywhere">{viewing.description}</dd>
+              <dt className="text-muted-foreground">Cost</dt>
+              <dd className="font-semibold tabular-nums">{peso(viewing.amount)}</dd>
+              <dt className="text-muted-foreground">Recorded by</dt>
+              <dd className="wrap-anywhere">{viewing.recorded_by_name}</dd>
+            </dl>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setViewing(null)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <ConfirmDialog
         open={Boolean(removing)}
         title="Remove this expense?"

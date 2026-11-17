@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 // Self-hosted (next/font/local inside the geist package): bundled at build time, no network.
 import { GeistMono } from 'geist/font/mono';
 import { GeistSans } from 'geist/font/sans';
+import { Toaster } from '@/components/feedback/toaster';
 import { SessionProvider } from '@/components/providers/session-provider';
 import { ThemeSync } from '@/components/providers/theme-sync';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -29,6 +30,8 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <SessionProvider>
           <TooltipProvider>{children}</TooltipProvider>
         </SessionProvider>
+        {/* Pop-up notices (successes, "Saving…"), above every page and dialog */}
+        <Toaster />
       </body>
     </html>
   );

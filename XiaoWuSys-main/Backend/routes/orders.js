@@ -353,8 +353,12 @@ const NUMBER_CLOSENESS_SQL = `length(ltrim(${NUMBER_SEQUENCE_SQL}, '0')) ASC`;
 router.get('/', requireRole(READ_ROLES), async (req, res) => {
   const v = createValidator();
   const status = v.oneOf(req.query.status, 'status', PRODUCTION_STATUSES, { required: false });
-  // PB 23 / D2: archived orders are hidden unless asked for
-  const includeArchived = v.oneOf(req.query.include_archived, 'include_archived', ['true', 'false'], { required: false }) === 'true';
+  // PB 23 / D2: archived orders are hidden unless asked for.
+  //   include_archived=true  -> active and archived orders
+  //   include_archived=only  -> archived orders only (the Orders tab's "Show archived" view)
+  const archivedMode = v.oneOf(req.query.include_archived, 'include_archived', ['true', 'false', 'only'], { required: false }) || 'false';
+  const includeArchived = archivedMode !== 'false';
+  const archivedWhere = { false: 'archived_at IS NULL', true: null, only: 'archived_at IS NOT NULL' }[archivedMode];
   const customer_id = v.id(req.query.customer_id, 'customer_id', { required: false });
   const tracking_no = v.trackingNo(req.query.tracking_no, 'tracking_no', { required: false }); // PB 6: find by order number
   // Keyword search on the order number: "12" finds XM-2026-0012, XM-2026-0120, XM-2026-1203...
@@ -372,7 +376,7 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
         // every order of 2026. Anything else: anywhere in the whole number.
         ...(numberSearch ? [[numberSearch.digitsOnly ? NUMBER_SEQUENCE_SQL : 'tracking_no', numberSearch.pattern, 'LIKE']] : [])
       ],
-      where: includeArchived ? null : 'archived_at IS NULL',
+      where: archivedWhere,
       // Ties broken by newest first, then order_id, so paging is stable. Within one urgency
       // group the nearest deadline comes first.
       orderBy: (numberSearch ? `${NUMBER_CLOSENESS_SQL}, ` : '') + (sort === 'priority'
@@ -384,6 +388,7 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
     res.status(200).json({
       source: result.source, orders: result.records.map((o) => withDeadlineFlag(o)), limit, offset, sort, dir, unsynced: result.unsynced,
       include_archived: includeArchived,
+      archived_only: archivedMode === 'only',
       capabilities: capabilitiesFor(req.user.role)
     });
   } catch (err) {

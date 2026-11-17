@@ -9,6 +9,15 @@
 //   POST  /api/auth/register                       Owner, Admin (create an account)
 //   PATCH /api/auth/users/:user_id                 Owner, Admin { role?, is_active? }
 //   POST  /api/auth/users/:user_id/reset-password  Owner, Admin { new_password }
+//   POST  /api/auth/users/:user_id/remove          Owner, Admin: remove a Staff / Production account
+//   POST  /api/auth/users/:user_id/restore         Owner, Admin: bring a removed account back
+//
+// Removing (migration 014) = deactivated + hidden from the everyday list (GET /users), never
+// deleted: the person's name stays on every payment, status change and audit entry they made.
+// GET /users?removed=only lists the removed accounts. A restored account comes back still
+// DEACTIVATED, so the manager decides separately whether that person may log in again.
+// Owner and Admin accounts can never be removed. A removed account takes no other change
+// (role, activate, password) until it is restored.
 //
 // Rules (always enforced here, whatever the UI shows):
 //   - roles come from the verified token, never from the request body
@@ -32,6 +41,7 @@ const { sqliteGet, sqliteAll, sqliteRun, withPgTransaction } = require('../servi
 const { revokeUser, reactivateUser, revokeSession, isActiveValue, CUTOFF_SQL } = require('../services/sessions');
 const { capabilitiesFor, ALL_ROLES, rolesWith } = require('../services/domain/permissions');
 const { LOCAL_NOW } = require('../utils/localSync');
+const { writeAudit } = require('../services/auditLog');
 
 const ROLES = ALL_ROLES;
 const MANAGER_ROLES = rolesWith('manage_accounts');
@@ -75,12 +85,15 @@ const signToken = (user) => jwt.sign(
   process.env.JWT_SECRET, { expiresIn: TOKEN_TTL }
 );
 
+const isoText = (t) => (t ? String(t).replace(' ', 'T').slice(0, 19) : null);
+
 const publicUser = (u) => ({
   user_id: u.user_id,
   username: u.username,
   role: u.role,
   is_active: isActiveValue(u.is_active),
-  created_at: u.created_at ? String(u.created_at).replace(' ', 'T').slice(0, 19) : null
+  created_at: isoText(u.created_at),
+  removed_at: isoText(u.removed_at) // migration 014: null = not removed
 });
 
 // Keeps the offline copy of an account current, so it can log in without internet.
@@ -88,18 +101,24 @@ const publicUser = (u) => ({
 const cacheUserLocally = async (localDb, u) => {
   try {
     await sqliteRun(localDb,
-      `INSERT INTO users (user_id, username, password_hash, role, is_active, tokens_valid_after, sync_status)
-       VALUES (?, ?, ?, ?, ?, ?, 'synced')
+      `INSERT INTO users (user_id, username, password_hash, role, is_active, tokens_valid_after, removed_at, removed_by, sync_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'synced')
        ON CONFLICT (user_id) DO UPDATE SET username = excluded.username, password_hash = excluded.password_hash,
-         role = excluded.role, is_active = excluded.is_active, tokens_valid_after = excluded.tokens_valid_after`,
+         role = excluded.role, is_active = excluded.is_active, tokens_valid_after = excluded.tokens_valid_after,
+         removed_at = excluded.removed_at, removed_by = excluded.removed_by`,
       [u.user_id, u.username, u.password_hash, u.role, isActiveValue(u.is_active) ? 1 : 0,
-        u.tokens_valid_after ? String(u.tokens_valid_after) : null]);
+        u.tokens_valid_after ? String(u.tokens_valid_after) : null,
+        u.removed_at ? String(u.removed_at) : null, u.removed_by || null]);
   } catch (err) {
     console.error('⚠️ Could not save the account for offline login:', err.message);
   }
 };
 
-const USER_COLUMNS = 'user_id, username, password_hash, role, is_active, tokens_valid_after::text AS tokens_valid_after, created_at::text AS created_at';
+const USER_COLUMNS = 'user_id, username, password_hash, role, is_active, tokens_valid_after::text AS tokens_valid_after, created_at::text AS created_at, '
+  + 'removed_at::text AS removed_at, removed_by';
+// Migration 014: only these roles can be removed (Owner / Admin accounts never)
+const REMOVABLE_ROLES = ['Staff', 'Production'];
+const REMOVED = { error: 'ACCOUNT_REMOVED', message: 'This account was removed. Restore it first (turn on "Show removed").' };
 
 // ==========================================
 // LOGIN
@@ -274,19 +293,27 @@ router.post('/change-password', async (req, res) => {
 // ==========================================
 // LIST ACCOUNTS (works offline from the local copy, read-only)
 // ==========================================
+// ?removed=only -> the removed accounts only ("Show removed"); otherwise only the others
 router.get('/users', requireRole(MANAGER_ROLES), async (req, res) => {
+  const v = createValidator();
+  const removedOnly = v.oneOf(req.query.removed, 'removed', ['only', 'false'], { required: false }) === 'only';
+  if (v.failed()) return v.send(res);
+  const where = removedOnly ? 'removed_at IS NOT NULL' : 'removed_at IS NULL'; // fixed SQL, no user input
   try {
     let rows;
     let source = 'cloud';
     try {
-      rows = (await req.pgPool.query(`SELECT ${USER_COLUMNS} FROM users ORDER BY is_active DESC, role, username`)).rows;
+      rows = (await req.pgPool.query(`SELECT ${USER_COLUMNS} FROM users WHERE ${where} ORDER BY is_active DESC, role, username`)).rows;
     } catch (err) {
       if (!isConnectionError(err)) throw err;
       source = 'local';
       rows = await sqliteAll(req.localDb,
-        'SELECT user_id, username, role, is_active, created_at FROM users ORDER BY is_active DESC, role, username');
+        `SELECT user_id, username, role, is_active, created_at, removed_at FROM users WHERE ${where} ORDER BY is_active DESC, role, username`);
     }
-    res.status(200).json({ source, users: rows.map(publicUser), assignable_roles: allowedRolesFor(req.user.role) });
+    res.status(200).json({
+      source, users: rows.map(publicUser), assignable_roles: allowedRolesFor(req.user.role),
+      removable_roles: REMOVABLE_ROLES, removed_only: removedOnly
+    });
   } catch (err) {
     console.error('✗ List users error:', err.message);
     fail(res, 500, 'INTERNAL_ERROR', 'The list of accounts could not be loaded.');
@@ -386,6 +413,7 @@ router.patch('/users/:user_id', requireRole(MANAGER_ROLES), async (req, res) => 
       if (target.role === 'Owner' && req.user.role !== 'Owner') {
         throw reject(403, 'FORBIDDEN', 'Only an Owner can change an Owner account.');
       }
+      if (target.removed_at) throw new AccountRejected(409, REMOVED);
       const role = body.role ?? target.role;
       const is_active = body.is_active ?? isActiveValue(target.is_active);
       if (role === target.role && is_active === isActiveValue(target.is_active)) {
@@ -456,6 +484,7 @@ router.post('/users/:user_id/reset-password', requireRole(MANAGER_ROLES), async 
   try {
     const target = await loadManageable(req, res);
     if (!target) return;
+    if (target.removed_at) return res.status(409).json(REMOVED);
     const hash = await bcrypt.hash(new_password, BCRYPT_ROUNDS);
     const at = Date.now();
     const { rows } = await req.pgPool.query(
@@ -471,6 +500,62 @@ router.post('/users/:user_id/reset-password', requireRole(MANAGER_ROLES), async 
     fail(res, 500, 'INTERNAL_ERROR', 'Something went wrong. The password was not reset.');
   }
 });
+
+// ==========================================
+// REMOVE / RESTORE A STAFF OR PRODUCTION ACCOUNT (migration 014)
+// One transaction: lock the row, check, change, audit. The sign-out list and the offline copy
+// are updated only after it committed.
+// ==========================================
+const removalRoute = (remove) => async (req, res) => {
+  const v = createValidator();
+  v.id(req.params.user_id, 'user_id');
+  if (v.failed()) return v.send(res);
+  if (req.params.user_id === req.user.user_id) {
+    return fail(res, 400, 'CANNOT_CHANGE_SELF', 'You cannot remove or restore your own account.');
+  }
+  try {
+    const { target, row } = await withPgTransaction(req.pgPool, async (client) => {
+      const locked = await client.query(`SELECT ${USER_COLUMNS} FROM users WHERE user_id = $1 FOR UPDATE`, [req.params.user_id]);
+      const found = locked.rows[0];
+      if (!found) throw reject(404, 'USER_NOT_FOUND', 'This account no longer exists. Please refresh the list.');
+      if (!REMOVABLE_ROLES.includes(found.role)) {
+        throw reject(403, 'CANNOT_REMOVE_MANAGER', 'Owner and Admin accounts cannot be removed. Only Staff and Production accounts can.');
+      }
+      if (remove && found.removed_at) throw reject(409, 'ALREADY_REMOVED', 'This account is already removed.');
+      if (!remove && !found.removed_at) throw reject(409, 'NOT_REMOVED', 'This account is not removed.');
+      const updated = await client.query(
+        remove
+          ? `UPDATE users SET is_active = FALSE, removed_at = NOW(), removed_by = $2, tokens_valid_after = ${CUTOFF_SQL('$3')}
+              WHERE user_id = $1 RETURNING ${USER_COLUMNS}`
+          : `UPDATE users SET removed_at = NULL, removed_by = NULL WHERE user_id = $1 RETURNING ${USER_COLUMNS}`,
+        remove ? [found.user_id, req.user.user_id, Date.now()] : [found.user_id]);
+      await writeAudit(client, {
+        entity: 'users', entity_id: found.user_id, action: remove ? 'account_removed' : 'account_restored', actor: req.user,
+        details: { username: found.username, role: found.role, was_active: isActiveValue(found.is_active) }
+      });
+      return { target: found, row: updated.rows[0] };
+    });
+    if (remove) revokeUser(target.user_id, { deactivated: true });
+    await cacheUserLocally(req.localDb, row);
+    console.log(`👤 ${req.user.role} ${req.user.user_id}: account ${target.username} ${remove ? 'removed' : 'restored'}`);
+    res.status(200).json({
+      message: remove
+        ? `"${target.username}" was removed and signed out. Their name stays on their past work.`
+        : `"${target.username}" is back in the Accounts list, still deactivated. Reactivate it if they may log in again.`,
+      user: publicUser(row)
+    });
+  } catch (err) {
+    if (err instanceof AccountRejected) return res.status(err.status).json(err.body);
+    if (err.commitUnknown) {
+      return fail(res, 503, 'COMMIT_UNKNOWN', 'The connection dropped while saving. Refresh the list to see whether the change was applied.');
+    }
+    if (isConnectionError(err)) return needsCloud(res);
+    console.error(`✗ ${remove ? 'Remove' : 'Restore'} user error:`, err.message);
+    fail(res, 500, 'INTERNAL_ERROR', `Something went wrong. The account was not ${remove ? 'removed' : 'restored'}.`);
+  }
+};
+router.post('/users/:user_id/remove', requireRole(MANAGER_ROLES), removalRoute(true));
+router.post('/users/:user_id/restore', requireRole(MANAGER_ROLES), removalRoute(false));
 
 router.passwordProblem = passwordProblem;
 module.exports = router;

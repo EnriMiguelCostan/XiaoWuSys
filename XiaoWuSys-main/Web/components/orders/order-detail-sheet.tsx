@@ -54,7 +54,7 @@ import {
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SHEET_SCROLL_BODY } from '@/components/ui/sheet';
 import { useApi } from '@/hooks/use-api';
 import { useOrderEditLock } from '@/hooks/use-order-edit-lock';
 import { useSocketEvent } from '@/hooks/use-socket-event';
@@ -323,8 +323,8 @@ export function OrderDetailSheet({
     setConfirmArchive(null);
     setResult(
       ok
-        ? { type: 'success', title: kind === 'archive' ? 'Order archived' : 'Order restored', message: data.message ?? '' }
-        : { type: 'error', title: kind === 'archive' ? 'Not archived' : 'Not restored', message: errorMessage(data, 'Nothing was changed.') }
+        ? { type: 'success', title: kind === 'archive' ? 'Order archived' : 'Order unarchived', message: data.message ?? '' }
+        : { type: 'error', title: kind === 'archive' ? 'Not archived' : 'Not unarchived', message: errorMessage(data, 'Nothing was changed.') }
     );
     reloadDetail();
     onChanged();
@@ -393,14 +393,14 @@ export function OrderDetailSheet({
                 )}
                 {actions.restore_order && (
                   <Button variant="outline" size="sm" onClick={() => setConfirmArchive('restore')} disabled={busy}>
-                    <ArchiveRestore aria-hidden /> Restore
+                    <ArchiveRestore aria-hidden /> Unarchive
                   </Button>
                 )}
               </div>
             )}
           </SheetHeader>
 
-          <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4" aria-busy={!detail}>
+          <div className={cn("min-h-0 flex-1 space-y-5 overflow-y-auto p-4", SHEET_SCROLL_BODY)} aria-busy={!detail}>
             {loadError && (
               <p role="alert" className={cn('rounded-md border p-3 text-sm', TONE_CLASSES.danger.banner)}>
                 {loadError}
@@ -552,13 +552,13 @@ export function OrderDetailSheet({
       </Dialog>
       <ConfirmDialog
         open={Boolean(confirmArchive)}
-        title={confirmArchive === 'restore' ? 'Restore this order?' : 'Archive this order?'}
+        title={confirmArchive === 'restore' ? 'Unarchive this order?' : 'Archive this order?'}
         message={
           confirmArchive === 'restore'
             ? 'The order comes back to the Orders list and can be changed again.'
-            : 'The order is hidden from the Orders list and can no longer be changed. It is never deleted, and it can be restored later.'
+            : 'The order is hidden from the Orders list and can no longer be changed. It is never deleted, and it can be unarchived later.'
         }
-        confirmLabel={confirmArchive === 'restore' ? 'Restore order' : 'Archive order'}
+        confirmLabel={confirmArchive === 'restore' ? 'Unarchive order' : 'Archive order'}
         busy={busy}
         onConfirm={() => confirmArchive && archive(confirmArchive)}
         onCancel={() => setConfirmArchive(null)}

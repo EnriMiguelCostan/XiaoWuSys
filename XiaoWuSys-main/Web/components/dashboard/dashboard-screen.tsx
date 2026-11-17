@@ -359,10 +359,7 @@ export function DashboardScreen() {
               <h3 className="text-sm font-semibold">Orders by status</h3>
               <div className="flex min-w-0 flex-wrap gap-2">
                 {Object.entries(orders.by_status).map(([status, n]) => (
-                  <span key={status} className="inline-flex items-center gap-1.5 text-sm">
-                    <OrderStatusBadge status={status} />
-                    <strong className="tabular-nums">{n.toLocaleString()}</strong>
-                  </span>
+                  <OrderStatusBadge key={status} status={status} count={n} />
                 ))}
               </div>
             </div>

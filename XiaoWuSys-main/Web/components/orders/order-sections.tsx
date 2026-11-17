@@ -21,6 +21,7 @@ import { DeadlineBadge, OrderStatusBadge } from '@/components/orders/status-badg
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useApi } from '@/hooks/use-api';
 import { errorMessage } from '@/lib/api';
@@ -28,7 +29,7 @@ import { toNumberInput } from '@/lib/inventory';
 import type { Customer, OrderDetail } from '@/lib/orders';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
-import { MONEY_INPUT_MAX, TEXT_MAX, WHOLE_NUMBER_MAX } from '@/lib/input-limits';
+import { GARMENT_SIZES, MONEY_INPUT_MAX, NAME_CHARS, PRINT_LINE_LIMITS, TEXT_MAX } from '@/lib/input-limits';
 
 type OnResult = (result: ResultMessage, reload: boolean) => void;
 /** Tells the sheet whether this section's edit form is open (it holds the edit lock meanwhile). */
@@ -341,6 +342,46 @@ export function DesignLink({
 // ---------------------------------------------------------------------------------------------
 // Materials and print details (add_items: size / name / number lines, no stock used)
 const EMPTY_PRINT_LINE = { product_type: 'Jersey print', quantity: '1', size: '', custom_name: '', custom_number: '' };
+type PrintLine = typeof EMPTY_PRINT_LINE;
+type PrintLineProblems = Partial<Record<keyof PrintLine, string>>;
+const NO_SIZE = '__none__'; // the dropdown's "No size" choice (Radix Select cannot use '')
+
+/** Every problem with a print line, per field (empty object = OK to send). */
+function printLineProblems(line: PrintLine): PrintLineProblems {
+  const L = PRINT_LINE_LIMITS;
+  const p: PrintLineProblems = {};
+
+  const what = line.product_type.trim();
+  if (!what) p.product_type = 'Write what is printed, like “Jersey print”.';
+  else if (what.length > L.productType) p.product_type = `Keep it to ${L.productType} characters or fewer.`;
+  else if (!/[A-Za-z0-9]/.test(what)) p.product_type = 'Use words, not only symbols.';
+
+  const qty = line.quantity.trim();
+  if (!qty) p.quantity = 'Enter how many.';
+  else if (!/^\d+$/.test(qty)) p.quantity = 'Whole numbers only.';
+  else if (Number(qty) < 1) p.quantity = 'At least 1.';
+  else if (Number(qty) > L.quantity) p.quantity = `At most ${L.quantity.toLocaleString()}.`;
+
+  if (line.size && !(GARMENT_SIZES as readonly string[]).includes(line.size)) p.size = 'Choose a size from the list.';
+
+  const no = line.custom_number.trim();
+  if (no && !new RegExp(`^\\d{1,${L.numberDigits}}$`).test(no)) p.custom_number = 'Numbers 0–999 only.';
+
+  const name = line.custom_name.trim();
+  if (name.length > L.name) p.custom_name = `Keep the name to ${L.name} characters or fewer.`;
+  else if (!NAME_CHARS.test(name)) p.custom_name = 'Letters, spaces, periods (.), hyphens (-) and apostrophes (’) only.';
+
+  return p;
+}
+
+function FieldError({ id, message }: { id: string; message?: string }) {
+  if (!message) return null;
+  return (
+    <p id={id} className="text-xs text-danger">
+      {message}
+    </p>
+  );
+}
 
 export function MaterialsSection({
   detail,
@@ -355,27 +396,39 @@ export function MaterialsSection({
 }) {
   const api = useApi();
   const { items, totals } = detail;
-  const [line, setLine] = useState<typeof EMPTY_PRINT_LINE | null>(null);
+  const [line, setLine] = useState<PrintLine | null>(null);
   const [importing, setImporting] = useState(false);
   useReportEditing(line !== null || importing, onEditing);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
+  // A field's problem shows once it was changed, or for every field after pressing Add
+  const [touched, setTouched] = useState<Partial<Record<keyof PrintLine, boolean>>>({});
+  const [tried, setTried] = useState(false);
+  const problems = line ? printLineProblems(line) : {};
+  const shown = (key: keyof PrintLine) => (tried || touched[key] ? problems[key] : undefined);
+
+  const startLine = (next: PrintLine) => {
+    setLine(next);
+    setTouched({});
+    setTried(false);
+    setProblem('');
+  };
 
   const add = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!line) return;
+    if (!line || busy) return;
     setProblem('');
-    const quantity = toNumberInput(line.quantity);
-    if (quantity === undefined || Number.isNaN(quantity)) {
-      setProblem('The quantity must be a number.');
+    setTried(true);
+    if (Object.keys(problems).length > 0) {
+      setProblem('Please fix the highlighted fields first.');
       return;
     }
     setBusy(true);
     const { ok, data } = await api('POST', orderPath(detail, 'items'), {
       product_type: line.product_type.trim(),
-      quantity,
-      size: line.size.trim() || undefined,
-      custom_name: line.custom_name.trim() || undefined,
+      quantity: Number(line.quantity.trim()),
+      size: line.size || undefined,
+      custom_name: line.custom_name.trim().replace(/\s+/g, ' ') || undefined,
       custom_number: line.custom_number.trim() || undefined,
     });
     setBusy(false);
@@ -383,13 +436,19 @@ export function MaterialsSection({
       setProblem(errorMessage(data, 'The print detail was not added.'));
       return;
     }
-    setLine({ ...EMPTY_PRINT_LINE, product_type: line.product_type }); // ready for the next piece
+    startLine({ ...EMPTY_PRINT_LINE, product_type: line.product_type.trim(), size: line.size }); // ready for the next piece
     onResult({ type: 'success', title: 'Print detail added', message: 'The line was added to this order.' }, true);
   };
 
-  const bind = (key: keyof typeof EMPTY_PRINT_LINE) => ({
+  const set = (key: keyof PrintLine, value: string) => {
+    setLine((l) => (l ? { ...l, [key]: value } : l));
+    setTouched((t) => ({ ...t, [key]: true }));
+  };
+  const bind = (key: keyof PrintLine) => ({
     value: line?.[key] ?? '',
-    onChange: (e: React.ChangeEvent<HTMLInputElement>) => setLine((l) => (l ? { ...l, [key]: e.target.value } : l)),
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => set(key, e.target.value),
+    'aria-invalid': Boolean(shown(key)) || undefined,
+    'aria-describedby': shown(key) ? `line-${key}-error` : undefined,
   });
 
   return (
@@ -436,23 +495,71 @@ export function MaterialsSection({
 
       {actions.add_items &&
         (line ? (
-          <form onSubmit={add} className="space-y-3 rounded-md border bg-muted/30 p-3">
+          <form onSubmit={add} noValidate className="space-y-3 rounded-md border bg-muted/30 p-3">
             <FormProblem message={problem} />
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
-              <Field id="line-what" label="What" className="col-span-2 sm:col-span-3">
-                <Input id="line-what" required maxLength={TEXT_MAX.productType} {...bind('product_type')} />
+              <Field id="line-product_type" label="What *" className="col-span-2 sm:col-span-3">
+                <Input id="line-product_type" maxLength={PRINT_LINE_LIMITS.productType} autoComplete="off" {...bind('product_type')} />
+                <FieldError id="line-product_type-error" message={shown('product_type')} />
               </Field>
-              <Field id="line-qty" label="Qty">
-                <Input id="line-qty" type="number" min={1} max={WHOLE_NUMBER_MAX} step={1} required {...bind('quantity')} />
+              <Field id="line-quantity" label="Qty *">
+                <Input
+                  id="line-quantity"
+                  type="number"
+                  min={1}
+                  max={PRINT_LINE_LIMITS.quantity}
+                  step={1}
+                  inputMode="numeric"
+                  {...bind('quantity')}
+                />
+                <FieldError id="line-quantity-error" message={shown('quantity')} />
               </Field>
               <Field id="line-size" label="Size">
-                <Input id="line-size" maxLength={TEXT_MAX.shortCode} placeholder="M" {...bind('size')} />
+                <Select value={line.size || NO_SIZE} onValueChange={(v) => set('size', v === NO_SIZE ? '' : v)} disabled={busy}>
+                  <SelectTrigger
+                    id="line-size"
+                    className="w-full min-w-0"
+                    aria-invalid={Boolean(shown('size')) || undefined}
+                    aria-describedby={shown('size') ? 'line-size-error' : undefined}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NO_SIZE}>No size</SelectItem>
+                    {GARMENT_SIZES.map((s) => (
+                      <SelectItem key={s} value={s}>
+                        {s}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FieldError id="line-size-error" message={shown('size')} />
               </Field>
-              <Field id="line-number" label="No.">
-                <Input id="line-number" maxLength={TEXT_MAX.shortCode} placeholder="7" {...bind('custom_number')} />
+              <Field id="line-custom_number" label="No.">
+                <Input
+                  id="line-custom_number"
+                  inputMode="numeric"
+                  maxLength={PRINT_LINE_LIMITS.numberDigits}
+                  autoComplete="off"
+                  placeholder="7"
+                  {...bind('custom_number')}
+                />
+                <FieldError id="line-custom_number-error" message={shown('custom_number')} />
               </Field>
-              <Field id="line-name" label="Name" className="col-span-2 sm:col-span-6">
-                <Input id="line-name" maxLength={TEXT_MAX.default} placeholder="DELA CRUZ" {...bind('custom_name')} />
+              <Field
+                id="line-custom_name"
+                label="Name"
+                className="col-span-2 sm:col-span-6"
+                hint={`${line.custom_name.length}/${PRINT_LINE_LIMITS.name} characters`}
+              >
+                <Input
+                  id="line-custom_name"
+                  maxLength={PRINT_LINE_LIMITS.name}
+                  autoComplete="off"
+                  placeholder="DELA CRUZ"
+                  {...bind('custom_name')}
+                />
+                <FieldError id="line-custom_name-error" message={shown('custom_name')} />
               </Field>
             </div>
             <p className="text-xs text-muted-foreground">
@@ -469,7 +576,7 @@ export function MaterialsSection({
           </form>
         ) : (
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={() => setLine(EMPTY_PRINT_LINE)}>
+            <Button variant="outline" size="sm" onClick={() => startLine(EMPTY_PRINT_LINE)}>
               <Shirt aria-hidden /> Add print details (size / name / number)
             </Button>
             <Button variant="outline" size="sm" onClick={() => setImporting(true)}>

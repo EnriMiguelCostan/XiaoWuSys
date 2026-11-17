@@ -6,18 +6,20 @@ import { Badge } from '@/components/ui/badge';
 import { DEADLINE_FLAG, lookFor, ORDER_STATUS, PAYMENT_STATUS, TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
 
-function StateBadge({ value, look }: { value: string; look: ReturnType<typeof lookFor> }) {
+function StateBadge({ value, look, count }: { value: string; look: ReturnType<typeof lookFor>; count?: number }) {
   const Icon = look.icon;
   return (
-    <Badge variant="outline" className={cn('gap-1', TONE_CLASSES[look.tone].badge)}>
+    <Badge variant="outline" className={cn('gap-1', count !== undefined && 'h-6 px-2.5', TONE_CLASSES[look.tone].badge)}>
       <Icon className="size-3" aria-hidden />
       {value}
+      {/* Dashboard "Orders by status": the count sits inside the pill, on its right */}
+      {count !== undefined && <strong className="ml-1.5 font-semibold tabular-nums">{count.toLocaleString()}</strong>}
     </Badge>
   );
 }
 
-export function OrderStatusBadge({ status }: { status: string }) {
-  return <StateBadge value={status} look={lookFor(ORDER_STATUS, status)} />;
+export function OrderStatusBadge({ status, count }: { status: string; count?: number }) {
+  return <StateBadge value={status} look={lookFor(ORDER_STATUS, status)} count={count} />;
 }
 
 export function DeadlineBadge({ flag, className }: { flag: string | null | undefined; className?: string }) {

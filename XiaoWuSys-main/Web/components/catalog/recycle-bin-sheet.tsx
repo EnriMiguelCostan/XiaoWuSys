@@ -13,7 +13,7 @@ import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SHEET_SCROLL_BODY } from '@/components/ui/sheet';
 import { useApi } from '@/hooks/use-api';
 import { errorMessage } from '@/lib/api';
 import type { RecycleBinPage } from '@/lib/inventory';
@@ -160,7 +160,7 @@ export function RecycleBinSheet({
           )}
         </div>
 
-        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4" aria-busy={loading}>
+        <div className={cn("flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4", SHEET_SCROLL_BODY)} aria-busy={loading}>
           {offline && (
             <p className={cn('rounded-md border p-3 text-sm', TONE_CLASSES.warning.banner)}>
               Offline: you can restore items, but permanent delete needs an internet connection.

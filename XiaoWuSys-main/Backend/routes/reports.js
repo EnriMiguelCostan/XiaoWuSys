@@ -34,7 +34,7 @@ const READ_ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
 const FINANCE_ROLES = ['Owner', 'Admin'];
 const PNL_ROLES = rolesWith('set_quote');            // PB 22: the P&L is the Owner's (SIA 1 "Generate P&L Report")
 const OVERHEAD_DELETE_ROLES = rolesWith('void_order'); // removing a recorded expense is a void (Owner)
-const DESCRIPTION_MAX = 500;
+const DESCRIPTION_MAX = 250; // matches the screen (Web/lib/input-limits.ts EXPENSE_DESCRIPTION_MAX)
 const OPEN = (o) => !['Completed', 'Cancelled'].includes(o.production_status);
 const MAX_ROWS = 10000;
 const round2 = (n) => Math.round(n * 100) / 100;

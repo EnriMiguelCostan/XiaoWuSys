@@ -21,8 +21,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectValue } from '@/components/ui/select';
 import { useApi } from '@/hooks/use-api';
 import { errorMessage } from '@/lib/api';
-import { toNumberInput } from '@/lib/inventory';
-import { TEXT_MAX, WHOLE_NUMBER_MAX } from '@/lib/input-limits';
+import { LOSS_NOTE_MAX, WHOLE_NUMBER_MAX } from '@/lib/input-limits';
 import { LOSS_REASONS, type LossResponse, type MaterialLoss, type OrderDetail } from '@/lib/orders';
 import { LOSS_CATEGORY, lookFor, TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
@@ -144,15 +143,22 @@ function LogLossDialog({
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setProblem('');
-    const qty = toNumberInput(quantity);
-    if (!itemId) return setProblem('Choose the material that was ruined.');
-    if (!reasonCode) return setProblem('Choose what happened.');
-    if (qty === undefined || Number.isNaN(qty)) return setProblem('Enter how many pieces, as a number.');
+    const qtyText = quantity.trim();
+    const qty = Number(qtyText);
+    const cleanNote = note.trim().replace(/\s+/g, ' ');
+    if (!itemId || !materials.some((m) => m.inventory_id === itemId)) return setProblem('Choose the material that was ruined.');
+    if (!reasonCode || !LOSS_REASONS.some((r) => r.code === reasonCode)) return setProblem('Choose what happened from the list.');
+    if (!qtyText) return setProblem('Enter how many pieces were ruined.');
+    if (!/^\d+$/.test(qtyText)) return setProblem('Pieces ruined must be a whole number, like 1 or 12 (no decimals or minus signs).');
+    if (qty < 1) return setProblem('Pieces ruined must be at least 1.');
+    if (qty > WHOLE_NUMBER_MAX) return setProblem('That number is too large.');
+    if (cleanNote.length > LOSS_NOTE_MAX) return setProblem(`Keep the note to ${LOSS_NOTE_MAX} characters or fewer.`);
+    if (cleanNote && !/[A-Za-z0-9]/.test(cleanNote)) return setProblem('The note must contain words, not only symbols. Or leave it empty.');
     setBusy(true);
     const { ok, data } = await api<LossResponse>('POST', `/inventory/${encodeURIComponent(itemId)}/loss`, {
       quantity_lost: qty,
       reason_code: reasonCode,
-      loss_reason: note.trim() || undefined,
+      loss_reason: cleanNote || undefined,
       order_id: detail.order.order_id,
     });
     setBusy(false);
@@ -185,7 +191,7 @@ function LogLossDialog({
             The pieces come out of general stock (this order keeps its reserved materials). The system names the likely cause.
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={submit} className="max-w-full min-w-0 space-y-4">
+        <form onSubmit={submit} noValidate className="max-w-full min-w-0 space-y-4">
           <FormProblem message={problem} />
           {materials.length === 0 ? (
             <p className="text-sm text-muted-foreground">This order has no materials linked to stock. Record the loss from the Catalog instead.</p>
@@ -233,8 +239,8 @@ function LogLossDialog({
               disabled={busy}
             />
           </Field>
-          <Field id="loss-note" label="Notes (optional)">
-            <Input id="loss-note" maxLength={TEXT_MAX.note} placeholder="e.g. logo shifted on the left sleeve" value={note} onChange={(e) => setNote(e.target.value)} disabled={busy} />
+          <Field id="loss-note" label="Notes (optional)" hint={`${note.length}/${LOSS_NOTE_MAX} characters`}>
+            <Input id="loss-note" maxLength={LOSS_NOTE_MAX} autoComplete="off" placeholder="e.g. logo shifted on the left sleeve" value={note} onChange={(e) => setNote(e.target.value)} disabled={busy} />
           </Field>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose} disabled={busy}>

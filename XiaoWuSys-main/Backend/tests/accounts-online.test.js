@@ -15,7 +15,7 @@ const { createOrderLockManager } = require('../services/orderLocks');
 const PASSWORD = 'XiaoMei2026';
 
 // Answers exactly the SQL statements routes/auth.js sends for the users table
-const createUsersCloud = (users) => {
+const createUsersCloud = (users, audit = []) => {
   const cutoffText = (ms) => new Date(Number(ms)).toISOString().replace('T', ' ').replace('Z', '');
   const copy = (u) => ({ ...u });
   const pool = {
@@ -23,7 +23,23 @@ const createUsersCloud = (users) => {
       const q = sql.replace(/\s+/g, ' ').trim();
       if (/^SELECT .* FROM users WHERE username = \$1/.test(q)) return { rows: [...users.values()].filter((u) => u.username === p[0]).map(copy) };
       if (/^SELECT .* FROM users WHERE user_id = \$1/.test(q)) return { rows: users.has(p[0]) ? [copy(users.get(p[0]))] : [] };
-      if (/^SELECT .* FROM users ORDER BY/.test(q)) return { rows: [...users.values()].map(copy) };
+      // GET /users: the everyday list (not removed) or "Show removed" (removed only)
+      if (/^SELECT .* FROM users WHERE removed_at IS NULL ORDER BY/.test(q)) return { rows: [...users.values()].filter((u) => !u.removed_at).map(copy) };
+      if (/^SELECT .* FROM users WHERE removed_at IS NOT NULL ORDER BY/.test(q)) return { rows: [...users.values()].filter((u) => u.removed_at).map(copy) };
+      // Remove / restore lock the one account
+      if (/^SELECT .* FROM users WHERE user_id = \$1 FOR UPDATE$/.test(q)) return { rows: users.has(p[0]) ? [copy(users.get(p[0]))] : [] };
+      if (q.startsWith('UPDATE users SET is_active = FALSE, removed_at = NOW()')) {
+        Object.assign(users.get(p[0]), { is_active: false, removed_at: '2026-11-16 12:00:00', removed_by: p[1], tokens_valid_after: cutoffText(p[2]) });
+        return { rows: [copy(users.get(p[0]))], rowCount: 1 };
+      }
+      if (q.startsWith('UPDATE users SET removed_at = NULL, removed_by = NULL')) {
+        Object.assign(users.get(p[0]), { removed_at: null, removed_by: null });
+        return { rows: [copy(users.get(p[0]))], rowCount: 1 };
+      }
+      if (q.startsWith('INSERT INTO audit_log')) {
+        audit.push({ entity: p[1], entity_id: p[2], action: p[3], performed_by: p[5] });
+        return { rows: [], rowCount: 1 };
+      }
       if (q.startsWith('SELECT COUNT(*)::int AS n FROM users')) {
         return { rows: [{ n: [...users.values()].filter((u) => u.is_active && p[0].includes(u.role) && u.user_id !== p[1]).length }] };
       }
@@ -66,6 +82,7 @@ const createUsersCloud = (users) => {
 describe('Account management (online)', () => {
   let server; let base; let localDb; let dir;
   const users = new Map();
+  const audit = [];
   const tokens = {};
 
   const call = async (method, url, body, token) => {
@@ -96,7 +113,7 @@ describe('Account management (online)', () => {
       users.set(user_id, { user_id, username, password_hash: hash, role, is_active: true, tokens_valid_after: null, created_at: '2026-10-01 00:00:00' });
     }
     const app = createApp({
-      pgPool: createUsersCloud(users), localDb, localDbPath: dbPath, orderLocks: createOrderLockManager(),
+      pgPool: createUsersCloud(users, audit), localDb, localDbPath: dbPath, orderLocks: createOrderLockManager(),
       inventoryEvents: { notifyChanged() {} }, syncAndNotify: async () => ({}), listConflicts: async () => []
     });
     server = http.createServer(app);
@@ -181,5 +198,52 @@ describe('Account management (online)', () => {
     assert.equal(r.status, 200);
     assert.ok(!(await sessionOk(tokens.owner2)), 'other sessions ended');
     assert.ok(await sessionOk(r.body.token), 'the returned token works');
+  });
+
+  it('removes a Staff account (deactivated + hidden, kept for the records) and restores it', async () => {
+    const admin = await login('admin');
+    const staffSession = await login('staff', 'NewPass99');
+
+    // Owner and Admin accounts can never be removed; nobody removes themselves
+    const manager = await call('POST', '/api/auth/users/u-owner/remove', undefined, admin);
+    assert.deepEqual([manager.status, manager.body.error], [403, 'CANNOT_REMOVE_MANAGER']);
+    assert.equal((await call('POST', '/api/auth/users/u-admin/remove', undefined, admin)).status, 400);
+    // Production / Staff cannot remove anyone
+    assert.equal((await call('POST', '/api/auth/users/u-owner/remove', undefined, staffSession)).status, 403);
+
+    const r = await call('POST', '/api/auth/users/u-staff/remove', undefined, admin);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.user.is_active, false);
+    assert.ok(r.body.user.removed_at);
+    assert.ok(!(await sessionOk(staffSession)), 'signed out at once');
+    assert.equal((await call('POST', '/api/auth/login', { username: 'staff', password: 'NewPass99' })).status, 403);
+    assert.deepEqual(audit.at(-1), { entity: 'users', entity_id: 'u-staff', action: 'account_removed', performed_by: 'u-admin' });
+    assert.ok(users.has('u-staff'), 'never deleted');
+
+    // Hidden from the everyday list, shown by "Show removed" only
+    const everyday = await call('GET', '/api/auth/users', undefined, admin);
+    assert.ok(!everyday.body.users.some((u) => u.user_id === 'u-staff'));
+    const removed = await call('GET', '/api/auth/users?removed=only', undefined, admin);
+    assert.deepEqual(removed.body.users.map((u) => u.user_id), ['u-staff']);
+    assert.equal(removed.body.removed_only, true);
+    assert.equal((await call('GET', '/api/auth/users?removed=maybe', undefined, admin)).status, 400);
+
+    // A removed account takes no other change until restored
+    const again = await call('POST', '/api/auth/users/u-staff/remove', undefined, admin);
+    assert.equal(again.body.error, 'ALREADY_REMOVED');
+    const activate = await call('PATCH', '/api/auth/users/u-staff', { is_active: true }, admin);
+    assert.deepEqual([activate.status, activate.body.error], [409, 'ACCOUNT_REMOVED']);
+    const reset = await call('POST', '/api/auth/users/u-staff/reset-password', { new_password: 'Other123' }, admin);
+    assert.deepEqual([reset.status, reset.body.error], [409, 'ACCOUNT_REMOVED']);
+
+    // Restore: back in the list, still deactivated until a manager reactivates it
+    const back = await call('POST', '/api/auth/users/u-staff/restore', undefined, admin);
+    assert.equal(back.status, 200, JSON.stringify(back.body));
+    assert.deepEqual([back.body.user.removed_at, back.body.user.is_active], [null, false]);
+    assert.equal(audit.at(-1).action, 'account_restored');
+    assert.equal((await call('POST', '/api/auth/users/u-staff/restore', undefined, admin)).body.error, 'NOT_REMOVED');
+    assert.ok((await call('GET', '/api/auth/users', undefined, admin)).body.users.some((u) => u.user_id === 'u-staff'));
+    assert.equal((await call('PATCH', '/api/auth/users/u-staff', { is_active: true }, admin)).status, 200);
+    await login('staff', 'NewPass99');
   });
 });

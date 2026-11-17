@@ -10,7 +10,7 @@ const { isConnectionError } = require('../utils/dbErrors');
 // Columns the backend uses that are not part of an API record shape
 const EXTRA_COLUMNS = [
   'inventory_items.purged_at',
-  'users.is_active', 'users.tokens_valid_after',
+  'users.is_active', 'users.tokens_valid_after', 'users.removed_at', 'users.removed_by', // migration 014
   ...['audit_id', 'inventory_id', 'action', 'item_name', 'details', 'performed_by', 'performed_role', 'created_at', 'last_modified']
     .map((c) => `inventory_audit_log.${c}`),
   ...['session_id', 'user_id', 'expires_at', 'revoked_at', 'last_modified'].map((c) => `revoked_sessions.${c}`), // migration 007
