@@ -27,7 +27,7 @@ Scope: `Web/` and `shared/client-core/` (the frozen `Frontend/` was not touched)
 | 6 | Recognition rather than recall | "Fields marked * are required" on every form that uses the mark; jump links instead of "go and find the Quote section". |
 | 7 | Flexibility and efficiency | Row links open with Enter **or** Space; touch screens get larger targets, desktop keeps its density. |
 | 8 | Aesthetic and minimalist design | No new panels; the changes are spacing, wording and states. |
-| 9 | Help users recognise, diagnose and recover from errors | Inline field errors: an alert icon, the server's own words for that field (`details[].field`), and `aria-invalid` on the control (item form, new customer, deadline). |
+| 9 | Help users recognise, diagnose and recover from errors | Inline field errors on every form: an alert icon, the server's own words for that field (`details[].field` from `400 VALIDATION_FAILED`, via `fieldErrorsMap()`), and `aria-invalid` on the control. Covered: item form, new customer, deadline, stock change, payment, payment void, discount, loss, new account, password reset, overheads. The top banner stays for general errors; when every problem is already shown at its field it only says "Check the field marked below." (`bannerText()`). |
 | 10 | Help and documentation | Hints are tied to their inputs with `aria-describedby`; tooltips on every icon-only button. |
 
 ### Cognitive laws and Gestalt
@@ -48,7 +48,7 @@ Scope: `Web/` and `shared/client-core/` (the frozen `Frontend/` was not touched)
 
 ## 2. Colour and contrast (WCAG 2.1 AA)
 
-Measured with `node Web/scripts/check-contrast.mjs`, which converts the oklch tokens to sRGB and blends the translucent badge tints as browsers do. Every pair below now passes in **both** themes.
+Measured with `npm run check-contrast` (`Web/scripts/check-contrast.mjs`), which also runs in CI (`.github/workflows/ci.yml`, web job, after `check-rules`) and in the AWS Amplify build, so a token change that drops below AA fails the build. The script converts the oklch tokens to sRGB and blends the translucent badge tints as browsers do. Every pair below now passes in **both** themes.
 
 | Pair | Minimum | Before (light) | After (light) | Dark |
 |---|---|---|---|---|
@@ -104,7 +104,7 @@ The success, danger and info tones and body text already passed and were left un
 ## 5. Verification
 
 - `shared/client-core`: `npm test`, 13 pass, including the new `formatMobile` test.
-- `Web`: `check-rules` (no new exceptions), `check-rules:test` (33), `lint`, `typecheck`, `build`, and `node scripts/check-contrast.mjs` (all pairs pass).
+- `Web`: `check-rules` (no new exceptions), `check-rules:test` (33), `check-contrast` (all pairs pass; also in CI), `lint`, `typecheck`, `build`.
 - `Backend`: `npm test`, 182 pass (no backend change).
 
 **Not checked by hand:**

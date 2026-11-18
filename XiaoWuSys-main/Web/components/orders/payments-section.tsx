@@ -13,12 +13,11 @@ import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { JumpToSection, ORDER_SECTION } from '@/components/orders/jump-to-section';
 import { PaymentStatusBadge } from '@/components/orders/status-badges';
-import { FormProblem, RequiredNote } from '@/components/forms/form-bits';
+import { bannerText, Field, fieldErrorsMap, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useApi } from '@/hooks/use-api';
@@ -56,6 +55,8 @@ export function PaymentsSection({
   const [type, setType] = useState<string>(PAYMENT_TYPES[0]);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
+  // Nielsen H9: the server's VALIDATION_FAILED details, shown next to their fields
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [voiding, setVoiding] = useState<Payment | null>(null);
   const balanceTone = lookFor(PAYMENT_STATUS, totals.payment_status).tone;
   const showVoid = Boolean(actions.void_payment);
@@ -63,6 +64,7 @@ export function PaymentsSection({
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setProblem('');
+    setFieldErrors({});
     const value = Number(amount.trim());
     if (amount.trim() === '' || Number.isNaN(value)) {
       setProblem('Enter the amount received, as a number.');
@@ -75,7 +77,8 @@ export function PaymentsSection({
     });
     setBusy(false);
     if (!ok) {
-      setProblem(errorMessage(data, 'Could not record the payment.'));
+      setFieldErrors(fieldErrorsMap(data));
+      setProblem(bannerText(data, ['amount', 'payment_type'], 'Could not record the payment.'));
       // Someone else may have just paid: show the current balance
       if (data.error === 'PAYMENT_EXCEEDS_BALANCE') onResult({ type: 'warning', title: 'Amount is more than the balance', message: errorMessage(data, '') }, true);
       return;
@@ -206,8 +209,7 @@ export function PaymentsSection({
         <form onSubmit={submit} className="space-y-4 rounded-md border bg-muted/30 p-3">
           <FormProblem message={problem} />
           <div className="grid gap-4 sm:grid-cols-[2fr_1fr]">
-            <div className="flex min-w-0 flex-col gap-1.5">
-              <Label htmlFor="payment-value">Amount (₱)</Label>
+            <Field id="payment-value" label="Amount (₱)" error={fieldErrors.amount}>
               <Input
                 id="payment-value"
                 type="number"
@@ -220,11 +222,10 @@ export function PaymentsSection({
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
               />
-            </div>
-            <div className="flex min-w-0 flex-col gap-1.5">
-              <Label htmlFor="pay-type">Type</Label>
+            </Field>
+            <Field id="pay-type" label="Type" error={fieldErrors.payment_type}>
               <Select value={type} onValueChange={setType}>
-                <SelectTrigger id="pay-type" className="w-full">
+                <SelectTrigger id="pay-type" className="w-full" aria-invalid={fieldErrors.payment_type ? true : undefined}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -235,7 +236,7 @@ export function PaymentsSection({
                   ))}
                 </SelectContent>
               </Select>
-            </div>
+            </Field>
           </div>
           <div className="flex flex-wrap justify-end gap-2">
             <Button type="button" variant="outline" disabled={busy} onClick={() => setAmount(String(actions.max_payment))}>
@@ -297,10 +298,13 @@ function VoidPaymentDialog({
   const [problem, setProblem] = useState('');
   // The server said this void breaks the downpayment: the Owner may confirm and send again
   const [needsConfirm, setNeedsConfirm] = useState('');
+  // Nielsen H9: the server's VALIDATION_FAILED details, shown next to their fields
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
 
   const send = async (confirmBreak: boolean) => {
     setProblem('');
+    setFieldErrors({});
     if (!reason.trim()) {
       setProblem('Write why this payment is being voided.');
       return;
@@ -317,7 +321,8 @@ function VoidPaymentDialog({
         setNeedsConfirm(errorMessage(data, 'This void breaks the downpayment.'));
         return;
       }
-      setProblem(errorMessage(data, 'The payment was not voided.'));
+      setFieldErrors(fieldErrorsMap(data));
+      setProblem(bannerText(data, ['reason'], 'The payment was not voided.'));
       return;
     }
     onDone({
@@ -347,10 +352,7 @@ function VoidPaymentDialog({
         >
           <FormProblem message={problem} />
           <RequiredNote />
-          <div className="min-w-0 space-y-1.5">
-            <Label htmlFor="void-reason">Reason for voiding <span aria-hidden className="text-danger">*</span>
-              <span className="sr-only">(required)</span>
-            </Label>
+          <Field id="void-reason" label="Reason for voiding *" error={fieldErrors.reason}>
             <textarea
               id="void-reason"
               rows={3}
@@ -360,9 +362,9 @@ function VoidPaymentDialog({
               onChange={(e) => setReason(e.target.value)}
               disabled={busy}
               placeholder="e.g. refunded to the customer, wrong GCash account"
-              className="w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm shadow-xs focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+              className="w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm shadow-xs focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none aria-invalid:border-destructive"
             />
-          </div>
+          </Field>
           {needsConfirm && (
             <p role="alert" className={cn('flex gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.warning.banner)}>
               <TriangleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />

@@ -9,7 +9,8 @@
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
     "check-rules": "node scripts/check-rules.mjs",
-    "check-rules:test": "node --test scripts/check-rules.test.mjs"
+    "check-rules:test": "node --test scripts/check-rules.test.mjs",
+    "check-contrast": "node scripts/check-contrast.mjs"
   },
   "dependencies": {
     "@xiaowu/client-core": "file:../shared/client-core",

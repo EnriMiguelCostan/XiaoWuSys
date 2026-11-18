@@ -8,6 +8,7 @@
 import { cloneElement, isValidElement } from 'react';
 import { TriangleAlert } from 'lucide-react';
 import { Label } from '@/components/ui/label';
+import { errorMessage } from '@/lib/api';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
 
@@ -100,6 +101,36 @@ export const fieldError = (data: unknown, field: string): string => {
   const details = (data as { details?: { field?: string; message?: string }[] } | null)?.details;
   if (!Array.isArray(details)) return '';
   return details.find((d) => d && d.field === field)?.message ?? '';
+};
+
+type Detail = { field?: string; message?: string };
+
+/**
+ * Every field the server named in a 400 VALIDATION_FAILED answer, as { field: message } (the
+ * first message per field). Forms pass `fieldErrors.<name>` to <Field error>. Empty for any
+ * other answer, so the form keeps its top banner (Nielsen H9: the error sits at its cause).
+ */
+export const fieldErrorsMap = (data: unknown): Record<string, string> => {
+  const body = data as { error?: string; details?: Detail[] } | null;
+  const out: Record<string, string> = {};
+  if (!body || body.error !== 'VALIDATION_FAILED' || !Array.isArray(body.details)) return out;
+  for (const d of body.details) {
+    if (d && typeof d.field === 'string' && typeof d.message === 'string' && !(d.field in out)) out[d.field] = d.message;
+  }
+  return out;
+};
+
+/**
+ * Text for the form's top banner. When every problem the server named is already shown next to
+ * a field on this form, the banner only points to it; otherwise (general error, or a field this
+ * form does not show) it keeps the server's own words.
+ */
+export const bannerText = (data: unknown, shownFields: readonly string[], fallback: string): string => {
+  const fields = Object.keys(fieldErrorsMap(data));
+  if (fields.length > 0 && fields.every((f) => shownFields.includes(f))) {
+    return fields.length === 1 ? 'Check the field marked below.' : 'Check the fields marked below.';
+  }
+  return errorMessage(data, fallback);
 };
 
 /** Suggestions for free-text inputs (<Input list="…">). */

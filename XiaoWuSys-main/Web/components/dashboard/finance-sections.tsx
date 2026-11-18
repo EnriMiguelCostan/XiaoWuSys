@@ -15,7 +15,7 @@ import { Cell } from '@/components/dashboard/dashboard-parts';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { DateInput } from '@/components/forms/date-input';
-import { Field, FormProblem, RequiredNote } from '@/components/forms/form-bits';
+import { bannerText, Field, fieldErrorsMap, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { AnomalyBadge, LossCauseBadge } from '@/components/orders/waste-section';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -165,6 +165,8 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
   const [description, setDescription] = useState('');
   const [pesos, setPesos] = useState('');
   const [problem, setProblem] = useState('');
+  // Nielsen H9: the server's VALIDATION_FAILED details, shown next to their fields
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   const query = periodQuery(from, to);
   const requestKey = `${query}|${tick}`;
@@ -194,6 +196,7 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
   const add = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setProblem('');
+    setFieldErrors({});
     const value = Number(pesos.trim());
     const text = description.trim().replace(/\s+/g, ' ');
     if (!day) return setProblem('Choose the date of the expense.');
@@ -215,7 +218,11 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
       amount: value,
     });
     setBusy(false);
-    if (!ok) return setProblem(errorMessage(res, 'The expense was not saved.'));
+    if (!ok) {
+      setFieldErrors(fieldErrorsMap(res));
+      return setProblem(bannerText(res, ['expense_date', 'category', 'description', 'amount'], 'The expense was not saved.'));
+    }
+    setFieldErrors({});
     setDescription('');
     setPesos('');
     onResult({ type: 'success', title: 'Expense recorded', message: res.message ?? 'Expense recorded.' });
@@ -320,10 +327,10 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
               <FormProblem message={problem} />
               <RequiredNote />
               <div className="grid min-w-0 gap-4 sm:grid-cols-2">
-                <Field id="overhead-day" label="Date *">
+                <Field id="overhead-day" label="Date *" error={fieldErrors.expense_date}>
                   <DateInput id="overhead-day" required value={day} onChange={(e) => setDay(e.target.value)} disabled={busy} />
                 </Field>
-                <Field id="overhead-category" label="Category *">
+                <Field id="overhead-category" label="Category *" error={fieldErrors.category}>
                   <Select value={category} onValueChange={setCategory} disabled={busy}>
                     <SelectTrigger id="overhead-category" className="w-full max-w-full min-w-0 overflow-hidden">
                       <SelectValue placeholder="Choose…" />
@@ -337,7 +344,7 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
                     </SelectContent>
                   </Select>
                 </Field>
-                <Field id="overhead-description" label="Description *" hint={`${description.length}/${EXPENSE_DESCRIPTION_MAX} characters`}>
+                <Field id="overhead-description" label="Description *" error={fieldErrors.description} hint={`${description.length}/${EXPENSE_DESCRIPTION_MAX} characters`}>
                   <Input
                     id="overhead-description"
                     required
@@ -349,7 +356,7 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
                     disabled={busy}
                   />
                 </Field>
-                <Field id="overhead-peso" label="Cost (₱) *">
+                <Field id="overhead-peso" label="Cost (₱) *" error={fieldErrors.amount}>
                   <Input
                     id="overhead-peso"
                     type="number"

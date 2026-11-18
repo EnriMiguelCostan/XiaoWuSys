@@ -298,4 +298,4 @@ It's a tripwire, not proof; the audit files and review remain the real check.
 4. LAN tablets: yes. Both servers bind to `0.0.0.0`; `CORS_ORIGINS` lists `http://<shop-computer-ip>:3000`; API address resolved at run time (§2.1).
 5. Branches: start-up scripts per branch are deferred to M5.
 
-Still open: a Content-Security-Policy for `Web/` (needs `connect-src` for LAN addresses, tested on real tablets) — M5.
+Done: `Web/next.config.ts` sends a Content-Security-Policy (M5). `connect-src` allows `http:`/`ws:` for LAN tablets and `https:`/`wss:` for a cloud API; `frame-ancestors 'none'`. Still to do: confirm it on a real tablet over the shop Wi-Fi.

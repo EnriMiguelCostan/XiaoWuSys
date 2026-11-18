@@ -9,7 +9,7 @@
 // the cause and may warn that no free stock is left (replacement_warning). Both are shown as sent.
 import { useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
-import { Field, FormProblem, RequiredNote } from '@/components/forms/form-bits';
+import { bannerText, Field, fieldErrorsMap, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Button } from '@/components/ui/button';
 import {
@@ -26,7 +26,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@/components/forms/bounded-select';
 import { useApi } from '@/hooks/use-api';
-import { errorMessage } from '@/lib/api';
 import { offlineNote, toNumberInput, type InventoryItem } from '@/lib/inventory';
 import { LOSS_REASONS, type LossResponse } from '@/lib/orders';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
@@ -69,6 +68,8 @@ export function StockDialog({
   const [reasonCode, setReasonCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
+  // Nielsen H9: the server's VALIDATION_FAILED details, shown next to their fields
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   const item = items.find((i) => i.inventory_id === itemId) ?? null;
   const recordsLoss = action === 'subtract' && reason === 'lost';
@@ -76,6 +77,7 @@ export function StockDialog({
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setProblem('');
+    setFieldErrors({});
     if (!item) {
       setProblem('Choose the item whose stock you want to change.');
       return;
@@ -106,7 +108,8 @@ export function StockDialog({
     setBusy(false);
 
     if (!ok) {
-      setProblem(errorMessage(data, 'Could not update the stock.'));
+      setFieldErrors(fieldErrorsMap(data));
+      setProblem(bannerText(data, ['quantity', 'quantity_lost', 'reason_code', 'loss_reason'], 'Could not update the stock.'));
       return;
     }
     const now = data.item?.quantity_available;
@@ -175,7 +178,7 @@ export function StockDialog({
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field id="stock-quantity" label="Quantity *">
+            <Field id="stock-quantity" label="Quantity *" error={fieldErrors.quantity || fieldErrors.quantity_lost}>
               <Input
                 id="stock-quantity"
                 type="number"
@@ -210,7 +213,7 @@ export function StockDialog({
 
           {recordsLoss && (
             <>
-              <Field id="stock-loss-code" label="What happened? *">
+              <Field id="stock-loss-code" label="What happened? *" error={fieldErrors.reason_code}>
                 <Select value={reasonCode} onValueChange={setReasonCode}>
                   <BoundedSelectTrigger id="stock-loss-code">
                     <SelectValue placeholder="Choose a reason…" />
@@ -224,7 +227,7 @@ export function StockDialog({
                   </BoundedSelectContent>
                 </Select>
               </Field>
-              <Field id="stock-note" label="Notes (optional)">
+              <Field id="stock-note" label="Notes (optional)" error={fieldErrors.loss_reason}>
                 <Input id="stock-note" maxLength={TEXT_MAX.note} placeholder="e.g. found during the stock count" value={note} onChange={(e) => setNote(e.target.value)} />
               </Field>
             </>

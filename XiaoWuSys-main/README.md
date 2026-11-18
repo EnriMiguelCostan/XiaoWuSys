@@ -161,6 +161,38 @@ They cover:
 | `npm run audit-log -- --action deleted` | View the hidden audit trail (`--item "Custom Shirt"`, `--details`) |
 | `npm run seed-inventory` | Add the October 8, 2026 delivery |
 
+## Docker & AWS Amplify Deployment
+
+Optional. The shop setup above (`scripts/start-shop.*`) needs neither.
+
+### Docker (one machine: shop PC or a server)
+
+From `XiaoWuSys-main/`:
+
+```
+docker compose up --build -d
+```
+
+- **`backend`** (`Backend/Dockerfile`) is the API on port 5000.
+  - Its secrets come from `Backend/.env` at run time and are never built into the image. Without that file it runs offline-only.
+  - The SQLite cache is kept on the `xiaowusys_sqlite_data` volume (`/data/local_cache.db`), so it survives rebuilds.
+- **`web`** (`Web/Dockerfile`, built from `XiaoWuSys-main/` so it can reach `shared/client-core`) serves the screens on port 3000.
+  - It starts once the API's health check passes.
+  - It gets **no** backend secrets (N2); `next.config.ts` refuses to start if it sees `DATABASE_URL`, `PG_LISTEN_URL`, `JWT_SECRET` or `TEST_DATABASE_URL`.
+- **Opening it:** `http://localhost:3000` on that machine, or `http://<its address>:3000` on a tablet. The browser calls the API on the same host, port 5000.
+- **Different API host:** to use a fixed API address, set `NEXT_PUBLIC_API_URL` before building (see `Web/.env.example`).
+- **Health checks** poll `GET /api/status` (API) and `/login` (screens). `docker compose ps` shows them.
+
+### AWS Amplify Hosting (the screens only)
+
+- **Build settings:** `amplify.yml` is at the repository root (`appRoot: XiaoWuSys-main/Web`). `XiaoWuSys-main/amplify.yml` is the same file for when `XiaoWuSys-main/` is itself the repository root.
+- **Build steps:** install, link `shared/client-core`, run `check-rules` and `check-contrast`, then `next build`. A rules or contrast failure stops the deploy.
+- **Console settings:**
+  - Set `AMPLIFY_MONOREPO_APP_ROOT` to `XiaoWuSys-main/Web` (or `Web`).
+  - Set `NEXT_PUBLIC_API_URL` to the API's **https** address. An https page cannot call an http API.
+- **API hosting:** Amplify does not host the API. Run `Backend/` elsewhere (for example the Docker image above, behind https) and add the Amplify domain to the API's `CORS_ORIGINS`.
+- **Secrets:** never add backend secrets to Amplify's environment variables.
+
 ## How it is built
 
 ```

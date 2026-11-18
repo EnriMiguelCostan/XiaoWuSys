@@ -1,0 +1,15 @@
+# Never copied into the backend image
+node_modules
+npm-debug.log*
+.env
+.env.*
+*.db
+*.db-journal
+*.sqlite
+tests
+uploads
+logs
+*.log
+Dockerfile
+.dockerignore
+.git

@@ -75,6 +75,7 @@ const shopDate = (days) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ma
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}/api`;
   let token = '';
+  let pnlLine = '';
   const call = async (method, url, body) => {
     const res = await fetch(base + url, {
       method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
@@ -93,13 +94,16 @@ const shopDate = (days) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ma
     const cust = {};
     for (const c of CUSTOMERS) cust[c.full_name] = (await call('POST', '/customers', c)).customer.customer_id;
 
-    // Orders: a school jersey order (half paid), a small notebook order (fully paid),
+    // Orders: a school jersey order (part paid), a small notebook order (fully paid),
     // a halted order logged as Delayed, and a print-details example
     const school = await call('POST', '/orders', {
       customer_id: cust['Agdao National High School'], production_deadline: shopDate(5), total_quote_amount: 45000,
       required_items: [{ inventory_id: item['Custom Shirt'], quantity_needed: 300 }, { inventory_id: item['Quaff Sublimation Transfer Paper'], quantity_needed: 1 }]
     });
     await call('POST', `/orders/${school.order_id}/payments`, { amount: 22500, payment_type: 'Bank Transfer' });
+    // A second instalment (balance still open), so this month's payments cover the overheads
+    // and the Demo P&L opens on a clear net profit
+    await call('POST', `/orders/${school.order_id}/payments`, { amount: 15000, payment_type: 'Cash' });
     for (const [size, name, number] of [['M', 'DELA CRUZ', '7'], ['L', 'SANTOS', '10'], ['XL', 'REYES', '23']]) {
       await call('POST', `/orders/${school.order_id}/items`, { product_type: 'Jersey print', quantity: 1, size, custom_name: name, custom_number: number });
     }
@@ -220,6 +224,11 @@ const shopDate = (days) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ma
     ]) {
       await call('POST', '/reports/overheads', { expense_date, category, description, amount });
     }
+    // The server's own P&L for this month, printed so a rebuild shows the demo opens in profit
+    pnlLine = await call('GET', '/reports/pnl').then(
+      (p) => `   P&L this month: income ₱${p.gross_income}, expenses ₱${p.total_expenses}, ${p.profitable ? 'net profit' : 'NET LOSS'} ₱${p.net_profit}`,
+      () => ''
+    );
     // Demo only: the demo never syncs, so show these as already in the cloud
     for (const table of ['overhead_expenses', 'material_loss', 'audit_log', 'payments', 'order_items']) {
       await run(`UPDATE ${table} SET sync_status = 'synced' WHERE sync_status = 'pending_insert'`);
@@ -246,6 +255,7 @@ const shopDate = (days) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ma
 
   console.log(`✅ Demo database ready: ${path.relative(process.cwd(), DEMO_FILE) || DEMO_FILE}`);
   console.log(`   Log in with owner / admin / production / staff, password: ${PASSWORD}`);
+  if (pnlLine) console.log(pnlLine);
   console.log('   Start it with: npm run demo');
 })().catch((err) => {
   console.error('✗ Could not build the demo database:', err.message);
