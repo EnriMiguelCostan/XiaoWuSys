@@ -116,7 +116,7 @@ export function ChangePasswordDialog({ open, onOpenChange }: { open: boolean; on
               <Button type="button" variant="outline" onClick={() => close(false)} disabled={busy}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={busy}>
+              <Button busy={busy} type="submit" disabled={busy}>
                 {busy ? 'Saving…' : 'Change password'}
               </Button>
             </DialogFooter>

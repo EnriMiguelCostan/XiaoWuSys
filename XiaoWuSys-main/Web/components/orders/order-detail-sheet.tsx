@@ -38,11 +38,13 @@ import {
   StatusTimeline,
 } from '@/components/orders/order-sections';
 import { useOrderLocks } from '@/components/providers/order-locks-provider';
+import { JumpToSection, type OrderSectionKey } from '@/components/orders/jump-to-section';
 import { PaymentsSection } from '@/components/orders/payments-section';
 import { ConsumablesUsed, QuoteSection } from '@/components/orders/pricing-section';
 import { MaterialLossesSection } from '@/components/orders/waste-section';
 import { ShortageTable } from '@/components/orders/shortage-table';
 import { OrderStatusBadge } from '@/components/orders/status-badges';
+import { RequiredNote } from '@/components/forms/form-bits';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -109,6 +111,8 @@ export function OrderDetailSheet({
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ResultMessage | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  // HCI 4-state feedback: which status button is in flight (spinner + "Updating…" on that button)
+  const [pendingStatus, setPendingStatus] = useState<string | null>(null);
   const [cancelReason, setCancelReason] = useState('');
   const [confirmApprove, setConfirmApprove] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState<'archive' | 'restore' | null>(null);
@@ -212,12 +216,14 @@ export function OrderDetailSheet({
   const changeStatus = async (to: string, cancellation_reason?: string) => {
     if (!order) return;
     setBusy(true);
+    setPendingStatus(to);
     const { ok, data } = await api<{ message?: string; shortages?: Shortage[]; error?: string }>(
       'PATCH',
       `/orders/${encodeURIComponent(order.order_id)}/status`,
       { status: to, expected_version: order.version || undefined, ...(cancellation_reason ? { cancellation_reason } : {}) }
     );
     setBusy(false);
+    setPendingStatus(null);
     setConfirmCancel(false);
     setCancelReason('');
     if (!ok && data.shortages?.length) {
@@ -225,7 +231,18 @@ export function OrderDetailSheet({
     } else {
       setResult(
         ok
-          ? { type: 'success', title: `Order ${to}`, message: data.message ?? `The order is now ${to}.` }
+          ? {
+              type: 'success',
+              title: `${orderNumber(order)} is now ${to}`,
+              // The server's sentence (stock released / used, consumables taken), then where to go next
+              message: [
+                data.message ?? `The order is now ${to}.`,
+                customer?.full_name ? `Customer: ${customer.full_name}.` : null,
+                to === 'Cancelled' ? 'Payments stay on record: void them in the Payments section if money is returned.' : 'The next step’s buttons are at the bottom of this order.',
+              ]
+                .filter(Boolean)
+                .join('\n'),
+            }
           : { type: 'error', title: 'Status not changed', message: errorMessage(data, 'Could not change the status.') }
       );
     }
@@ -249,8 +266,12 @@ export function OrderDetailSheet({
       const held = (data.reserved ?? []).map((x) => `• ${x.item_name || 'Material'}: ${x.quantity}`).join('\n');
       setResult({
         type: 'success',
-        title: 'Job order approved',
-        message: (data.newly_reserved ? 'Materials reserved:\n' : 'Materials were already reserved when the order was created:\n') + held,
+        title: `Job order ${orderNumber(order)} approved`,
+        message:
+          (customer?.full_name ? `Customer: ${customer.full_name}.\n` : '') +
+          (data.newly_reserved ? 'Materials reserved:\n' : 'Materials were already reserved when the order was created:\n') +
+          held +
+          '\nNext: production can start printing (Start printing, at the bottom of this order).',
       });
       reloadDetail();
       onChanged();
@@ -478,25 +499,42 @@ export function OrderDetailSheet({
                   >
                     <ShieldCheck aria-hidden /> Approve job order
                   </Button>
-                  {approval?.blocking[0] && <span className="w-full text-xs text-muted-foreground wrap-anywhere">{approval.blocking[0]}</span>}
+                  {approval?.blocking[0] && (
+                    <span className="w-full text-xs leading-relaxed text-muted-foreground wrap-anywhere">
+                      {approval.blocking[0]}
+                      {approval.fixes.get(approval.blocking[0]) && (
+                        <>
+                          {' '}
+                          <JumpToSection to={approval.fixes.get(approval.blocking[0]) as OrderSectionKey} />
+                        </>
+                      )}
+                    </span>
+                  )}
                 </div>
               )}
               {footerActions.length > 0 && (
-                <div className="ml-auto flex flex-wrap gap-2">
-                  {footerActions.map((a) => {
+                // HCI (Fitts): destructive actions (Cancel order) come first, then a divider and 16px of
+                // space, then the constructive steps with the main one at the far right, so a quick tap on
+                // "Mark completed" can never land on "Cancel order".
+                <div className="ml-auto flex flex-wrap items-center gap-2">
+                  {[...footerActions.filter((a) => a.danger), ...footerActions.filter((a) => !a.danger)].map((a, i, all) => {
                     // PB 9: Resume reserves stock, so it is held back while the server says stock is short
                     const blocked = a.to === 'Pending' && stockShort;
                     const Icon = a.icon;
+                    const afterDanger = i > 0 && all[i - 1].danger && !a.danger;
                     return (
-                      <Button
-                        key={a.to}
-                        variant={a.danger ? 'destructive' : 'default'}
-                        disabled={busy || blocked}
-                        title={blocked ? `Not enough stock to resume: ${shortfallLines(detail?.stock_check)[0] ?? ''}` : undefined}
-                        onClick={() => (a.danger ? setConfirmCancel(true) : changeStatus(a.to))}
-                      >
-                        <Icon aria-hidden /> {a.label}
-                      </Button>
+                      <span key={a.to} className="contents">
+                        {afterDanger && <span aria-hidden className="mx-2 h-8 w-px bg-border" />}
+                        <Button
+                          variant={a.danger ? 'destructive' : 'default'}
+                          disabled={busy || blocked}
+                          busy={pendingStatus === a.to && !a.danger}
+                          title={blocked ? `Not enough stock to resume: ${shortfallLines(detail?.stock_check)[0] ?? ''}` : undefined}
+                          onClick={() => (a.danger ? setConfirmCancel(true) : changeStatus(a.to))}
+                        >
+                          <Icon aria-hidden /> {pendingStatus === a.to && !a.danger ? 'Updating…' : a.label}
+                        </Button>
+                      </span>
                     );
                   })}
                 </div>
@@ -525,8 +563,11 @@ export function OrderDetailSheet({
               if (cancelReason.trim()) void changeStatus('Cancelled', cancelReason.trim());
             }}
           >
+            <RequiredNote />
             <div className="min-w-0 space-y-1.5">
-              <Label htmlFor="cancel-reason">Reason for cancelling *</Label>
+              <Label htmlFor="cancel-reason">Reason for cancelling <span aria-hidden className="text-danger">*</span>
+                <span className="sr-only">(required)</span>
+              </Label>
               <textarea
                 id="cancel-reason"
                 rows={3}
@@ -543,7 +584,7 @@ export function OrderDetailSheet({
               <Button type="button" variant="outline" onClick={() => setConfirmCancel(false)} disabled={busy}>
                 Keep order
               </Button>
-              <Button type="submit" variant="destructive" disabled={busy || !cancelReason.trim()}>
+              <Button busy={busy} type="submit" variant="destructive" disabled={busy || !cancelReason.trim()}>
                 <CircleX aria-hidden /> {busy ? 'Cancelling…' : 'Cancel order'}
               </Button>
             </DialogFooter>
@@ -560,6 +601,7 @@ export function OrderDetailSheet({
         }
         confirmLabel={confirmArchive === 'restore' ? 'Unarchive order' : 'Archive order'}
         busy={busy}
+        busyLabel={confirmArchive === 'restore' ? 'Unarchiving…' : 'Archiving…'}
         onConfirm={() => confirmArchive && archive(confirmArchive)}
         onCancel={() => setConfirmArchive(null)}
       />
@@ -573,6 +615,7 @@ export function OrderDetailSheet({
         }
         confirmLabel="Approve job order"
         busy={busy}
+        busyLabel="Approving…"
         onConfirm={approve}
         onCancel={() => setConfirmApprove(false)}
       />

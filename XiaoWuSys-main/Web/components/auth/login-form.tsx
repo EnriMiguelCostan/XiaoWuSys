@@ -75,7 +75,7 @@ export function LoginForm() {
       <Card className="w-full max-w-md gap-6 bg-card/80 shadow-2xl ring-foreground/10 backdrop-blur-md [--card-spacing:--spacing(6)] supports-[backdrop-filter]:bg-card/75 sm:[--card-spacing:--spacing(8)]">
         <CardHeader className="justify-items-center gap-2 text-center">
           <BrandLogo className="mb-2 h-20" preload />
-          <CardTitle className="text-2xl font-semibold tracking-tight">{APP_NAME}</CardTitle>
+          <CardTitle as="h1" className="text-2xl font-semibold tracking-tight">{APP_NAME}</CardTitle>
           <CardDescription>Log in to continue.</CardDescription>
         </CardHeader>
 

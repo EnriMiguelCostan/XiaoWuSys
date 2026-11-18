@@ -8,7 +8,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import type { LucideIcon } from 'lucide-react';
-import { TriangleAlert } from 'lucide-react';
+import { ChevronRight, TriangleAlert } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { orderNumber } from '@xiaowu/client-core/orders';
 import { DeadlineBadge, OrderStatusBadge, PaymentStatusBadge } from '@/components/orders/status-badges';
@@ -81,23 +81,23 @@ export function SummaryCard({
   return (
     <Card className="min-w-0">
       <CardHeader className="min-w-0">
-        <CardDescription className="min-w-0 truncate" title={title}>
-          {title}
+        {/* HCI: the label is the card's heading; the figure is its content. Both wrap instead of
+            being cut off at 320px or 200% zoom (WCAG 1.4.10). */}
+        <CardDescription className="min-w-0">
+          <h2 className="text-sm leading-snug font-normal text-muted-foreground">{title}</h2>
         </CardDescription>
         <CardAction>
           <span className={cn('flex size-8 items-center justify-center rounded-lg border', TONE_CLASSES[tone].badge)}>
             <Icon className="size-4" aria-hidden />
           </span>
         </CardAction>
-        <CardTitle className={cn('min-w-0 truncate text-2xl font-semibold tabular-nums', TONE_CLASSES[tone].text)} title={value}>
+        <p data-slot="card-title" className={cn('min-w-0 text-2xl leading-snug font-semibold tabular-nums wrap-anywhere', TONE_CLASSES[tone].text)}>
           {value}
-        </CardTitle>
+        </p>
       </CardHeader>
       {footnote && (
-        <CardContent className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-          <span className="min-w-0 truncate" title={footnote}>
-            {footnote}
-          </span>
+        <CardContent className="min-w-0 text-xs leading-relaxed text-muted-foreground">
+          <p>{footnote}</p>
         </CardContent>
       )}
     </Card>
@@ -156,16 +156,31 @@ export function OrdersTableCard({
                 {money === 'balance' && <TableHead className="hidden w-28 lg:table-cell">Payment</TableHead>}
                 <TableHead className="w-28 pr-4 xl:pr-2">Status</TableHead>
                 {!overpaid && <TableHead className="hidden w-32 pr-4 md:table-cell">Deadline</TableHead>}
+                <TableHead className="w-8 pr-2">
+                  <span className="sr-only">Open</span>
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {orders.map((order) => (
-                <TableRow key={order.order_id} className="cursor-pointer" onClick={() => router.push(orderHref(order.order_id))}>
+                // HCI signifier: the row reacts to the pointer and to keyboard focus on its order link
+                <TableRow
+                  key={order.order_id}
+                  className="group/row cursor-pointer hover:bg-muted/60 focus-within:bg-muted/60 focus-within:ring-2 focus-within:ring-ring/50 focus-within:ring-inset"
+                  onClick={() => router.push(orderHref(order.order_id))}
+                >
                   <TableCell className="pl-4">
                     <Link
                       href={orderHref(order.order_id)}
                       onClick={(e) => e.stopPropagation()}
-                      className="block min-w-0 truncate font-mono text-xs underline-offset-4 hover:underline"
+                      // A link opens with Enter; Space opens it too, like the row's other controls
+                      onKeyDown={(e) => {
+                        if (e.key === ' ') {
+                          e.preventDefault();
+                          router.push(orderHref(order.order_id));
+                        }
+                      }}
+                      className="block min-w-0 truncate font-mono text-xs underline-offset-4 hover:underline focus-visible:outline-none"
                       title={`Open order ${orderNumber(order)}`}
                     >
                       {orderNumber(order)}
@@ -212,6 +227,9 @@ export function OrdersTableCard({
                       <DeadlineBadge flag={order.deadline_flag} className="mt-1" />
                     </TableCell>
                   )}
+                  <TableCell className="w-8 pr-2 text-muted-foreground">
+                    <ChevronRight className="size-4 transition-transform group-hover/row:translate-x-0.5" aria-hidden />
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>

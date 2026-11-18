@@ -13,7 +13,7 @@ export function RequireCapability({ capability, children }: { capability: Capabi
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
+        <CardTitle as="h1" className="flex items-center gap-2">
           <ShieldX className="size-5 text-muted-foreground" aria-hidden />
           Not available for your account
         </CardTitle>

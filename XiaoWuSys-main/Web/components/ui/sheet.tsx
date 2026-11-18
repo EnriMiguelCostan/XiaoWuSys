@@ -124,7 +124,7 @@ function SheetFooter({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="sheet-footer"
-      className={cn("mt-auto flex flex-col gap-2 p-4", className)}
+      className={cn("mt-auto flex flex-col gap-3 p-4", className)}
       {...props}
     />
   )
@@ -153,7 +153,7 @@ function SheetDescription({
   return (
     <SheetPrimitive.Description
       data-slot="sheet-description"
-      className={cn("text-sm text-muted-foreground", className)}
+      className={cn("max-w-prose text-sm leading-relaxed text-muted-foreground", className)}
       {...props}
     />
   )

@@ -20,6 +20,18 @@ if (leaked.length > 0) {
 // XiaoWuSys-main/: lets Turbopack and file tracing follow the link to ../shared/client-core.
 const appRoot = path.join(__dirname, '..');
 
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  'connect-src \'self\' http: https: ws: wss:',
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+].join('; ');
+
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
@@ -42,8 +54,11 @@ const nextConfig: NextConfig = {
   // Runs offline on the shop computer: no remote image optimisation service.
   images: { unoptimized: true },
 
-  // Same baseline headers Express sends. A Content-Security-Policy is added at cutover (M5),
-  // once the connect-src for LAN addresses has been tested on real tablets.
+  // Same baseline headers Express sends, plus the M5 Content-Security-Policy. connect-src allows
+  // http:/ws: (the shop computer's LAN address, e.g. http://192.168.1.10:5000, for tablets) and
+  // https:/wss: (a cloud API), because the browser calls Express directly (N3) and its address is
+  // not known at build time. 'unsafe-inline' / 'unsafe-eval' cover Next.js's inline bootstrap
+  // scripts and the dev server; frame-ancestors 'none' matches X-Frame-Options: DENY.
   async headers() {
     return [
       {
@@ -53,6 +68,7 @@ const nextConfig: NextConfig = {
           { key: 'X-Frame-Options', value: 'DENY' },
           { key: 'Referrer-Policy', value: 'no-referrer' },
           { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
+          { key: 'Content-Security-Policy', value: CONTENT_SECURITY_POLICY },
         ],
       },
     ];

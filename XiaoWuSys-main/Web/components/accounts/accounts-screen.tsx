@@ -29,7 +29,7 @@ import { LogoSpinner } from '@/components/brand/brand-logo';
 import { useConnection } from '@/components/connection/connection-provider';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
-import { Field, FormProblem } from '@/components/forms/form-bits';
+import { bannerText, Field, fieldErrorsMap, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { PasswordInput } from '@/components/forms/password-input';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -239,7 +239,7 @@ export function AccountsScreen() {
               <TableBody>
                 {list.users.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
+                    <TableCell colSpan={5} className="py-10 text-left leading-relaxed text-muted-foreground">
                       {showRemoved ? 'No removed accounts.' : 'No accounts found.'}
                     </TableCell>
                   </TableRow>
@@ -430,10 +430,13 @@ function CreateAccountDialog({ roles, onClose, onResult, onDone }: AccountDialog
   const [role, setRole] = useState('');
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
+  // Nielsen H9: the server's VALIDATION_FAILED details, shown next to their fields
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setProblem('');
+    setFieldErrors({});
     if (!role) {
       setProblem('Choose a role for the new account.');
       return;
@@ -442,6 +445,13 @@ function CreateAccountDialog({ roles, onClose, onResult, onDone }: AccountDialog
     const { ok, data } = await api<{ message?: string }>('POST', '/auth/register', { username: username.trim(), password, role });
     setBusy(false);
     if (!ok) {
+      // A field the server named stays in the form, next to that field; anything else is a result message
+      const fields = fieldErrorsMap(data);
+      if (Object.keys(fields).length > 0) {
+        setFieldErrors(fields);
+        setProblem(bannerText(data, ['username', 'password', 'role'], 'The account was not created.'));
+        return;
+      }
       onResult({ type: 'error', title: 'Account not created', message: errorMessage(data, 'The account was not created.') });
       return;
     }
@@ -459,7 +469,8 @@ function CreateAccountDialog({ roles, onClose, onResult, onDone }: AccountDialog
         </DialogHeader>
         <form onSubmit={submit} className="max-w-full min-w-0 space-y-4">
           <FormProblem message={problem} />
-          <Field id="new-username" label="Username *" hint="No spaces, e.g. rin.staff">
+          <RequiredNote />
+          <Field id="new-username" label="Username *" error={fieldErrors.username} hint="No spaces, e.g. rin.staff">
             <Input
               id="new-username"
               required
@@ -474,7 +485,7 @@ function CreateAccountDialog({ roles, onClose, onResult, onDone }: AccountDialog
               onChange={(e) => setUsername(e.target.value.replace(/\s/g, ''))}
             />
           </Field>
-          <Field id="new-password" label="Temporary password *" hint={PASSWORD_HINT}>
+          <Field id="new-password" label="Temporary password *" error={fieldErrors.password} hint={PASSWORD_HINT}>
             <PasswordInput
               id="new-password"
               required
@@ -485,7 +496,7 @@ function CreateAccountDialog({ roles, onClose, onResult, onDone }: AccountDialog
               onChange={(e) => setPassword(e.target.value)}
             />
           </Field>
-          <Field id="new-role" label="Role *" hint={roleHelp(role) || 'What this person may do.'}>
+          <Field id="new-role" label="Role *" error={fieldErrors.role} hint={roleHelp(role) || 'What this person may do.'}>
             <Select value={role} onValueChange={setRole}>
               <SelectTrigger id="new-role" className="w-full">
                 <SelectValue placeholder="Choose a role…" />
@@ -503,7 +514,7 @@ function CreateAccountDialog({ roles, onClose, onResult, onDone }: AccountDialog
             <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
               Cancel
             </Button>
-            <Button type="submit" disabled={busy}>
+            <Button busy={busy} type="submit" disabled={busy}>
               {busy ? 'Creating…' : 'Create account'}
             </Button>
           </DialogFooter>
@@ -518,15 +529,23 @@ function ResetPasswordDialog({ account, onClose, onResult, onDone }: AccountDial
   const api = useApi();
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
+  // Nielsen H9: the server's VALIDATION_FAILED details, shown next to their fields
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    setFieldErrors({});
     setBusy(true);
     const { ok, data } = await api<{ message?: string }>('POST', `/auth/users/${encodeURIComponent(account.user_id)}/reset-password`, {
       new_password: password,
     });
     setBusy(false);
     if (!ok) {
+      const fields = fieldErrorsMap(data);
+      if (fields.new_password) {
+        setFieldErrors(fields);
+        return;
+      }
       onResult({ type: 'error', title: 'Password not reset', message: errorMessage(data, 'The password was not reset.') });
       return;
     }
@@ -544,7 +563,8 @@ function ResetPasswordDialog({ account, onClose, onResult, onDone }: AccountDial
           <DialogDescription>Tell the person their new password in person or by private message. They will be signed out everywhere.</DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="max-w-full min-w-0 space-y-4">
-          <Field id="reset-password" label="Enter new password *" hint={PASSWORD_HINT}>
+          <RequiredNote />
+          <Field id="reset-password" label="Enter new password *" error={fieldErrors.new_password} hint={PASSWORD_HINT}>
             <PasswordInput
               id="reset-password"
               required
@@ -560,7 +580,7 @@ function ResetPasswordDialog({ account, onClose, onResult, onDone }: AccountDial
             <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
               Cancel
             </Button>
-            <Button type="submit" disabled={busy}>
+            <Button busy={busy} type="submit" disabled={busy}>
               {busy ? 'Saving…' : 'Set new password'}
             </Button>
           </DialogFooter>

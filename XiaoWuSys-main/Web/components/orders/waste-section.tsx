@@ -11,7 +11,7 @@ import { useMemo, useState } from 'react';
 import { ChartNoAxesColumnIncreasing, TriangleAlert } from 'lucide-react';
 import { formatDateTime } from '@xiaowu/client-core/format';
 import type { OrderActions } from '@xiaowu/client-core/permissions';
-import { Field, FormProblem } from '@/components/forms/form-bits';
+import { bannerText, Field, fieldErrorsMap, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@/components/forms/bounded-select';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Badge } from '@/components/ui/badge';
@@ -20,7 +20,6 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { Select, SelectValue } from '@/components/ui/select';
 import { useApi } from '@/hooks/use-api';
-import { errorMessage } from '@/lib/api';
 import { LOSS_NOTE_MAX, WHOLE_NUMBER_MAX } from '@/lib/input-limits';
 import { LOSS_REASONS, type LossResponse, type MaterialLoss, type OrderDetail } from '@/lib/orders';
 import { LOSS_CATEGORY, lookFor, TONE_CLASSES } from '@/lib/ui-tokens';
@@ -103,8 +102,8 @@ function LossRow({ loss }: { loss: MaterialLoss }) {
         <LossCauseBadge label={loss.category_label} />
         {loss.is_statistical_anomaly && <AnomalyBadge />}
         {loss.sync_status !== 'synced' && (
-          <Badge variant="outline" className={TONE_CLASSES.info.badge}>
-            offline
+          <Badge title="Saved on this computer; it goes to the cloud when the connection is back" variant="outline" className={TONE_CLASSES.info.badge}>
+            Pending sync
           </Badge>
         )}
       </div>
@@ -139,10 +138,13 @@ function LogLossDialog({
   const [note, setNote] = useState('');
   const [problem, setProblem] = useState('');
   const [busy, setBusy] = useState(false);
+  // Nielsen H9: the server's VALIDATION_FAILED details, shown next to their fields
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setProblem('');
+    setFieldErrors({});
     const qtyText = quantity.trim();
     const qty = Number(qtyText);
     const cleanNote = note.trim().replace(/\s+/g, ' ');
@@ -163,7 +165,8 @@ function LogLossDialog({
     });
     setBusy(false);
     if (!ok) {
-      setProblem(errorMessage(data, 'The loss was not recorded.'));
+      setFieldErrors(fieldErrorsMap(data));
+      setProblem(bannerText(data, ['inventory_id', 'quantity_lost', 'reason_code', 'loss_reason'], 'The loss was not recorded.'));
       return;
     }
     const warning = data.replacement_warning?.message;
@@ -193,10 +196,11 @@ function LogLossDialog({
         </DialogHeader>
         <form onSubmit={submit} noValidate className="max-w-full min-w-0 space-y-4">
           <FormProblem message={problem} />
+          <RequiredNote />
           {materials.length === 0 ? (
             <p className="text-sm text-muted-foreground">This order has no materials linked to stock. Record the loss from the Catalog instead.</p>
           ) : (
-            <Field id="loss-item" label="Material *">
+            <Field id="loss-item" label="Material *" error={fieldErrors.inventory_id}>
               <Select value={itemId} onValueChange={setItemId} disabled={busy}>
                 <BoundedSelectTrigger id="loss-item">
                   <SelectValue placeholder="Choose the material…" />
@@ -211,7 +215,7 @@ function LogLossDialog({
               </Select>
             </Field>
           )}
-          <Field id="loss-code" label="What happened? *">
+          <Field id="loss-code" label="What happened? *" error={fieldErrors.reason_code}>
             <Select value={reasonCode} onValueChange={setReasonCode} disabled={busy}>
               <BoundedSelectTrigger id="loss-code">
                 <SelectValue placeholder="Choose a reason…" />
@@ -225,7 +229,7 @@ function LogLossDialog({
               </BoundedSelectContent>
             </Select>
           </Field>
-          <Field id="loss-qty" label="Pieces ruined *">
+          <Field id="loss-qty" label="Pieces ruined *" error={fieldErrors.quantity_lost}>
             <Input
               id="loss-qty"
               type="number"
@@ -239,14 +243,14 @@ function LogLossDialog({
               disabled={busy}
             />
           </Field>
-          <Field id="loss-note" label="Notes (optional)" hint={`${note.length}/${LOSS_NOTE_MAX} characters`}>
+          <Field id="loss-note" label="Notes (optional)" error={fieldErrors.loss_reason} hint={`${note.length}/${LOSS_NOTE_MAX} characters`}>
             <Input id="loss-note" maxLength={LOSS_NOTE_MAX} autoComplete="off" placeholder="e.g. logo shifted on the left sleeve" value={note} onChange={(e) => setNote(e.target.value)} disabled={busy} />
           </Field>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
               Cancel
             </Button>
-            <Button type="submit" variant="destructive" disabled={busy || materials.length === 0}>
+            <Button busy={busy} type="submit" variant="destructive" disabled={busy || materials.length === 0}>
               {busy ? 'Saving…' : 'Record loss'}
             </Button>
           </DialogFooter>

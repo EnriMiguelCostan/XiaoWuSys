@@ -1,10 +1,13 @@
 /* Semantic state colours for lib/ui-tokens.ts (Batch M0).
    Imported at the top of globals.css. The .dark values are switched on by the header's Light / Dark
-   toggle (Decision N8: hooks/use-theme.ts puts the class on <html>). */
+   toggle (Decision N8: hooks/use-theme.ts puts the class on <html>).
+   WCAG 2.1 AA (HCI pass, docs/hci-design-audit.md): each state colour reaches 4.5:1 or more as text
+   on the page, a card, a muted surface and its own 10% badge tint, in both modes. Light --warning
+   was darkened (4.39:1 -> 4.94:1 on its badge). Check after any change: node scripts/check-contrast.mjs */
 
 :root {
   --success: oklch(0.52 0.14 150);
-  --warning: oklch(0.55 0.15 65);
+  --warning: oklch(0.52 0.14 65);
   --danger: oklch(0.53 0.2 27);
   --info: oklch(0.5 0.15 255);
   color-scheme: light;

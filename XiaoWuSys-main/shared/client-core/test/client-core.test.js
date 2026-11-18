@@ -10,7 +10,7 @@ import { receiptHtml } from '../receipt.js';
 describe('package surface', () => {
   it('exports everything the Vite MVP imported from src/api.js and src/lib/*', () => {
     for (const name of [
-      'createApi', 'errorText', 'parseCsv', 'todayInManila', 'MOBILE_PATTERN', 'peso', 'formatDateTime',
+      'createApi', 'errorText', 'parseCsv', 'todayInManila', 'MOBILE_PATTERN', 'peso', 'formatDateTime', 'formatMobile',
       'can', 'orderActions', 'NO_ORDER_ACTIONS', 'orderNumber', 'hasOrderNumber', 'normalizeOrderNumber',
       'shortfallLines', 'NUMBER_AFTER_SYNC', 'deriveConnectionState', 'connectionText', 'pendingText',
       'syncDisabledReason', 'syncResultMessage', 'escapeHtml', 'receiptHtml', 'receiptText', 'receiptLines',
@@ -21,6 +21,17 @@ describe('package surface', () => {
   it('has no DOM helpers (those stay in each app)', () => {
     assert.equal('downloadFile' in core, false);
     assert.equal('copyText' in core, false);
+  });
+});
+
+describe('formatMobile (display only, Miller chunking)', () => {
+  it('groups an 11-digit mobile number as 4-3-4 and leaves everything else as stored', () => {
+    assert.equal(core.formatMobile('09171234567'), '0917 123 4567');
+    assert.equal(core.formatMobile(' 0917-123-4567 '), '0917 123 4567', 'spaces and dashes typed by staff');
+    assert.equal(core.formatMobile('0917123456'), '0917123456', 'too short: shown as stored, never guessed');
+    assert.equal(core.formatMobile('+639171234567'), '+639171234567');
+    assert.equal(core.formatMobile(null), '');
+    assert.equal(core.formatMobile(undefined), '');
   });
 });
 

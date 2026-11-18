@@ -1,0 +1,17 @@
+# Build context for Web/Dockerfile (XiaoWuSys-main/). Only Web/ and shared/client-core/ are used.
+**/node_modules
+**/.next
+**/.env
+**/.env.*
+!**/.env.example
+**/*.db
+**/*.db-journal
+**/*.log
+**/tsconfig.tsbuildinfo
+.git
+Backend
+Frontend
+dashboard-sandbox
+docs
+scripts
+shared/client-core/test

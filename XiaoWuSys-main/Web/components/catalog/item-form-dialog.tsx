@@ -9,7 +9,7 @@
 // stock changes go through Adjust stock so every movement is recorded.
 import { useState } from 'react';
 import { Pencil, Plus } from 'lucide-react';
-import { Field, FormProblem, Suggestions } from '@/components/forms/form-bits';
+import { Field, FormProblem, Suggestions, RequiredNote, fieldError } from '@/components/forms/form-bits';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Button } from '@/components/ui/button';
 import {
@@ -59,6 +59,9 @@ export function ItemFormDialog({
   });
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<{ message: string; tone: 'danger' | 'warning' } | null>(null);
+  // The server's last 400 answer: its details[] put each message next to the field it names
+  const [failed, setFailed] = useState<unknown>(null);
+  const errorFor = (field: string) => fieldError(failed, field);
 
   const bind = (key: keyof typeof form) => ({
     value: form[key],
@@ -68,6 +71,7 @@ export function ItemFormDialog({
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setProblem(null);
+    setFailed(null);
 
     const name = form.item_name.trim();
     const category = form.item_category.trim();
@@ -118,6 +122,7 @@ export function ItemFormDialog({
     setBusy(false);
 
     if (!ok) {
+      setFailed(data);
       setProblem({
         tone: status === 409 ? 'warning' : 'danger',
         message: errorMessage(data, editing ? 'Could not save the changes.' : 'Could not add the item.'),
@@ -150,7 +155,7 @@ export function ItemFormDialog({
           <DialogDescription>
             {editing
               ? 'Change the details of this item. Stock quantities are changed with Adjust stock.'
-              : 'Add a material to the catalog. Fields marked * are required.'}
+              : 'Add a material to the catalog.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -158,35 +163,36 @@ export function ItemFormDialog({
         <Suggestions id="catalog-unit-options" values={COMMON_UNITS} />
 
         <form onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
+          <RequiredNote className="sm:col-span-2" />
           {problem && (
             <div className="sm:col-span-2">
               <FormProblem message={problem.message} tone={problem.tone} />
             </div>
           )}
-          <Field id="item-name" label="Item name *" className="sm:col-span-2">
+          <Field id="item-name" error={errorFor('item_name')} label="Item name *" className="sm:col-span-2">
             <Input id="item-name" required maxLength={TEXT_MAX.default} placeholder="e.g. Valiant Columnar Notebook" autoFocus {...bind('item_name')} />
           </Field>
-          <Field id="item-category" label="Category *">
+          <Field id="item-category" error={errorFor('item_category')} label="Category *">
             <Input id="item-category" required maxLength={TEXT_MAX.category} list="catalog-category-options" placeholder="e.g. Notebooks" {...bind('item_category')} />
           </Field>
-          <Field id="item-unit" label="Unit (what 1 means)">
+          <Field id="item-unit" error={errorFor('unit')} label="Unit (what 1 means)">
             <Input id="item-unit" maxLength={TEXT_MAX.unit} list="catalog-unit-options" placeholder="pcs, pack, ream…" {...bind('unit')} />
           </Field>
-          <Field id="item-supplier" label="Supplier (optional)" className="sm:col-span-2">
+          <Field id="item-supplier" error={errorFor('supplier')} label="Supplier (optional)" className="sm:col-span-2">
             <Input id="item-supplier" maxLength={TEXT_MAX.default} placeholder="e.g. Quaff PH" {...bind('supplier')} />
           </Field>
           {!editing && (
-            <Field id="item-quantity" label="Quantity in stock">
+            <Field id="item-quantity" error={errorFor('quantity_available')} label="Quantity in stock">
               <Input id="item-quantity" type="number" min={0} max={WHOLE_NUMBER_MAX} step={1} inputMode="numeric" placeholder="0" {...bind('quantity_available')} />
             </Field>
           )}
-          <Field id="item-threshold" label="Low-stock alert at">
+          <Field id="item-threshold" error={errorFor('minimum_threshold')} label="Low-stock alert at">
             <Input id="item-threshold" type="number" min={0} max={WHOLE_NUMBER_MAX} step={1} inputMode="numeric" placeholder="0" required={editing} {...bind('minimum_threshold')} />
           </Field>
-          <Field id="item-cost" label="Unit cost (₱)">
+          <Field id="item-cost" error={errorFor('unit_cost')} label="Unit cost (₱)">
             <Input id="item-cost" type="number" min={0} max={MONEY_INPUT_MAX} step="0.01" inputMode="decimal" placeholder="0.00" {...bind('unit_cost')} />
           </Field>
-          <Field id="item-price" label="Selling price per piece (₱)" hint="What the customer pays before bulk discounts. Used to calculate quotes.">
+          <Field id="item-price" error={errorFor('selling_price')} label="Selling price per piece (₱)" hint="What the customer pays before bulk discounts. Used to calculate quotes.">
             <Input id="item-price" type="number" min={0} max={MONEY_INPUT_MAX} step="0.01" inputMode="decimal" placeholder="0.00" {...bind('selling_price')} />
           </Field>
           {editing && (
@@ -199,7 +205,7 @@ export function ItemFormDialog({
             <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
               Cancel
             </Button>
-            <Button type="submit" disabled={busy}>
+            <Button busy={busy} type="submit" disabled={busy}>
               {busy ? 'Saving…' : editing ? 'Save changes' : 'Add item'}
             </Button>
           </DialogFooter>

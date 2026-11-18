@@ -241,7 +241,7 @@ export function RosterImportDialog({
           <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button type="button" onClick={submit} disabled={busy || rows.length === 0}>
+          <Button busy={busy} type="button" onClick={submit} disabled={busy || rows.length === 0}>
             {busy ? 'Adding…' : `Add ${rows.length.toLocaleString()} row(s)`}
           </Button>
         </DialogFooter>

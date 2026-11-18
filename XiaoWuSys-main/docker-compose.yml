@@ -1,0 +1,39 @@
+# XiaoWuSys on one machine with Docker:
+#   docker compose up --build        then open http://localhost:3000 (or http://<this-pc>:3000 on a tablet)
+# backend: the API on :5000 with its secrets from Backend/.env and the SQLite cache on a volume.
+# web:     the screens on :3000. It gets NO backend secrets (N2); the browser calls the API directly.
+services:
+  backend:
+    build: ./Backend
+    ports:
+      - "5000:5000"
+    env_file:
+      - path: ./Backend/.env
+        required: false # without it the API runs offline-only on the SQLite cache
+    environment:
+      HOST: 0.0.0.0
+      PORT: "5000"
+      LOCAL_DB_PATH: /data/local_cache.db
+    volumes:
+      - xiaowusys_sqlite_data:/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Web/Dockerfile
+      args:
+        # Optional: a fixed API address, inlined at build time (empty = same host, port 5000)
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  xiaowusys_sqlite_data:

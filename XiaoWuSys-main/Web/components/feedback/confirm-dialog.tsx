@@ -1,6 +1,7 @@
 'use client';
 
 // "Are you sure?" before anything that removes data (ported from Dialogs.jsx ConfirmDialog).
+import { Loader2 } from 'lucide-react';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -19,6 +20,7 @@ export function ConfirmDialog({
   confirmLabel,
   danger = false,
   busy = false,
+  busyLabel = 'Working…',
   onConfirm,
   onCancel,
 }: {
@@ -28,6 +30,8 @@ export function ConfirmDialog({
   confirmLabel: string;
   danger?: boolean;
   busy?: boolean;
+  /** The active verb while busy, e.g. "Approving…" (default "Working…") */
+  busyLabel?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -48,7 +52,8 @@ export function ConfirmDialog({
               onConfirm();
             }}
           >
-            {busy ? 'Working…' : confirmLabel}
+            {busy && <Loader2 className="animate-spin" aria-hidden />}
+            {busy ? busyLabel : confirmLabel}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

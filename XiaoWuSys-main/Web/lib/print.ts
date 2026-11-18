@@ -1,7 +1,7 @@
 // Printing and copying for orders (steering: lib/print.ts). Browser-only: call from handlers.
 // Wording and the receipt layout come from @xiaowu/client-core; every number shown is a value
 // the server returned (totals, payments), never computed here.
-import { formatDateTime, peso, todayInManila } from '@xiaowu/client-core/format';
+import { formatDateTime, formatMobile, peso, todayInManila } from '@xiaowu/client-core/format';
 import { hasOrderNumber } from '@xiaowu/client-core/orders';
 import { escapeHtml, receiptHtml } from '@xiaowu/client-core/receipt';
 import { lineText, type Customer, type OrderDetail, type Payment } from '@/lib/orders';
@@ -38,7 +38,7 @@ export const printJobOrder = (detail: OrderDetail, customer: Customer | undefine
 th,td{border:1px solid #999;padding:6px;text-align:left;font-size:13px;overflow-wrap:anywhere}td.n,th.n{text-align:right}.meta{font-size:13px;margin:2px 0;overflow-wrap:anywhere}.sign{margin-top:40px;display:flex;gap:40px}
 .sign div{flex:1;border-top:1px solid #333;padding-top:4px;font-size:12px}@media print{button{display:none}}</style></head><body>
 <h1>XiaoMei Printshop — Job Order ${escapeHtml(label)}</h1>
-<p class="meta"><b>Customer:</b> ${escapeHtml(customer?.full_name || order.customer_id)} ${customer?.contact_number ? `· ${escapeHtml(customer.contact_number)}` : ''}</p>
+<p class="meta"><b>Customer:</b> ${escapeHtml(customer?.full_name || order.customer_id)} ${customer?.contact_number ? `· ${escapeHtml(formatMobile(customer.contact_number))}` : ''}</p>
 <p class="meta"><b>Status:</b> ${escapeHtml(order.production_status)} · <b>Deadline:</b> ${escapeHtml(formatDateTime(order.production_deadline, { withTime: false }))}</p>
 ${order.design_drive_link ? `<p class="meta"><b>Design file:</b> ${escapeHtml(order.design_drive_link)}</p>` : ''}
 <table><thead><tr><th>Item / material</th><th>Size</th><th>Name</th><th>No.</th><th class="n">Qty</th></tr></thead><tbody>${rows}</tbody></table>
@@ -91,7 +91,7 @@ td.n,th.n{text-align:right;white-space:nowrap}tfoot td{font-weight:bold}.meta{fo
 @media print{button{display:none}}</style></head><body>
 <h1>XiaoMei Printshop</h1>
 <h2>Customer Quotation ${escapeHtml(label)}</h2>
-<p class="meta"><b>Prepared for:</b> ${escapeHtml(customer?.full_name || 'Customer')}${customer?.contact_number ? ` · ${escapeHtml(customer.contact_number)}` : ''}</p>
+<p class="meta"><b>Prepared for:</b> ${escapeHtml(customer?.full_name || 'Customer')}${customer?.contact_number ? ` · ${escapeHtml(formatMobile(customer.contact_number))}` : ''}</p>
 <p class="meta"><b>Date:</b> ${escapeHtml(formatDateTime(todayInManila(), { withTime: false }))} · <b>Needed by:</b> ${escapeHtml(formatDateTime(order.production_deadline, { withTime: false }))}</p>
 <table><thead><tr><th>Item</th><th>Details</th><th class="n">Qty</th><th class="n">Price each</th><th class="n">Amount</th></tr></thead>
 <tbody>${rows}</tbody>

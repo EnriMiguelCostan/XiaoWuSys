@@ -32,9 +32,16 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
   )
 }
 
-function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
+// HCI: a card title is a real heading (default <h2> under the page's <h1>), so screen-reader and
+// keyboard users can jump between cards. Pass as="h1" when the card is the page (login), or
+// as="h3" for a card inside a section.
+function CardTitle({
+  className,
+  as: Heading = "h2",
+  ...props
+}: React.ComponentProps<"h2"> & { as?: "h1" | "h2" | "h3" }) {
   return (
-    <div
+    <Heading
       data-slot="card-title"
       className={cn(
         "font-heading text-base leading-snug font-medium group-data-[size=sm]/card:text-sm",

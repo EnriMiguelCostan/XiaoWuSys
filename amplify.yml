@@ -1,0 +1,28 @@
+# AWS Amplify Hosting (Next.js SSR), monorepo: the app is XiaoWuSys-main/Web.
+# In the Amplify console set the environment variable AMPLIFY_MONOREPO_APP_ROOT=XiaoWuSys-main/Web
+# and NEXT_PUBLIC_API_URL=https://<your API> (Amplify serves the screens over https, so the API
+# must be https too). Never add DATABASE_URL, PG_LISTEN_URL, JWT_SECRET or TEST_DATABASE_URL here:
+# next.config.ts refuses to build with them (N2).
+version: 1
+applications:
+  - appRoot: XiaoWuSys-main/Web
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - nvm use 22 || nvm install 22
+            - npm ci
+            - npm install ../shared/client-core
+            - npm run check-rules
+            - npm run check-contrast
+        build:
+          commands:
+            - npm run build
+      artifacts:
+        baseDirectory: .next
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*
+          - .next/cache/**/*

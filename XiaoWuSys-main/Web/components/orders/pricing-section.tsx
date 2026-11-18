@@ -15,15 +15,15 @@ import { useState } from 'react';
 import { Calculator, FlaskConical, Printer, TriangleAlert } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import type { OrderActions } from '@xiaowu/client-core/permissions';
-import { Field, FormProblem } from '@/components/forms/form-bits';
+import { bannerText, Field, fieldErrorsMap, FormProblem } from '@/components/forms/form-bits';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Badge } from '@/components/ui/badge';
+import { ORDER_SECTION } from '@/components/orders/jump-to-section';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { useApi } from '@/hooks/use-api';
-import { errorMessage } from '@/lib/api';
 import { DISCOUNT_LIMITS, MONEY_INPUT_MAX, TWO_DECIMALS } from '@/lib/input-limits';
 import type { OrderDetail, QuoteBreakdown, QuoteCalculation } from '@/lib/orders';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
@@ -104,6 +104,8 @@ export function QuoteSection({
   const [preview, setPreview] = useState<QuoteCalculation | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
+  // Nielsen H9: the server's VALIDATION_FAILED details, shown next to their fields
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   if (!quote && !actions.generate_quote) return null;
 
@@ -128,6 +130,7 @@ export function QuoteSection({
 
   const send = async (dryRun: boolean) => {
     setProblem('');
+    setFieldErrors({});
     const body = requestBody();
     if (!body) return;
     setBusy(true);
@@ -135,7 +138,8 @@ export function QuoteSection({
     setBusy(false);
     if (!ok) {
       setPreview(null);
-      setProblem(errorMessage(data, 'The quote could not be calculated.'));
+      setFieldErrors(fieldErrorsMap(data));
+      setProblem(bannerText(data, ['discount_amount', 'discount_percent', 'discount_reason'], 'The quote could not be calculated.'));
       return;
     }
     if (dryRun) {
@@ -148,7 +152,7 @@ export function QuoteSection({
   };
 
   return (
-    <section className="space-y-3" aria-labelledby="pricing-title">
+    <section id={ORDER_SECTION.quote} className="scroll-mt-4 space-y-3" aria-labelledby="pricing-title">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 id="pricing-title" className="font-semibold">
           Quote
@@ -209,7 +213,11 @@ export function QuoteSection({
               </ToggleGroup>
               {mode !== 'none' && (
                 <div className="grid gap-3 sm:grid-cols-[10rem_1fr]">
-                  <Field id="discount-input" label={mode === 'percent' ? 'Discount (%)' : 'Discount (₱)'}>
+                  <Field
+                    id="discount-input"
+                    label={mode === 'percent' ? 'Discount (%)' : 'Discount (₱)'}
+                    error={fieldErrors.discount_percent || fieldErrors.discount_amount}
+                  >
                     <Input
                       id="discount-input"
                       type="number"
@@ -228,6 +236,7 @@ export function QuoteSection({
                   <Field
                     id="discount-reason"
                     label="Reason (required)"
+                    error={fieldErrors.discount_reason}
                     hint={`${reason.length}/${DISCOUNT_LIMITS.reasonMax} characters · printed on the quote`}
                   >
                     <Input
@@ -289,8 +298,8 @@ export function QuoteSection({
             <Button type="button" variant="outline" size="sm" onClick={() => setOpen(false)} disabled={busy}>
               Cancel
             </Button>
-            <Button type="button" variant="outline" size="sm" onClick={() => void send(true)} disabled={busy}>
-              {busy ? 'Working…' : 'Preview'}
+            <Button busy={busy} type="button" variant="outline" size="sm" onClick={() => void send(true)} disabled={busy}>
+              {busy ? 'Calculating…' : 'Preview'}
             </Button>
             <Button type="button" size="sm" onClick={() => void send(false)} disabled={busy || !preview}>
               Save quote

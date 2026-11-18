@@ -38,8 +38,12 @@ function NavLinks({
   orientation: 'horizontal' | 'vertical';
   onNavigate?: () => void;
 }) {
+  // HCI (meaning beyond colour, WCAG 1.4.1): the current section is marked by a bar (under the tab,
+  // or at the left in the phone menu) and bold text as well as its colour, plus aria-current="page".
+  // min-h-10: a 40px touch target for shop tablets.
+  const vertical = orientation === 'vertical';
   return (
-    <ul className={cn('flex gap-1', orientation === 'vertical' && 'flex-col')}>
+    <ul className={cn('flex gap-2', vertical && 'flex-col gap-1')}>
       {items.map(({ href, label, icon: Icon }) => {
         const active = href === current;
         return (
@@ -49,8 +53,9 @@ function NavLinks({
               onClick={onNavigate}
               aria-current={active ? 'page' : undefined}
               className={cn(
-                'flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none',
-                active && 'bg-muted text-foreground'
+                'flex min-h-10 items-center gap-2 px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none',
+                vertical ? 'rounded-r-md border-l-2 border-transparent' : 'rounded-t-md border-b-2 border-transparent',
+                active && 'border-primary bg-muted font-semibold text-foreground'
               )}
             >
               <Icon className="size-4" aria-hidden />
@@ -107,7 +112,7 @@ export function AppHeader() {
         {/* Phone / portrait tablet: sections in a sheet */}
         <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
           <SheetTrigger asChild>
-            <Button variant="ghost" size="icon" className="md:hidden" aria-label="Open the menu">
+            <Button title="Open the menu" variant="ghost" size="icon" className="md:hidden" aria-label="Open the menu">
               <Menu aria-hidden />
             </Button>
           </SheetTrigger>
