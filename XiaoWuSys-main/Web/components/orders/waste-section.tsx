@@ -11,7 +11,7 @@ import { useMemo, useState } from 'react';
 import { ChartNoAxesColumnIncreasing, TriangleAlert } from 'lucide-react';
 import { formatDateTime } from '@xiaowu/client-core/format';
 import type { OrderActions } from '@xiaowu/client-core/permissions';
-import { Field, FormProblem } from '@/components/forms/form-bits';
+import { Field, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@/components/forms/bounded-select';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Badge } from '@/components/ui/badge';
@@ -103,8 +103,8 @@ function LossRow({ loss }: { loss: MaterialLoss }) {
         <LossCauseBadge label={loss.category_label} />
         {loss.is_statistical_anomaly && <AnomalyBadge />}
         {loss.sync_status !== 'synced' && (
-          <Badge variant="outline" className={TONE_CLASSES.info.badge}>
-            offline
+          <Badge title="Saved on this computer; it goes to the cloud when the connection is back" variant="outline" className={TONE_CLASSES.info.badge}>
+            Pending sync
           </Badge>
         )}
       </div>
@@ -193,6 +193,7 @@ function LogLossDialog({
         </DialogHeader>
         <form onSubmit={submit} noValidate className="max-w-full min-w-0 space-y-4">
           <FormProblem message={problem} />
+          <RequiredNote />
           {materials.length === 0 ? (
             <p className="text-sm text-muted-foreground">This order has no materials linked to stock. Record the loss from the Catalog instead.</p>
           ) : (
@@ -246,7 +247,7 @@ function LogLossDialog({
             <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
               Cancel
             </Button>
-            <Button type="submit" variant="destructive" disabled={busy || materials.length === 0}>
+            <Button busy={busy} type="submit" variant="destructive" disabled={busy || materials.length === 0}>
               {busy ? 'Saving…' : 'Record loss'}
             </Button>
           </DialogFooter>

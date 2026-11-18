@@ -126,7 +126,7 @@ export function ConflictsDialog({
                 <Skeleton className="h-20 w-full" />
               </div>
             )}
-            {conflicts?.length === 0 && <p className="py-6 text-center text-sm text-muted-foreground">Nothing is waiting for a decision.</p>}
+            {conflicts?.length === 0 && <p className="py-6 text-left text-sm leading-relaxed text-muted-foreground">Nothing is waiting for a decision.</p>}
             {conflicts?.map((c) => (
               <section key={`${c.table}:${c.id}`} className="space-y-2 rounded-md border bg-card p-3" aria-label={c.title}>
                 <h3 className="font-semibold wrap-anywhere">{c.title}</h3>

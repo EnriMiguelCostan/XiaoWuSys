@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { Archive, ArchiveRestore, ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, ClipboardList, CloudOff, PlusCircle, RefreshCw, Search, X } from 'lucide-react';
-import { formatDateTime, peso } from '@xiaowu/client-core/format';
+import { formatDateTime, formatMobile, peso } from '@xiaowu/client-core/format';
 import { orderNumber } from '@xiaowu/client-core/orders';
 import { can } from '@xiaowu/client-core/permissions';
 import { LogoSpinner } from '@/components/brand/brand-logo';
@@ -401,7 +401,7 @@ export function OrdersScreen() {
               aria-describedby={numberError ? 'orders-number-error' : undefined}
               className="min-w-0 bg-card"
             />
-            <Button type="submit" variant="outline" size="icon" aria-label="Find order">
+            <Button title="Find order" type="submit" variant="outline" size="icon" aria-label="Find order">
               <Search aria-hidden />
             </Button>
           </div>
@@ -457,12 +457,15 @@ export function OrdersScreen() {
                 <SortHead label="Deadline" k="production_deadline" sort={sort} onSort={sortByColumn} className="hidden sm:table-cell" />
                 <SortHead label="Status" k="production_status" sort={sort} onSort={sortByColumn} />
                 <SortHead label="Quote" k="total_quote_amount" sort={sort} onSort={sortByColumn} className="hidden text-right md:table-cell" />
+                <TableHead className="w-10">
+                  <span className="sr-only">Open</span>
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {shownOrders.length === 0 && !loading && !loaded?.error && (
                 <TableRow>
-                  <TableCell colSpan={6} className="py-10 text-center whitespace-normal text-muted-foreground">
+                  <TableCell colSpan={7} className="py-10 text-left leading-relaxed whitespace-normal text-muted-foreground">
                     {numberFilter
                       ? `No order number contains "${numberFilter}".`
                       : showArchived
@@ -477,7 +480,8 @@ export function OrdersScreen() {
                 <TableRow
                   key={o.order_id}
                   onClick={() => openOrder(o.order_id)}
-                  className={cn('cursor-pointer', openId === o.order_id && 'bg-muted')}
+                  // HCI signifier: the whole row reacts to the pointer and to keyboard focus on its order button
+                  className={cn('group/row cursor-pointer hover:bg-muted/60 focus-within:bg-muted/60 focus-within:ring-2 focus-within:ring-ring/50 focus-within:ring-inset', openId === o.order_id && 'bg-muted')}
                 >
                   <TableCell>
                     {/* The real control for keyboard and screen-reader users */}
@@ -487,7 +491,9 @@ export function OrdersScreen() {
                         e.stopPropagation();
                         openOrder(o.order_id);
                       }}
-                      className="font-mono text-sm font-medium underline-offset-4 hover:underline focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+                      aria-label={`Open order ${orderNumber(o)}, ${customerName(o.customer_id)}`}
+                      title="Open the order details"
+                      className="min-h-8 font-mono text-sm font-medium underline-offset-4 hover:underline focus-visible:outline-none pointer-coarse:min-h-10"
                     >
                       <HighlightedNumber number={orderNumber(o)} query={numberFilter} />
                     </button>
@@ -503,7 +509,7 @@ export function OrdersScreen() {
                     </span>
                     {customerById.get(o.customer_id)?.contact_number && (
                       <span className="block text-xs text-muted-foreground tabular-nums">
-                        {customerById.get(o.customer_id)?.contact_number}
+                        {formatMobile(customerById.get(o.customer_id)?.contact_number)}
                       </span>
                     )}
                     <span className="block text-xs text-muted-foreground sm:hidden">
@@ -529,7 +535,7 @@ export function OrdersScreen() {
                       <Button
                         variant="outline"
                         size="sm"
-                        className="ml-2 h-6 px-2 text-xs"
+                        className="ml-2 px-2 text-xs"
                         disabled={unarchiving !== null}
                         onClick={(e) => {
                           e.stopPropagation(); // do not open the order
@@ -541,6 +547,9 @@ export function OrdersScreen() {
                     )}
                   </TableCell>
                   <TableCell className="hidden text-right tabular-nums md:table-cell">{peso(o.total_quote_amount)}</TableCell>
+                  <TableCell className="w-10 text-muted-foreground">
+                    <ChevronRight className="size-4 transition-transform group-hover/row:translate-x-0.5" aria-hidden />
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>

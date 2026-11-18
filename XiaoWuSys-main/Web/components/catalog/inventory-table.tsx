@@ -199,7 +199,7 @@ export function InventoryTable({
                     {/* modal={false}: these items open dialogs; a modal menu can leave the page unclickable */}
                     <DropdownMenu modal={false}>
                       <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${item.item_name}`}>
+                        <Button title={`Actions for ${item.item_name}`} variant="ghost" size="icon-sm" aria-label={`Actions for ${item.item_name}`}>
                           <MoreHorizontal aria-hidden />
                         </Button>
                       </DropdownMenuTrigger>

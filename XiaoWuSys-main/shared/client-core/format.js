@@ -24,3 +24,14 @@ export const formatDateTime = (value, { withTime = true, utc = false } = {}) => 
     ? { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }
     : { year: 'numeric', month: 'short', day: 'numeric' });
 };
+
+// HCI (Miller's law, chunking): '09171234567' -> '0917 123 4567', three groups a person can read
+// back over the phone. Display only: forms still send the raw 11 digits, and anything that is not
+// an 11-digit mobile number is shown exactly as stored (never hidden or guessed).
+export const formatMobile = (value) => {
+  if (value === null || value === undefined) return '';
+  const text = String(value).trim();
+  const digits = text.replace(/[\s-]/g, '');
+  if (!MOBILE_PATTERN.test(digits)) return text;
+  return `${digits.slice(0, 4)} ${digits.slice(4, 7)} ${digits.slice(7)}`;
+};

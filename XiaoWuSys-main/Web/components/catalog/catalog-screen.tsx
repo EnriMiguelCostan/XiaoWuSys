@@ -307,13 +307,13 @@ export function CatalogScreen() {
         )}
 
         {snapshot && items.length === 0 && (
-          <p className="rounded-lg border border-dashed bg-card p-8 text-center text-sm text-muted-foreground">
+          <p className="rounded-lg border border-dashed bg-card p-8 text-left text-sm leading-relaxed text-muted-foreground">
             No items in the catalog yet.{' '}
             {canEdit ? 'Click "Add item" or "Import" to add the first ones.' : 'Items added by the people who manage the catalog will appear here.'}
           </p>
         )}
         {items.length > 0 && visible.length === 0 && (
-          <p className="rounded-lg border border-dashed bg-card p-8 text-center text-sm text-muted-foreground">No items match these filters.</p>
+          <p className="rounded-lg border border-dashed bg-card p-8 text-left text-sm leading-relaxed text-muted-foreground">No items match these filters.</p>
         )}
 
         {visible.length > 0 && (

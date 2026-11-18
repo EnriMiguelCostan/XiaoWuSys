@@ -29,7 +29,7 @@ import { LogoSpinner } from '@/components/brand/brand-logo';
 import { useConnection } from '@/components/connection/connection-provider';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
-import { Field, FormProblem } from '@/components/forms/form-bits';
+import { Field, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { PasswordInput } from '@/components/forms/password-input';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -239,7 +239,7 @@ export function AccountsScreen() {
               <TableBody>
                 {list.users.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
+                    <TableCell colSpan={5} className="py-10 text-left leading-relaxed text-muted-foreground">
                       {showRemoved ? 'No removed accounts.' : 'No accounts found.'}
                     </TableCell>
                   </TableRow>
@@ -459,6 +459,7 @@ function CreateAccountDialog({ roles, onClose, onResult, onDone }: AccountDialog
         </DialogHeader>
         <form onSubmit={submit} className="max-w-full min-w-0 space-y-4">
           <FormProblem message={problem} />
+          <RequiredNote />
           <Field id="new-username" label="Username *" hint="No spaces, e.g. rin.staff">
             <Input
               id="new-username"
@@ -503,7 +504,7 @@ function CreateAccountDialog({ roles, onClose, onResult, onDone }: AccountDialog
             <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
               Cancel
             </Button>
-            <Button type="submit" disabled={busy}>
+            <Button busy={busy} type="submit" disabled={busy}>
               {busy ? 'Creating…' : 'Create account'}
             </Button>
           </DialogFooter>
@@ -544,6 +545,7 @@ function ResetPasswordDialog({ account, onClose, onResult, onDone }: AccountDial
           <DialogDescription>Tell the person their new password in person or by private message. They will be signed out everywhere.</DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="max-w-full min-w-0 space-y-4">
+          <RequiredNote />
           <Field id="reset-password" label="Enter new password *" hint={PASSWORD_HINT}>
             <PasswordInput
               id="reset-password"
@@ -560,7 +562,7 @@ function ResetPasswordDialog({ account, onClose, onResult, onDone }: AccountDial
             <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
               Cancel
             </Button>
-            <Button type="submit" disabled={busy}>
+            <Button busy={busy} type="submit" disabled={busy}>
               {busy ? 'Saving…' : 'Set new password'}
             </Button>
           </DialogFooter>

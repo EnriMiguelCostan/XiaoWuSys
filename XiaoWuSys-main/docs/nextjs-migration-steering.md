@@ -272,6 +272,8 @@ Comments are ignored. A reviewed exception is `// rules-guard: allow <rule-id> <
 
 It's a tripwire, not proof; the audit files and review remain the real check.
 
+**Contrast (HCI pass, `docs/hci-design-audit.md`):** after changing a colour token, run `node scripts/check-contrast.mjs` in `Web/`. It checks WCAG 2.1 AA in light and dark mode: 4.5:1 for text, including the state colours on their own badge tint, and 3:1 for control borders and the focus ring.
+
 ---
 
 ## 7. Risks

@@ -139,7 +139,7 @@ export function ConsumableRatesDialog({
           <form onSubmit={save} className="min-w-0 space-y-3">
             {problem && <FormProblem message={problem} />}
             {rows.length === 0 && (
-              <p className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
+              <p className="rounded-md border border-dashed p-4 text-left text-sm leading-relaxed text-muted-foreground">
                 This item uses no consumables yet.
               </p>
             )}
@@ -194,7 +194,7 @@ export function ConsumableRatesDialog({
                       </Select>
                     </Field>
                     {editable && (
-                      <Button
+                      <Button title={`Remove consumable ${i + 1}`}
                         type="button"
                         variant="outline"
                         size="icon"
@@ -221,7 +221,7 @@ export function ConsumableRatesDialog({
                 {editable ? 'Cancel' : 'Close'}
               </Button>
               {editable && (
-                <Button type="submit" disabled={busy}>
+                <Button busy={busy} type="submit" disabled={busy}>
                   {busy ? 'Saving…' : 'Save usage rates'}
                 </Button>
               )}

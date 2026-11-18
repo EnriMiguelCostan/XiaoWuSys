@@ -9,13 +9,14 @@
 // sends the same body again with override: true.
 import { useEffect, useState } from 'react';
 import { History, Link2, ListPlus, Pencil, Shirt, ShieldCheck } from 'lucide-react';
-import { formatDateTime, peso, todayInManila } from '@xiaowu/client-core/format';
+import { formatDateTime, formatMobile, peso, todayInManila } from '@xiaowu/client-core/format';
 import { hasOrderNumber, NUMBER_AFTER_SYNC, shortfallLines } from '@xiaowu/client-core/orders';
 import type { OrderActions } from '@xiaowu/client-core/permissions';
 import { DateInput } from '@/components/forms/date-input';
-import { Field, FormProblem } from '@/components/forms/form-bits';
+import { Field, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
+import { JumpToSection, ORDER_SECTION, type OrderSectionKey } from '@/components/orders/jump-to-section';
 import { RosterImportDialog } from '@/components/orders/roster-import-dialog';
 import { DeadlineBadge, OrderStatusBadge } from '@/components/orders/status-badges';
 import { Badge } from '@/components/ui/badge';
@@ -124,7 +125,7 @@ export function OrderInfo({ detail, customer }: { detail: OrderDetail; customer:
           value={
             customer?.contact_number ? (
               // Plain text on purpose: a tel: link made the browser ask which app to open
-              <span className="tabular-nums select-all">{customer.contact_number}</span>
+              <span className="tabular-nums select-all">{formatMobile(customer.contact_number)}</span>
             ) : (
               <span className="font-normal text-muted-foreground">Not given</span>
             )
@@ -234,9 +235,9 @@ export function DetailsEditor({
 
   return (
     <>
-    <form onSubmit={save} className="space-y-3 rounded-md border bg-muted/30 p-3">
+    <form onSubmit={save} className="space-y-4 rounded-md border bg-muted/30 p-3">
       <FormProblem message={problem} />
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-2">
         {actions.edit_deadline && (
           <Field id="edit-deadline" label="Deadline">
             <DateInput id="edit-deadline" min={today} required value={form.deadline} onChange={(e) => setForm({ ...form, deadline: e.target.value })} />
@@ -253,7 +254,7 @@ export function DetailsEditor({
         <Button type="button" variant="outline" size="sm" onClick={() => setForm(null)} disabled={busy}>
           Cancel
         </Button>
-        <Button type="submit" size="sm" disabled={busy}>
+        <Button busy={busy} type="submit" size="sm" disabled={busy}>
           {busy ? 'Saving…' : 'Save'}
         </Button>
       </div>
@@ -310,7 +311,7 @@ export function DesignLink({
           <Button type="button" variant="outline" size="sm" onClick={() => setDraft(null)} disabled={busy}>
             Cancel
           </Button>
-          <Button type="submit" size="sm" disabled={busy}>
+          <Button busy={busy} type="submit" size="sm" disabled={busy}>
             {busy ? 'Saving…' : 'Save link'}
           </Button>
         </div>
@@ -452,7 +453,7 @@ export function MaterialsSection({
   });
 
   return (
-    <section className="space-y-3" aria-labelledby="materials-title">
+    <section id={ORDER_SECTION.materials} className="scroll-mt-4 space-y-3" aria-labelledby="materials-title">
       <h3 id="materials-title" className="font-semibold">
         Materials{' '}
         <span className="font-normal text-muted-foreground">
@@ -495,9 +496,10 @@ export function MaterialsSection({
 
       {actions.add_items &&
         (line ? (
-          <form onSubmit={add} noValidate className="space-y-3 rounded-md border bg-muted/30 p-3">
+          <form onSubmit={add} noValidate className="space-y-4 rounded-md border bg-muted/30 p-3">
             <FormProblem message={problem} />
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
+            <RequiredNote />
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-6">
               <Field id="line-product_type" label="What *" className="col-span-2 sm:col-span-3">
                 <Input id="line-product_type" maxLength={PRINT_LINE_LIMITS.productType} autoComplete="off" {...bind('product_type')} />
                 <FieldError id="line-product_type-error" message={shown('product_type')} />
@@ -569,7 +571,7 @@ export function MaterialsSection({
               <Button type="button" variant="outline" size="sm" onClick={() => setLine(null)} disabled={busy}>
                 Done
               </Button>
-              <Button type="submit" size="sm" disabled={busy}>
+              <Button busy={busy} type="submit" size="sm" disabled={busy}>
                 {busy ? 'Adding…' : 'Add'}
               </Button>
             </div>
@@ -641,23 +643,29 @@ export function approvalNotes(detail: OrderDetail) {
   const dp = totals.downpayment;
   const blocking: string[] = [];
   const notes: string[] = [];
+  // HCI: which section of this sheet resolves each blocker (shown as a "Go to …" link)
+  const fixes = new Map<string, OrderSectionKey>();
+  const block = (text: string, fix?: OrderSectionKey) => {
+    blocking.push(text);
+    if (fix) fixes.set(text, fix);
+  };
   if (order.sync_status !== 'synced' || detail.source === 'local') {
     blocking.push('Approval needs an internet connection, and the order must be synced to the cloud.');
   }
-  if (dp && !dp.required) blocking.push('Set a quote amount for this order first.');
-  else if (dp && !dp.met) blocking.push('The downpayment (half of the quote) is not complete yet.');
+  if (dp && !dp.required) block('Set a quote amount for this order first.', 'quote');
+  else if (dp && !dp.met) block('The downpayment (half of the quote) is not complete yet.', 'payments');
   const offlinePayments = payments.filter((p) => p.sync_status !== 'synced').length;
   if (offlinePayments) notes.push(`${offlinePayments} payment(s) saved offline do not count until they sync.`);
-  if (items.length === 0) blocking.push('Add at least one material to this order.');
+  if (items.length === 0) block('Add at least one material to this order.', 'materials');
   if (detail.stock_check && !detail.stock_check.sufficient) {
     blocking.push(...shortfallLines(detail.stock_check).map((l) => `Not enough stock: ${l}`));
   }
-  return { blocking, notes: [...blocking, ...notes] };
+  return { blocking, notes: [...blocking, ...notes], fixes };
 }
 
 export function ApprovalPanel({ detail, canApprove }: { detail: OrderDetail; canApprove: boolean }) {
   const dp = detail.totals.downpayment;
-  const { notes } = approvalNotes(detail);
+  const { notes, fixes } = approvalNotes(detail);
   return (
     <section className={cn('space-y-2 rounded-md border p-3', TONE_CLASSES.info.banner)} aria-labelledby="approval-title">
       <h3 id="approval-title" className="flex items-center gap-2 font-semibold">
@@ -689,9 +697,17 @@ export function ApprovalPanel({ detail, canApprove }: { detail: OrderDetail; can
         {detail.order.stock_reserved ? 'Materials are already reserved for this order.' : 'Approving will reserve this order’s materials.'}
       </p>
       {notes.length > 0 && (
-        <ul className="list-disc space-y-0.5 pl-5 text-xs text-foreground/80 wrap-anywhere">
+        <ul className="list-disc space-y-1 pl-5 text-xs leading-relaxed text-foreground/80 wrap-anywhere">
           {notes.map((n) => (
-            <li key={n}>{n}</li>
+            <li key={n}>
+              {n}
+              {fixes.get(n) && (
+                <>
+                  {' '}
+                  <JumpToSection to={fixes.get(n) as OrderSectionKey} />
+                </>
+              )}
+            </li>
           ))}
         </ul>
       )}

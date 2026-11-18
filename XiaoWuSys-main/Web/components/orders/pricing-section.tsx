@@ -18,6 +18,7 @@ import type { OrderActions } from '@xiaowu/client-core/permissions';
 import { Field, FormProblem } from '@/components/forms/form-bits';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Badge } from '@/components/ui/badge';
+import { ORDER_SECTION } from '@/components/orders/jump-to-section';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -148,7 +149,7 @@ export function QuoteSection({
   };
 
   return (
-    <section className="space-y-3" aria-labelledby="pricing-title">
+    <section id={ORDER_SECTION.quote} className="scroll-mt-4 space-y-3" aria-labelledby="pricing-title">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 id="pricing-title" className="font-semibold">
           Quote
@@ -289,8 +290,8 @@ export function QuoteSection({
             <Button type="button" variant="outline" size="sm" onClick={() => setOpen(false)} disabled={busy}>
               Cancel
             </Button>
-            <Button type="button" variant="outline" size="sm" onClick={() => void send(true)} disabled={busy}>
-              {busy ? 'Working…' : 'Preview'}
+            <Button busy={busy} type="button" variant="outline" size="sm" onClick={() => void send(true)} disabled={busy}>
+              {busy ? 'Calculating…' : 'Preview'}
             </Button>
             <Button type="button" size="sm" onClick={() => void send(false)} disabled={busy || !preview}>
               Save quote

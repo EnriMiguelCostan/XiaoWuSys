@@ -13,11 +13,11 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { Clock, Plus, PlusCircle, Trash2, TriangleAlert, XCircle } from 'lucide-react';
-import { MOBILE_PATTERN, todayInManila } from '@xiaowu/client-core/format';
+import { formatDateTime, formatMobile, MOBILE_PATTERN, todayInManila } from '@xiaowu/client-core/format';
 import { NUMBER_AFTER_SYNC, orderNumber } from '@xiaowu/client-core/orders';
 import { can } from '@xiaowu/client-core/permissions';
 import { DateInput } from '@/components/forms/date-input';
-import { Field, FormProblem } from '@/components/forms/form-bits';
+import { Field, fieldError, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { ShortageTable } from '@/components/orders/shortage-table';
 import { Button } from '@/components/ui/button';
@@ -64,6 +64,7 @@ interface CreateResponse {
   error?: string;
   order?: Order;
   items?: unknown[];
+  source?: 'cloud' | 'local';
   shortages?: Shortage[];
   missing_inventory_ids?: string[];
 }
@@ -94,6 +95,9 @@ export function CreateOrderScreen() {
   const [haltMode, setHaltMode] = useState<'choose' | 'delay'>('choose');
   const [delayedDeadline, setDelayedDeadline] = useState('');
   const [haltProblem, setHaltProblem] = useState('');
+  // The server's last 400 answer, so each message is shown next to the field it names
+  const [failed, setFailed] = useState<unknown>(null);
+  const errorFor = (field: string) => fieldError(failed, field);
 
   // With no saved customers yet, the form starts on "new customer"
   const addingCustomer = newCustomerMode || (customersLoaded && customers.length === 0);
@@ -126,14 +130,26 @@ export function CreateOrderScreen() {
     setHaltProblem('');
   };
 
-  const created = (data: CreateResponse, title: string) => {
+  // HCI (Norman, gulf of evaluation): say what happened, to which order and customer, where it
+  // was saved, and what comes next
+  const created = (data: CreateResponse, title: string, customerName: string) => {
+    const offline = data.source === 'local' || !data.order?.tracking_no;
+    const deadlineText = data.order?.production_deadline ? formatDateTime(data.order.production_deadline, { withTime: false }) : null;
     setResult({
       type: 'success',
       title,
-      message:
-        (data.order?.tracking_no ? `Order ${data.order.tracking_no} was saved.\n` : `The order was saved offline. ${NUMBER_AFTER_SYNC}\n`) +
-        `${(data.items ?? []).length} material(s) reserved in the Catalog. You can follow it on the Orders page.` +
-        (canSetQuote ? '' : '\nThe Owner will set the price.'),
+      message: [
+        offline
+          ? `The order for ${customerName} was saved on this computer (offline). ${NUMBER_AFTER_SYNC}`
+          : `Order ${data.order?.tracking_no} for ${customerName} was saved to the cloud.`,
+        deadlineText ? `Deadline: ${deadlineText}.` : null,
+        `${(data.items ?? []).length} material(s) reserved in the Catalog.`,
+        canSetQuote
+          ? 'Next: set the quote, record the downpayment (half of the quote), then approve the job order (Orders page).'
+          : 'Next: the Owner sets the price and approves the job order. You can follow it on the Orders page.',
+      ]
+        .filter(Boolean)
+        .join('\n'),
     });
     resetForm();
     refreshInventory();
@@ -142,6 +158,9 @@ export function CreateOrderScreen() {
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setProblem('');
+    setFailed(null);
+    // Named in the result message (captured now: the new-customer fields are cleared once it is saved)
+    const whoName = addingCustomer ? newCustomer.full_name.trim() : customers.find((c) => c.customer_id === customerId)?.full_name ?? 'the customer';
 
     // Input checks only (format, not business rules)
     const required_items = lines.map((l) => ({ inventory_id: l.inventory_id, quantity_needed: Number(l.quantity) }));
@@ -176,6 +195,7 @@ export function CreateOrderScreen() {
         if (res.ok && res.data.customer) resolvedCustomerId = res.data.customer.customer_id;
         else if (res.status === 409 && res.data.existing) resolvedCustomerId = res.data.existing.customer_id; // same customer already saved
         else {
+          setFailed(res.data);
           setProblem(errorMessage(res.data, 'The customer could not be saved. Please try again.'));
           return;
         }
@@ -198,13 +218,14 @@ export function CreateOrderScreen() {
       };
       const { ok, status, data } = await api<CreateResponse>('POST', '/orders', payload);
       if (ok) {
-        created(data, 'Order created');
+        created(data, 'Order created', whoName);
         return;
       }
       if (status === 409 && data.error === 'INSUFFICIENT_INVENTORY') {
         setHalt({ message: errorMessage(data, 'There is not enough stock for this order right now.'), shortages: data.shortages ?? [], payload });
         return;
       }
+      setFailed(data);
       // Name the missing materials instead of showing their internal IDs
       const missing = (data.missing_inventory_ids ?? [])
         .map((id) => materials.find((m) => m.inventory_id === id)?.item_name)
@@ -260,6 +281,7 @@ export function CreateOrderScreen() {
 
       <form onSubmit={submit} className="space-y-6">
         <FormProblem message={problem} />
+        <RequiredNote />
 
         {/* Customer */}
         <Card>
@@ -279,7 +301,7 @@ export function CreateOrderScreen() {
               <Skeleton className="h-9 w-full" />
             ) : addingCustomer ? (
               <div className="grid gap-4 sm:grid-cols-2">
-                <Field id="cust-name" label="Full name *" className="sm:col-span-2">
+                <Field id="cust-name" label="Full name *" error={errorFor('full_name')} className="sm:col-span-2">
                   <Input
                     id="cust-name"
                     required
@@ -291,6 +313,7 @@ export function CreateOrderScreen() {
                 <Field
                   id="cust-mobile"
                   label="Mobile number"
+                  error={errorFor('contact_number')}
                   hint={
                     <span className={cn(mobile && (MOBILE_PATTERN.test(mobile) ? 'text-success' : 'text-warning'))}>{mobileHint}</span>
                   }
@@ -329,7 +352,7 @@ export function CreateOrderScreen() {
                       key={c.customer_id}
                       value={c.customer_id}
                       label={c.full_name}
-                      suffix={c.contact_number ? `· ${c.contact_number}` : undefined}
+                      suffix={c.contact_number ? `· ${formatMobile(c.contact_number)}` : undefined}
                     >
                       {c.full_name}
                     </BoundedSelectItem>
@@ -346,7 +369,7 @@ export function CreateOrderScreen() {
             <CardTitle>Schedule and price</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
-            <Field id="order-deadline" label="Production deadline *">
+            <Field id="order-deadline" label="Production deadline *" error={errorFor('production_deadline')}>
               <DateInput id="order-deadline" min={today} required value={deadline} onChange={(e) => setDeadline(e.target.value)} />
             </Field>
             {canSetQuote ? (
@@ -412,7 +435,7 @@ export function CreateOrderScreen() {
                       onChange={(e) => setLine(line.key, { quantity: e.target.value })}
                     />
                   </div>
-                  <Button
+                  <Button title={`Remove material ${index + 1}`}
                     type="button"
                     variant="ghost"
                     size="icon"
@@ -485,7 +508,7 @@ export function CreateOrderScreen() {
                 </Button>
               </>
             ) : (
-              <Button onClick={() => resolveHalt('Delayed')} disabled={busy}>
+              <Button busy={busy} onClick={() => resolveHalt('Delayed')} disabled={busy}>
                 <Clock aria-hidden /> {busy ? 'Saving…' : 'Save as delayed'}
               </Button>
             )}

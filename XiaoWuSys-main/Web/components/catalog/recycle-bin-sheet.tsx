@@ -176,7 +176,7 @@ export function RecycleBinSheet({
           {loading && !page && <LogoSpinner label="Loading the Recycle Bin…" className="flex-1" />}
 
           {!loading && page && page.items.length === 0 && (
-            <p className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">The Recycle Bin is empty.</p>
+            <p className="rounded-md border border-dashed p-8 text-left text-sm leading-relaxed text-muted-foreground">The Recycle Bin is empty.</p>
           )}
 
           {page?.items.map((item) => (

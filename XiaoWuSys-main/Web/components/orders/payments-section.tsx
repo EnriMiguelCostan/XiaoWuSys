@@ -11,8 +11,9 @@ import { useState } from 'react';
 import { Ban, Printer, TriangleAlert, Wallet } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
+import { JumpToSection, ORDER_SECTION } from '@/components/orders/jump-to-section';
 import { PaymentStatusBadge } from '@/components/orders/status-badges';
-import { FormProblem } from '@/components/forms/form-bits';
+import { FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -100,7 +101,7 @@ export function PaymentsSection({
   };
 
   return (
-    <section className="space-y-3" aria-labelledby="payments-title">
+    <section id={ORDER_SECTION.payments} className="scroll-mt-4 space-y-3" aria-labelledby="payments-title">
       <h3 id="payments-title" className="flex items-center gap-2 font-semibold">
         Payments <PaymentStatusBadge status={totals.payment_status} />
       </h3>
@@ -140,8 +141,8 @@ export function PaymentsSection({
                   <TableCell className="whitespace-normal">
                     {formatDateTime(p.payment_date, { utc: true })}
                     {p.sync_status !== 'synced' && (
-                      <Badge variant="outline" className={cn('ml-1', TONE_CLASSES.info.badge)}>
-                        offline
+                      <Badge title="Saved on this computer; it goes to the cloud when the connection is back" variant="outline" className={cn('ml-1', TONE_CLASSES.info.badge)}>
+                        Pending sync
                       </Badge>
                     )}
                     {p.voided && (
@@ -202,9 +203,9 @@ export function PaymentsSection({
       </dl>
 
       {actions.record_payment ? (
-        <form onSubmit={submit} className="space-y-3 rounded-md border bg-muted/30 p-3">
+        <form onSubmit={submit} className="space-y-4 rounded-md border bg-muted/30 p-3">
           <FormProblem message={problem} />
-          <div className="grid gap-3 sm:grid-cols-[2fr_1fr]">
+          <div className="grid gap-4 sm:grid-cols-[2fr_1fr]">
             <div className="flex min-w-0 flex-col gap-1.5">
               <Label htmlFor="payment-value">Amount (₱)</Label>
               <Input
@@ -240,13 +241,24 @@ export function PaymentsSection({
             <Button type="button" variant="outline" disabled={busy} onClick={() => setAmount(String(actions.max_payment))}>
               Pay full balance
             </Button>
-            <Button type="submit" disabled={busy}>
+            <Button busy={busy} type="submit" disabled={busy}>
               <Wallet aria-hidden /> {busy ? 'Saving…' : 'Add payment'}
             </Button>
           </div>
         </form>
       ) : (
-        actions.payment_blocked_reason && <p className="text-sm text-muted-foreground">{actions.payment_blocked_reason}</p>
+        actions.payment_blocked_reason && (
+          <p className="max-w-prose text-sm leading-relaxed text-muted-foreground">
+            {actions.payment_blocked_reason}
+            {/* HCI: the server says there is no quote yet: offer the way to the section that sets it */}
+            {detail.quote && !detail.quote.has_quote && (
+              <>
+                {' '}
+                <JumpToSection to="quote" />
+              </>
+            )}
+          </p>
+        )
       )}
       {voiding && (
         <VoidPaymentDialog
@@ -334,8 +346,11 @@ function VoidPaymentDialog({
           }}
         >
           <FormProblem message={problem} />
+          <RequiredNote />
           <div className="min-w-0 space-y-1.5">
-            <Label htmlFor="void-reason">Reason for voiding *</Label>
+            <Label htmlFor="void-reason">Reason for voiding <span aria-hidden className="text-danger">*</span>
+              <span className="sr-only">(required)</span>
+            </Label>
             <textarea
               id="void-reason"
               rows={3}
@@ -359,11 +374,11 @@ function VoidPaymentDialog({
               Keep payment
             </Button>
             {needsConfirm ? (
-              <Button type="button" variant="destructive" onClick={() => void send(true)} disabled={busy}>
+              <Button busy={busy} type="button" variant="destructive" onClick={() => void send(true)} disabled={busy}>
                 <Ban aria-hidden /> {busy ? 'Voiding…' : 'Void anyway'}
               </Button>
             ) : (
-              <Button type="submit" variant="destructive" disabled={busy}>
+              <Button busy={busy} type="submit" variant="destructive" disabled={busy}>
                 <Ban aria-hidden /> {busy ? 'Voiding…' : 'Void payment'}
               </Button>
             )}

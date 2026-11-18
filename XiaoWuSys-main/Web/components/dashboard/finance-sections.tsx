@@ -15,7 +15,7 @@ import { Cell } from '@/components/dashboard/dashboard-parts';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { DateInput } from '@/components/forms/date-input';
-import { Field, FormProblem } from '@/components/forms/form-bits';
+import { Field, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { AnomalyBadge, LossCauseBadge } from '@/components/orders/waste-section';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -281,8 +281,8 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
                           <Cell className="font-medium" value={x.category} />
                           <Cell className="text-xs text-muted-foreground" value={`${x.description} · ${x.recorded_by_name}`} />
                           {x.sync_status !== 'synced' && (
-                            <Badge variant="outline" className={TONE_CLASSES.info.badge}>
-                              offline
+                            <Badge title="Saved on this computer; it goes to the cloud when the connection is back" variant="outline" className={TONE_CLASSES.info.badge}>
+                              Pending sync
                             </Badge>
                           )}
                         </TableCell>
@@ -299,7 +299,7 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
                               <Eye aria-hidden />
                             </Button>
                             {data.can_delete && x.can_delete && (
-                              <Button variant="ghost" size="icon-sm" onClick={() => setRemoving(x)} aria-label={`Remove ${x.category}: ${x.description}`}>
+                              <Button title={`Remove ${x.category}: ${x.description}`} variant="ghost" size="icon-sm" onClick={() => setRemoving(x)} aria-label={`Remove ${x.category}: ${x.description}`}>
                                 <Trash2 aria-hidden />
                               </Button>
                             )}
@@ -316,9 +316,10 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
               <strong className="tabular-nums">{peso(data.total)}</strong>
             </p>
 
-            <form onSubmit={add} noValidate className="space-y-3 rounded-md border bg-muted/30 p-3" aria-label="Record an expense">
+            <form onSubmit={add} noValidate className="space-y-4 rounded-md border bg-muted/30 p-3" aria-label="Record an expense">
               <FormProblem message={problem} />
-              <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+              <RequiredNote />
+              <div className="grid min-w-0 gap-4 sm:grid-cols-2">
                 <Field id="overhead-day" label="Date *">
                   <DateInput id="overhead-day" required value={day} onChange={(e) => setDay(e.target.value)} disabled={busy} />
                 </Field>
@@ -364,7 +365,7 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
                 </Field>
               </div>
               <div className="flex justify-end">
-                <Button type="submit" disabled={busy}>
+                <Button busy={busy} type="submit" disabled={busy}>
                   {busy ? 'Saving…' : 'Record expense'}
                 </Button>
               </div>
@@ -480,8 +481,8 @@ export function PnlCard({ onResult }: { onResult: OnResult }) {
           </Field>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => void generate()} disabled={busy}>
-            <Sparkles aria-hidden /> {busy ? 'Working…' : 'Generate P&L'}
+          <Button busy={busy} onClick={() => void generate()} disabled={busy}>
+            <Sparkles aria-hidden /> {busy ? 'Calculating…' : 'Generate P&L'}
           </Button>
           <Button variant="outline" onClick={() => void download()} disabled={busy}>
             <Download aria-hidden /> Download P&amp;L (Excel)

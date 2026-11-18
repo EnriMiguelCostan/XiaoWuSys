@@ -9,7 +9,7 @@
 // the cause and may warn that no free stock is left (replacement_warning). Both are shown as sent.
 import { useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
-import { Field, FormProblem } from '@/components/forms/form-bits';
+import { Field, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Button } from '@/components/ui/button';
 import {
@@ -134,6 +134,7 @@ export function StockDialog({
 
         <form onSubmit={submit} className="max-w-full min-w-0 space-y-4">
           <FormProblem message={problem} />
+          <RequiredNote />
 
           <Field id="stock-item" label="Item *">
             <Select value={itemId} onValueChange={setItemId}>
@@ -241,7 +242,7 @@ export function StockDialog({
             <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
               Cancel
             </Button>
-            <Button type="submit" variant={action === 'subtract' ? 'destructive' : 'default'} disabled={busy || items.length === 0}>
+            <Button busy={busy} type="submit" variant={action === 'subtract' ? 'destructive' : 'default'} disabled={busy || items.length === 0}>
               {action === 'add' ? <Plus aria-hidden /> : <Minus aria-hidden />}
               {busy ? 'Saving…' : action === 'add' ? 'Add to stock' : recordsLoss ? 'Record loss' : 'Subtract from stock'}
             </Button>
