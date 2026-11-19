@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import * as core from '../index.js';
 import { resolveApiBase, socketUrlFor } from '../config.js';
-import { createApi, errorText } from '../api.js';
+import { createApi, errorText, FRIENDLY_ERRORS } from '../api.js';
 import { can, orderActions, NO_ORDER_ACTIONS, roleHelp } from '../permissions.js';
 import { receiptHtml } from '../receipt.js';
 
@@ -83,6 +83,24 @@ describe('createApi keeps its contract', () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+
+  it('keeps login refusals word for word (an offline wrong password is not "session expired")', () => {
+    const offlineWrong = 'Wrong username or password. (The system is offline right now: only accounts that have logged in on this computer before can log in.)';
+    assert.equal(errorText({ error: 'INVALID_CREDENTIALS', message: offlineWrong, offline: true }, 'x'), offlineWrong);
+    const locked = 'Too many wrong passwords. For your security, please wait 15 minute(s) and try again.';
+    assert.equal(errorText({ error: 'TOO_MANY_ATTEMPTS', message: locked }, 'x'), locked);
+    const off = 'This account has been deactivated. Please ask an Owner or Admin.';
+    assert.equal(errorText({ error: 'ACCOUNT_DEACTIVATED', message: off }, 'x'), off);
+    assert.equal(errorText({ error: 'INVALID_CREDENTIALS' }, 'Login failed.'), 'Login failed.', 'no message: the fallback');
+  });
+
+  it('still maps real session errors to their friendly session messages', () => {
+    for (const code of ['NOT_LOGGED_IN', 'SESSION_ENDED', 'SESSION_EXPIRED', 'INVALID_SESSION']) {
+      assert.equal(errorText({ error: code, message: 'server text' }, 'x'), FRIENDLY_ERRORS[code]);
+    }
+    // A code-less token complaint (older servers) is still read as an expired session
+    assert.equal(errorText({ message: 'invalid token' }, 'x'), 'Your session has expired. Please log in again.');
   });
 });
 

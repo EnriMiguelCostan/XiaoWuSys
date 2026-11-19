@@ -23,19 +23,8 @@ const createUsersCloud = (users, audit = []) => {
       const q = sql.replace(/\s+/g, ' ').trim();
       if (/^SELECT .* FROM users WHERE username = \$1/.test(q)) return { rows: [...users.values()].filter((u) => u.username === p[0]).map(copy) };
       if (/^SELECT .* FROM users WHERE user_id = \$1/.test(q)) return { rows: users.has(p[0]) ? [copy(users.get(p[0]))] : [] };
-      // GET /users: the everyday list (not removed) or "Show removed" (removed only)
-      if (/^SELECT .* FROM users WHERE removed_at IS NULL ORDER BY/.test(q)) return { rows: [...users.values()].filter((u) => !u.removed_at).map(copy) };
-      if (/^SELECT .* FROM users WHERE removed_at IS NOT NULL ORDER BY/.test(q)) return { rows: [...users.values()].filter((u) => u.removed_at).map(copy) };
-      // Remove / restore lock the one account
-      if (/^SELECT .* FROM users WHERE user_id = \$1 FOR UPDATE$/.test(q)) return { rows: users.has(p[0]) ? [copy(users.get(p[0]))] : [] };
-      if (q.startsWith('UPDATE users SET is_active = FALSE, removed_at = NOW()')) {
-        Object.assign(users.get(p[0]), { is_active: false, removed_at: '2026-11-16 12:00:00', removed_by: p[1], tokens_valid_after: cutoffText(p[2]) });
-        return { rows: [copy(users.get(p[0]))], rowCount: 1 };
-      }
-      if (q.startsWith('UPDATE users SET removed_at = NULL, removed_by = NULL')) {
-        Object.assign(users.get(p[0]), { removed_at: null, removed_by: null });
-        return { rows: [copy(users.get(p[0]))], rowCount: 1 };
-      }
+      // GET /users: every account; the route splits Active / Deactivated on is_active
+      if (/^SELECT .* FROM users ORDER BY/.test(q)) return { rows: [...users.values()].map(copy) };
       if (q.startsWith('INSERT INTO audit_log')) {
         audit.push({ entity: p[1], entity_id: p[2], action: p[3], performed_by: p[5] });
         return { rows: [], rowCount: 1 };
@@ -63,6 +52,8 @@ const createUsersCloud = (users, audit = []) => {
         const other = [...users.values()].some((u) => u.user_id !== id && u.is_active && (managerRoles || []).includes(u.role));
         if (!users.has(id) || (managerRoles && !staysManager && !other)) return { rows: [], rowCount: 0 };
         Object.assign(users.get(id), { role, is_active: isActive, tokens_valid_after: cutoffText(at) });
+        // Same as the route's CASE: reactivating clears what the retired "remove" flow left
+        if (isActive) Object.assign(users.get(id), { removed_at: null, removed_by: null });
         return { rows: [copy(users.get(id))], rowCount: 1 };
       }
       if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(q)) return { rows: [] };
@@ -200,50 +191,99 @@ describe('Account management (online)', () => {
     assert.ok(await sessionOk(r.body.token), 'the returned token works');
   });
 
-  it('removes a Staff account (deactivated + hidden, kept for the records) and restores it', async () => {
+  it('deactivates into the Deactivated view and reactivates back, never deleting the row', async () => {
     const admin = await login('admin');
     const staffSession = await login('staff', 'NewPass99');
 
-    // Owner and Admin accounts can never be removed; nobody removes themselves
-    const manager = await call('POST', '/api/auth/users/u-owner/remove', undefined, admin);
-    assert.deepEqual([manager.status, manager.body.error], [403, 'CANNOT_REMOVE_MANAGER']);
-    assert.equal((await call('POST', '/api/auth/users/u-admin/remove', undefined, admin)).status, 400);
-    // Production / Staff cannot remove anyone
-    assert.equal((await call('POST', '/api/auth/users/u-owner/remove', undefined, staffSession)).status, 403);
-
-    const r = await call('POST', '/api/auth/users/u-staff/remove', undefined, admin);
+    const r = await call('PATCH', '/api/auth/users/u-staff', { is_active: false }, admin);
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.equal(r.body.user.is_active, false);
-    assert.ok(r.body.user.removed_at);
     assert.ok(!(await sessionOk(staffSession)), 'signed out at once');
     assert.equal((await call('POST', '/api/auth/login', { username: 'staff', password: 'NewPass99' })).status, 403);
-    assert.deepEqual(audit.at(-1), { entity: 'users', entity_id: 'u-staff', action: 'account_removed', performed_by: 'u-admin' });
+    assert.deepEqual(audit.at(-1), { entity: 'users', entity_id: 'u-staff', action: 'account_deactivated', performed_by: 'u-admin' });
     assert.ok(users.has('u-staff'), 'never deleted');
 
-    // Hidden from the everyday list, shown by "Show removed" only
-    const everyday = await call('GET', '/api/auth/users', undefined, admin);
-    assert.ok(!everyday.body.users.some((u) => u.user_id === 'u-staff'));
-    const removed = await call('GET', '/api/auth/users?removed=only', undefined, admin);
-    assert.deepEqual(removed.body.users.map((u) => u.user_id), ['u-staff']);
-    assert.equal(removed.body.removed_only, true);
-    assert.equal((await call('GET', '/api/auth/users?removed=maybe', undefined, admin)).status, 400);
+    // is_active decides the view; counts cover both sides
+    const active = await call('GET', '/api/auth/users?status=active', undefined, admin);
+    assert.equal(active.status, 200);
+    assert.ok(!active.body.users.some((u) => u.user_id === 'u-staff'));
+    assert.ok(active.body.users.every((u) => u.is_active));
+    const inactive = await call('GET', '/api/auth/users?status=inactive', undefined, admin);
+    assert.ok(inactive.body.users.some((u) => u.user_id === 'u-staff'));
+    assert.ok(inactive.body.users.every((u) => !u.is_active));
+    assert.equal(inactive.body.status, 'inactive');
+    assert.deepEqual(inactive.body.counts, {
+      active: active.body.users.length, inactive: inactive.body.users.length, total: users.size
+    });
+    assert.equal((await call('GET', '/api/auth/users', undefined, admin)).body.users.length, users.size, 'no status: every account');
+    assert.equal((await call('GET', '/api/auth/users?status=maybe', undefined, admin)).status, 400);
 
-    // A removed account takes no other change until restored
-    const again = await call('POST', '/api/auth/users/u-staff/remove', undefined, admin);
-    assert.equal(again.body.error, 'ALREADY_REMOVED');
-    const activate = await call('PATCH', '/api/auth/users/u-staff', { is_active: true }, admin);
-    assert.deepEqual([activate.status, activate.body.error], [409, 'ACCOUNT_REMOVED']);
+    // A deactivated account can still have its password reset (it stays deactivated)
     const reset = await call('POST', '/api/auth/users/u-staff/reset-password', { new_password: 'Other123' }, admin);
-    assert.deepEqual([reset.status, reset.body.error], [409, 'ACCOUNT_REMOVED']);
+    assert.equal(reset.status, 200);
+    assert.equal(users.get('u-staff').is_active, false);
 
-    // Restore: back in the list, still deactivated until a manager reactivates it
-    const back = await call('POST', '/api/auth/users/u-staff/restore', undefined, admin);
-    assert.equal(back.status, 200, JSON.stringify(back.body));
-    assert.deepEqual([back.body.user.removed_at, back.body.user.is_active], [null, false]);
-    assert.equal(audit.at(-1).action, 'account_restored');
-    assert.equal((await call('POST', '/api/auth/users/u-staff/restore', undefined, admin)).body.error, 'NOT_REMOVED');
-    assert.ok((await call('GET', '/api/auth/users', undefined, admin)).body.users.some((u) => u.user_id === 'u-staff'));
-    assert.equal((await call('PATCH', '/api/auth/users/u-staff', { is_active: true }, admin)).status, 200);
-    await login('staff', 'NewPass99');
+    const back = await call('PATCH', '/api/auth/users/u-staff', { is_active: true }, admin);
+    assert.equal(back.status, 200);
+    assert.equal(audit.at(-1).action, 'account_reactivated');
+    assert.ok((await call('GET', '/api/auth/users?status=active', undefined, admin)).body.users.some((u) => u.user_id === 'u-staff'));
+    await login('staff', 'Other123');
+  });
+
+  it('shows an account removed by the old flow as Deactivated, and reactivating it clears removed_at', async () => {
+    const admin = await login('admin');
+    // What migration 014's "remove" left behind: deactivated, with removed_at / removed_by set
+    Object.assign(users.get('u-staff'), { is_active: false, removed_at: '2026-11-16 12:00:00', removed_by: 'u-admin' });
+
+    const inactive = await call('GET', '/api/auth/users?status=inactive', undefined, admin);
+    assert.ok(inactive.body.users.some((u) => u.user_id === 'u-staff'), 'not hidden or orphaned');
+    const back = await call('PATCH', '/api/auth/users/u-staff', { is_active: true }, admin);
+    assert.equal(back.status, 200, 'not trapped by the old ACCOUNT_REMOVED rule');
+    assert.deepEqual([back.body.user.is_active, back.body.user.removed_at], [true, null]);
+    assert.equal(users.get('u-staff').removed_by, null);
+  });
+
+  it('retires the separate remove / restore endpoints with a clear 410', async () => {
+    const admin = await login('admin');
+    for (const action of ['remove', 'restore']) {
+      const r = await call('POST', `/api/auth/users/u-staff/${action}`, undefined, admin);
+      assert.deepEqual([r.status, r.body.error], [410, 'ENDPOINT_RETIRED']);
+    }
+    // Still manager-only, like every account route
+    const staffSession = await login('staff', 'Other123');
+    assert.equal((await call('POST', '/api/auth/users/u-owner/remove', undefined, staffSession)).status, 403);
+    assert.equal(users.get('u-staff').is_active, true, 'nothing changed');
+  });
+
+  it('lists accounts by role (Owner, Admin, Production, Staff), then username A-Z ignoring case', async () => {
+    const admin = await login('admin');
+    // Added in a scrambled role order, with mixed-case names
+    const extra = [
+      ['s-zed', 'Zed.staff', 'Staff', true], ['a-bea', 'bea.admin', 'Admin', true], ['p-ana', 'Ana.prod', 'Production', true],
+      ['o-carl', 'carl.owner', 'Owner', true], ['a-abe', 'Abe.admin', 'Admin', true], ['s-amy', 'amy.staff', 'Staff', false],
+      ['p-ben', 'ben.prod', 'Production', false], ['x-old', 'aaa.legacy', 'Cashier', true] // unknown role: last
+    ];
+    for (const [user_id, username, role, is_active] of extra) {
+      users.set(user_id, { user_id, username, password_hash: 'x', role, is_active, tokens_valid_after: null, created_at: '2026-11-01 00:00:00' });
+    }
+    const RANK = { Owner: 4, Admin: 3, Production: 2, Staff: 1 };
+    const inOrder = (list) => list.every((u, i) => i === 0 || (() => {
+      const p = list[i - 1];
+      const rp = RANK[p.role] || 0; const ru = RANK[u.role] || 0;
+      return rp > ru || (rp === ru && p.username.localeCompare(u.username, 'en', { sensitivity: 'base' }) <= 0);
+    })());
+    const mine = (list) => list.filter((u) => extra.some(([id]) => id === u.user_id)).map((u) => u.username);
+
+    const all = (await call('GET', '/api/auth/users', undefined, admin)).body.users;
+    assert.ok(inOrder(all), `whole list ordered: ${all.map((u) => `${u.role}:${u.username}`).join(', ')}`);
+    assert.deepEqual(mine(all), ['carl.owner', 'Abe.admin', 'bea.admin', 'Ana.prod', 'ben.prod', 'amy.staff', 'Zed.staff', 'aaa.legacy']);
+
+    const active = (await call('GET', '/api/auth/users?status=active', undefined, admin)).body.users;
+    assert.ok(inOrder(active));
+    assert.deepEqual(mine(active), ['carl.owner', 'Abe.admin', 'bea.admin', 'Ana.prod', 'Zed.staff', 'aaa.legacy']);
+
+    const inactive = (await call('GET', '/api/auth/users?status=inactive', undefined, admin)).body.users;
+    assert.ok(inOrder(inactive));
+    assert.deepEqual(mine(inactive), ['ben.prod', 'amy.staff']);
   });
 });

@@ -14,6 +14,7 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useSession } from '@/hooks/use-session';
+import { TEXT_MAX } from '@/lib/input-limits';
 import { getEndedNotice } from '@/lib/session';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
@@ -74,7 +75,7 @@ export function LoginForm() {
 
       <Card className="w-full max-w-md gap-6 bg-card/80 shadow-2xl ring-foreground/10 backdrop-blur-md [--card-spacing:--spacing(6)] supports-[backdrop-filter]:bg-card/75 sm:[--card-spacing:--spacing(8)]">
         <CardHeader className="justify-items-center gap-2 text-center">
-          <BrandLogo className="mb-2 h-20" preload />
+          <BrandLogo className="mb-2 h-20" />
           <CardTitle as="h1" className="text-2xl font-semibold tracking-tight">{APP_NAME}</CardTitle>
           <CardDescription>Log in to continue.</CardDescription>
         </CardHeader>
@@ -91,13 +92,15 @@ export function LoginForm() {
             )}
 
             <div className="space-y-2">
-              <Label htmlFor="login-username">Username or Email</Label>
+              {/* Accounts have a username only (the server matches it exactly; there is no email) */}
+              <Label htmlFor="login-username">Username</Label>
               <Input
                 id="login-username"
                 className="h-10 bg-background/70 dark:bg-input/40"
                 autoComplete="username"
                 autoCapitalize="none"
                 spellCheck={false}
+                maxLength={TEXT_MAX.username}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 required
@@ -113,6 +116,7 @@ export function LoginForm() {
                   className="h-10 bg-background/70 pr-11 dark:bg-input/40"
                   type={showPassword ? 'text' : 'password'}
                   autoComplete="current-password"
+                  maxLength={TEXT_MAX.password}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   onKeyDown={trackCapsLock}

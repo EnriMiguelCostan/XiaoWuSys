@@ -41,9 +41,17 @@ export const FRIENDLY_ERRORS = Object.freeze({
   NOT_LOGGED_IN: 'Please log in to continue.'
 });
 
+// Login refusals (POST /api/auth/login). Their server text is already plain language and must
+// reach the person exactly (e.g. the offline wrong-password note "…can log in."), so it never
+// goes through the session-expiry guess below.
+const LOGIN_FAILURE_CODES = new Set(['INVALID_CREDENTIALS', 'TOO_MANY_ATTEMPTS', 'ACCOUNT_DEACTIVATED']);
+
 export const errorText = (data, fallback) => {
   if (!data) return fallback;
   if (FRIENDLY_ERRORS[data.error]) return FRIENDLY_ERRORS[data.error];
+  if (LOGIN_FAILURE_CODES.has(data.error)) {
+    return typeof data.message === 'string' && data.message ? data.message : fallback;
+  }
   const text = data.message || data.error;
   if (typeof text === 'string') {
     if (/^Forbidden/i.test(text)) return 'Your account does not have permission to do this. Please ask an Owner or Admin.';

@@ -147,7 +147,7 @@ export function AppHeader() {
           href={HOME_PATH}
           className="flex items-center gap-2 rounded-md font-semibold tracking-tight focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
         >
-          <BrandLogo alt="" className="h-8" preload />
+          <BrandLogo alt="" className="h-8" />
           <span>{APP_NAME}</span>
         </Link>
 
