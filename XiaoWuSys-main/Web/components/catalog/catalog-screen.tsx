@@ -76,6 +76,7 @@ export function CatalogScreen() {
   const items = useMemo(() => snapshot?.items ?? [], [snapshot]);
   const summary = snapshot?.summary;
   const categories = snapshot?.categories ?? [];
+  const units = useMemo(() => items.map((item) => item.unit), [items]);
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -165,10 +166,10 @@ export function CatalogScreen() {
           {canEdit && (
             <>
               <Button onClick={() => setDialog({ kind: 'item', item: null })}>
-                <PackagePlus aria-hidden /> Add item
+                <PackagePlus aria-hidden /> Add Item
               </Button>
               <Button variant="outline" onClick={() => setDialog({ kind: 'stock', itemId: null, action: 'add' })} disabled={items.length === 0}>
-                <SlidersHorizontal aria-hidden /> Adjust stock
+                <SlidersHorizontal aria-hidden /> Adjust Stock
               </Button>
               <Button variant="outline" onClick={() => setDialog({ kind: 'import' })}>
                 <FileUp aria-hidden /> Import
@@ -309,7 +310,7 @@ export function CatalogScreen() {
         {snapshot && items.length === 0 && (
           <p className="rounded-lg border border-dashed bg-card p-8 text-left text-sm leading-relaxed text-muted-foreground">
             No items in the catalog yet.{' '}
-            {canEdit ? 'Click "Add item" or "Import" to add the first ones.' : 'Items added by the people who manage the catalog will appear here.'}
+            {canEdit ? 'Click "Add Item" or "Import" to add the first ones.' : 'Items added by the people who manage the catalog will appear here.'}
           </p>
         )}
         {items.length > 0 && visible.length === 0 && (
@@ -325,7 +326,7 @@ export function CatalogScreen() {
               canEdit={canEdit}
               recentlyChanged={recentlyChanged}
               onEdit={(item) => setDialog({ kind: 'item', item })}
-              onAdjust={(item, action) => setDialog({ kind: 'stock', itemId: item.inventory_id, action })}
+              onAdjust={(item) => setDialog({ kind: 'stock', itemId: item.inventory_id, action: 'add' })}
               onDelete={setToDelete}
               onRates={(item) => setDialog({ kind: 'rates', item })}
             />
@@ -345,7 +346,7 @@ export function CatalogScreen() {
 
       {/* Dialogs (mounted only while open, so each one starts with a fresh form) */}
       {canEdit && dialog?.kind === 'item' && (
-        <ItemFormDialog item={dialog.item} categories={categories} onClose={() => setDialog(null)} onDone={finish} />
+        <ItemFormDialog item={dialog.item} categories={categories} units={units} onClose={() => setDialog(null)} onDone={finish} />
       )}
       {canEdit && dialog?.kind === 'stock' && (
         <StockDialog

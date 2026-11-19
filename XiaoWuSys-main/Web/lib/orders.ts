@@ -261,14 +261,16 @@ export const lineText = (it: Pick<OrderItem, 'quantity' | 'product_type' | 'size
 export const RECEIPT_AFTER_SYNC = 'Given after sync';
 
 /** PB 18: the server's standard loss reasons (REASON_CODES in services/domain/wasteDiagnostics.js).
- *  A display list, like PAYMENT_TYPES: the server checks the code and decides the cause. */
+ *  A display list, like PAYMENT_TYPES: the server checks the code and decides the cause.
+ *  The one list for every "record a loss" form (Order details > Log Loss and Catalog > Adjust
+ *  Stock > Subtract Stock), so both screens show the same Title Case labels. */
 export const LOSS_REASONS: { code: string; label: string }[] = [
-  { code: 'misprint_alignment', label: 'Misprint / alignment error' },
-  { code: 'sizing_encoding_error', label: 'Wrong size / name / number printed' },
-  { code: 'heat_press_scorch', label: 'Heat press scorch / temperature spike' },
-  { code: 'printer_head_banding', label: 'Printer nozzle clog / banding / inkblot' },
-  { code: 'supplier_defect', label: 'Defective blank / pinhole / stain from supplier' },
-  { code: 'damaged_in_storage', label: 'Damaged or lost in storage / handling' },
+  { code: 'misprint_alignment', label: 'Misprint / Alignment Error' },
+  { code: 'sizing_encoding_error', label: 'Sizing / Encoding Error' },
+  { code: 'damaged_in_storage', label: 'Damaged in Storage' },
+  { code: 'heat_press_scorch', label: 'Heat Press Scorch' },
+  { code: 'printer_head_banding', label: 'Printer Head Banding' },
+  { code: 'supplier_defect', label: 'Supplier Defect' },
 ];
 
 /** Statuses where the job order still waits for the Owner's approval (display only: the
