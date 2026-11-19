@@ -9,15 +9,14 @@
 //   POST  /api/auth/register                       Owner, Admin (create an account)
 //   PATCH /api/auth/users/:user_id                 Owner, Admin { role?, is_active? }
 //   POST  /api/auth/users/:user_id/reset-password  Owner, Admin { new_password }
-//   POST  /api/auth/users/:user_id/remove          Owner, Admin: remove a Staff / Production account
-//   POST  /api/auth/users/:user_id/restore         Owner, Admin: bring a removed account back
+//   POST  /api/auth/users/:user_id/remove|restore  retired: 410 ENDPOINT_RETIRED (use PATCH is_active)
 //
-// Removing (migration 014) = deactivated + hidden from the everyday list (GET /users), never
-// deleted: the person's name stays on every payment, status change and audit entry they made.
-// GET /users?removed=only lists the removed accounts. A restored account comes back still
-// DEACTIVATED, so the manager decides separately whether that person may log in again.
-// Owner and Admin accounts can never be removed. A removed account takes no other change
-// (role, activate, password) until it is restored.
+// One soft-delete workflow: is_active is the single source of truth for Active vs Deactivated.
+// A user row is never deleted: the person's name stays on every payment, status change and
+// audit entry they made. GET /users?status=active|inactive lists one side (default: all).
+// The old "remove" flow (migration 014) only ever set is_active = FALSE plus removed_at /
+// removed_by; such accounts simply show as Deactivated, and reactivating one clears removed_*.
+// Every deactivate / reactivate / role change is written to audit_log in the same transaction.
 //
 // Rules (always enforced here, whatever the UI shows):
 //   - roles come from the verified token, never from the request body
@@ -39,7 +38,7 @@ const { createLoginLimiter } = require('../utils/rateLimit');
 const { createValidator } = require('../utils/validation');
 const { sqliteGet, sqliteAll, sqliteRun, withPgTransaction } = require('../services/records');
 const { revokeUser, reactivateUser, revokeSession, isActiveValue, CUTOFF_SQL } = require('../services/sessions');
-const { capabilitiesFor, ALL_ROLES, rolesWith } = require('../services/domain/permissions');
+const { capabilitiesFor, ALL_ROLES, rolesWith, rankOf } = require('../services/domain/permissions');
 const { LOCAL_NOW } = require('../utils/localSync');
 const { writeAudit } = require('../services/auditLog');
 
@@ -116,9 +115,16 @@ const cacheUserLocally = async (localDb, u) => {
 
 const USER_COLUMNS = 'user_id, username, password_hash, role, is_active, tokens_valid_after::text AS tokens_valid_after, created_at::text AS created_at, '
   + 'removed_at::text AS removed_at, removed_by';
-// Migration 014: only these roles can be removed (Owner / Admin accounts never)
-const REMOVABLE_ROLES = ['Staff', 'Production'];
-const REMOVED = { error: 'ACCOUNT_REMOVED', message: 'This account was removed. Restore it first (turn on "Show removed").' };
+// GET /users?status=: which side of the soft-delete workflow to list
+const LIST_STATUSES = ['active', 'inactive', 'all'];
+
+// The Accounts list order, decided here so no screen sorts by role name: role hierarchy first
+// (ROLE_RANK: Owner, Admin, Production, Staff; an unknown role ranks 0, so it comes last), then
+// username A-Z ignoring case, then user_id so the order is always the same.
+const byRoleThenUsername = (a, b) =>
+  rankOf(b.role) - rankOf(a.role)
+  || String(a.username).localeCompare(String(b.username), 'en', { sensitivity: 'base' })
+  || (a.user_id < b.user_id ? -1 : a.user_id > b.user_id ? 1 : 0);
 
 // ==========================================
 // LOGIN
@@ -293,26 +299,36 @@ router.post('/change-password', async (req, res) => {
 // ==========================================
 // LIST ACCOUNTS (works offline from the local copy, read-only)
 // ==========================================
-// ?removed=only -> the removed accounts only ("Show removed"); otherwise only the others
+// ?status=active   -> is_active accounts only (the everyday view)
+// ?status=inactive -> deactivated accounts only (including any removed by the old flow)
+// no status / all  -> every account
+// The split is done here on the rows (isActiveValue), not in SQL, so Postgres (BOOLEAN) and the
+// offline SQLite copy (INTEGER 0/1) answer exactly the same. counts always cover both sides.
 router.get('/users', requireRole(MANAGER_ROLES), async (req, res) => {
   const v = createValidator();
-  const removedOnly = v.oneOf(req.query.removed, 'removed', ['only', 'false'], { required: false }) === 'only';
+  const status = v.oneOf(req.query.status, 'status', LIST_STATUSES, { required: false }) || 'all';
   if (v.failed()) return v.send(res);
-  const where = removedOnly ? 'removed_at IS NOT NULL' : 'removed_at IS NULL'; // fixed SQL, no user input
   try {
     let rows;
     let source = 'cloud';
     try {
-      rows = (await req.pgPool.query(`SELECT ${USER_COLUMNS} FROM users WHERE ${where} ORDER BY is_active DESC, role, username`)).rows;
+      rows = (await req.pgPool.query(`SELECT ${USER_COLUMNS} FROM users ORDER BY user_id`)).rows;
     } catch (err) {
       if (!isConnectionError(err)) throw err;
       source = 'local';
       rows = await sqliteAll(req.localDb,
-        `SELECT user_id, username, role, is_active, created_at, removed_at FROM users WHERE ${where} ORDER BY is_active DESC, role, username`);
+        'SELECT user_id, username, role, is_active, created_at, removed_at FROM users ORDER BY user_id');
     }
+    // Sorted in code, after either read, so the cloud and the offline copy give the same order
+    const users = rows.map(publicUser).sort(byRoleThenUsername);
+    const active = users.filter((u) => u.is_active);
+    const inactive = users.filter((u) => !u.is_active);
     res.status(200).json({
-      source, users: rows.map(publicUser), assignable_roles: allowedRolesFor(req.user.role),
-      removable_roles: REMOVABLE_ROLES, removed_only: removedOnly
+      source,
+      status,
+      users: status === 'active' ? active : status === 'inactive' ? inactive : users,
+      counts: { active: active.length, inactive: inactive.length, total: users.length },
+      assignable_roles: allowedRolesFor(req.user.role)
     });
   } catch (err) {
     console.error('✗ List users error:', err.message);
@@ -413,7 +429,7 @@ router.patch('/users/:user_id', requireRole(MANAGER_ROLES), async (req, res) => 
       if (target.role === 'Owner' && req.user.role !== 'Owner') {
         throw reject(403, 'FORBIDDEN', 'Only an Owner can change an Owner account.');
       }
-      if (target.removed_at) throw new AccountRejected(409, REMOVED);
+      // An account the old "remove" flow deactivated is simply a deactivated account now
       const role = body.role ?? target.role;
       const is_active = body.is_active ?? isActiveValue(target.is_active);
       if (role === target.role && is_active === isActiveValue(target.is_active)) {
@@ -432,8 +448,12 @@ router.patch('/users/:user_id', requireRole(MANAGER_ROLES), async (req, res) => 
       const at = Date.now();
       // Guarded in SQL too: the update only applies if another active manager still exists
       // when it would remove one (defence in depth, never only in JS).
+      // Reactivating also clears removed_at / removed_by left by the retired "remove" flow, so
+      // is_active stays the single source of truth (the columns of migration 014 are kept).
       const updated = await client.query(
-        `UPDATE users SET role = $2, is_active = $3, tokens_valid_after = ${CUTOFF_SQL('$4')}
+        `UPDATE users SET role = $2, is_active = $3, tokens_valid_after = ${CUTOFF_SQL('$4')},
+                removed_at = CASE WHEN $3 THEN NULL ELSE removed_at END,
+                removed_by = CASE WHEN $3 THEN NULL ELSE removed_by END
           WHERE user_id = $1
             AND ($3 = TRUE AND $2 = ANY($5::text[])
                  OR EXISTS (SELECT 1 FROM users m WHERE m.user_id <> $1 AND m.is_active = TRUE AND m.role = ANY($5::text[])))
@@ -442,6 +462,22 @@ router.patch('/users/:user_id', requireRole(MANAGER_ROLES), async (req, res) => 
       if (updated.rowCount !== 1) {
         throw reject(409, 'LAST_MANAGER', 'This is the last active Owner/Admin account. Create or activate another one first.');
       }
+      // The trail of who deactivated / reactivated / re-roled whom (same transaction)
+      const wasActive = isActiveValue(target.is_active);
+      await writeAudit(client, {
+        entity: 'users',
+        entity_id: targetId,
+        action: !is_active && wasActive ? 'account_deactivated' : is_active && !wasActive ? 'account_reactivated' : 'role_changed',
+        actor: req.user,
+        details: {
+          username: target.username,
+          role_before: target.role,
+          role_after: role,
+          was_active: wasActive,
+          is_active,
+          cleared_removed_at: Boolean(is_active && target.removed_at)
+        }
+      });
       return { target, row: updated.rows[0], role, is_active, at };
     });
 
@@ -484,7 +520,6 @@ router.post('/users/:user_id/reset-password', requireRole(MANAGER_ROLES), async 
   try {
     const target = await loadManageable(req, res);
     if (!target) return;
-    if (target.removed_at) return res.status(409).json(REMOVED);
     const hash = await bcrypt.hash(new_password, BCRYPT_ROUNDS);
     const at = Date.now();
     const { rows } = await req.pgPool.query(
@@ -502,60 +537,15 @@ router.post('/users/:user_id/reset-password', requireRole(MANAGER_ROLES), async 
 });
 
 // ==========================================
-// REMOVE / RESTORE A STAFF OR PRODUCTION ACCOUNT (migration 014)
-// One transaction: lock the row, check, change, audit. The sign-out list and the offline copy
-// are updated only after it committed.
+// RETIRED: REMOVE / RESTORE (migration 014's separate "remove" flow)
+// Folded into Deactivate / Reactivate (PATCH /users/:user_id { is_active }), which keeps the same
+// guarantees: the row is never deleted, the person is signed out everywhere, and the change is
+// audited. A stale screen calling these gets a clear 410 instead of a silent 404.
 // ==========================================
-const removalRoute = (remove) => async (req, res) => {
-  const v = createValidator();
-  v.id(req.params.user_id, 'user_id');
-  if (v.failed()) return v.send(res);
-  if (req.params.user_id === req.user.user_id) {
-    return fail(res, 400, 'CANNOT_CHANGE_SELF', 'You cannot remove or restore your own account.');
-  }
-  try {
-    const { target, row } = await withPgTransaction(req.pgPool, async (client) => {
-      const locked = await client.query(`SELECT ${USER_COLUMNS} FROM users WHERE user_id = $1 FOR UPDATE`, [req.params.user_id]);
-      const found = locked.rows[0];
-      if (!found) throw reject(404, 'USER_NOT_FOUND', 'This account no longer exists. Please refresh the list.');
-      if (!REMOVABLE_ROLES.includes(found.role)) {
-        throw reject(403, 'CANNOT_REMOVE_MANAGER', 'Owner and Admin accounts cannot be removed. Only Staff and Production accounts can.');
-      }
-      if (remove && found.removed_at) throw reject(409, 'ALREADY_REMOVED', 'This account is already removed.');
-      if (!remove && !found.removed_at) throw reject(409, 'NOT_REMOVED', 'This account is not removed.');
-      const updated = await client.query(
-        remove
-          ? `UPDATE users SET is_active = FALSE, removed_at = NOW(), removed_by = $2, tokens_valid_after = ${CUTOFF_SQL('$3')}
-              WHERE user_id = $1 RETURNING ${USER_COLUMNS}`
-          : `UPDATE users SET removed_at = NULL, removed_by = NULL WHERE user_id = $1 RETURNING ${USER_COLUMNS}`,
-        remove ? [found.user_id, req.user.user_id, Date.now()] : [found.user_id]);
-      await writeAudit(client, {
-        entity: 'users', entity_id: found.user_id, action: remove ? 'account_removed' : 'account_restored', actor: req.user,
-        details: { username: found.username, role: found.role, was_active: isActiveValue(found.is_active) }
-      });
-      return { target: found, row: updated.rows[0] };
-    });
-    if (remove) revokeUser(target.user_id, { deactivated: true });
-    await cacheUserLocally(req.localDb, row);
-    console.log(`👤 ${req.user.role} ${req.user.user_id}: account ${target.username} ${remove ? 'removed' : 'restored'}`);
-    res.status(200).json({
-      message: remove
-        ? `"${target.username}" was removed and signed out. Their name stays on their past work.`
-        : `"${target.username}" is back in the Accounts list, still deactivated. Reactivate it if they may log in again.`,
-      user: publicUser(row)
-    });
-  } catch (err) {
-    if (err instanceof AccountRejected) return res.status(err.status).json(err.body);
-    if (err.commitUnknown) {
-      return fail(res, 503, 'COMMIT_UNKNOWN', 'The connection dropped while saving. Refresh the list to see whether the change was applied.');
-    }
-    if (isConnectionError(err)) return needsCloud(res);
-    console.error(`✗ ${remove ? 'Remove' : 'Restore'} user error:`, err.message);
-    fail(res, 500, 'INTERNAL_ERROR', `Something went wrong. The account was not ${remove ? 'removed' : 'restored'}.`);
-  }
-};
-router.post('/users/:user_id/remove', requireRole(MANAGER_ROLES), removalRoute(true));
-router.post('/users/:user_id/restore', requireRole(MANAGER_ROLES), removalRoute(false));
+const retired = (req, res) => fail(res, 410, 'ENDPOINT_RETIRED',
+  'Removing accounts was replaced by Deactivate. Use Deactivate or Reactivate on the Accounts page instead.');
+router.post('/users/:user_id/remove', requireRole(MANAGER_ROLES), retired);
+router.post('/users/:user_id/restore', requireRole(MANAGER_ROLES), retired);
 
 router.passwordProblem = passwordProblem;
 module.exports = router;

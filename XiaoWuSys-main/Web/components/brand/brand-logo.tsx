@@ -3,6 +3,12 @@
 //   dark mode  -> the white cloud (navy lettering) stands out on dark surfaces
 // Both images are in the DOM; `dark:` classes show exactly one, so the swap follows the
 // <html class="dark"> toggle instantly.
+//
+// loading="eager": the logo is always above the fold (header, login card, the full-screen
+// loading spinner) and Next.js reports it as the Largest Contentful Paint. Eager loading fetches
+// both artworks (about 30 KB each, then cached for every other use of the logo); that is the
+// price of a theme swap with no flash. Next.js 16 says not to combine `preload` with `loading`,
+// so this replaces the old per-caller `preload` flag.
 import Image from 'next/image';
 import { cn } from '@/lib/utils';
 
@@ -15,13 +21,11 @@ const LOGO_HEIGHT = 361;
 export function BrandLogo({
   className,
   alt = `${APP_NAME} logo`,
-  preload = false,
 }: {
   /** Size it with a height (e.g. "h-8"); the width follows the aspect ratio. */
   className?: string;
   /** Pass "" when a visible app name sits right next to the logo (decorative). */
   alt?: string;
-  preload?: boolean;
 }) {
   const shared = cn('w-auto shrink-0 select-none', className);
   return (
@@ -31,7 +35,7 @@ export function BrandLogo({
         alt={alt}
         width={LOGO_WIDTH}
         height={LOGO_HEIGHT}
-        preload={preload}
+        loading="eager"
         draggable={false}
         className={cn(shared, 'dark:hidden')}
       />
@@ -40,7 +44,7 @@ export function BrandLogo({
         alt={alt}
         width={LOGO_WIDTH}
         height={LOGO_HEIGHT}
-        preload={preload}
+        loading="eager"
         draggable={false}
         className={cn(shared, 'hidden dark:block')}
       />

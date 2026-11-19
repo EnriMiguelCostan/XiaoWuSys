@@ -3,16 +3,16 @@
 // Accounts (ported from UsersPage.jsx): create accounts, change roles, reset forgotten
 // passwords, deactivate people who left. Owner / Admin only (manage_accounts; the page is
 // wrapped in RequireCapability and Express answers 403 to anyone else).
-//   GET   /api/auth/users                       -> { source, users, assignable_roles }
-//   POST  /api/auth/register                    create
-//   PATCH /api/auth/users/:id                   { role } or { is_active }
-//   POST  /api/auth/users/:id/reset-password    { new_password }
-//   POST  /api/auth/users/:id/remove | restore  Staff / Production accounts only (migration 014)
-//   GET   /api/auth/users?removed=only          the "Show removed" view
+//   GET   /api/auth/users?status=active|inactive -> { source, status, users, counts, assignable_roles }
+//   POST  /api/auth/register                     create
+//   PATCH /api/auth/users/:id                    { role } or { is_active }
+//   POST  /api/auth/users/:id/reset-password     { new_password }
 //
-// Remove = deactivate + hide from this list (the name stays on the person's past work). "Show
-// removed" lists ONLY removed accounts, each with Restore (it comes back still deactivated).
-// Which rows can be removed comes from the server's "removable_roles".
+// One soft-delete workflow, two views: Active and Deactivated. is_active is the only thing that
+// decides which view an account is in. Deactivate (Active view) signs the person out everywhere
+// and moves the account to Deactivated; Reactivate (Deactivated view) moves it back. Accounts
+// are never deleted, so a person's name stays on the orders, payments and changes they made.
+// Accounts deactivated by the old "Remove" button are ordinary deactivated accounts here.
 //
 // The server enforces every rule (password strength, who may manage whom, not changing
 // yourself) and its message is shown as is. Which rows offer actions is read from the server's
@@ -22,7 +22,7 @@
 // came from this computer's copy or the connection bar says the cloud or server is unreachable.
 // Every server answer goes to ResultDialog: a success becomes a pop-up notice, a refusal a dialog.
 import { useCallback, useEffect, useState } from 'react';
-import { Archive, ArchiveRestore, CloudOff, KeyRound, RefreshCw, UserCheck, UserMinus, UserPlus, Users, UserX } from 'lucide-react';
+import { CloudOff, KeyRound, RefreshCw, UserCheck, UserPlus, Users, UserX } from 'lucide-react';
 import { formatDateTime } from '@xiaowu/client-core/format';
 import { roleHelp } from '@xiaowu/client-core/permissions';
 import { LogoSpinner } from '@/components/brand/brand-logo';
@@ -44,7 +44,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Toggle } from '@/components/ui/toggle';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { useApi } from '@/hooks/use-api';
 import { useSession } from '@/hooks/use-session';
 import { errorMessage } from '@/lib/api';
@@ -58,22 +58,39 @@ interface Account {
   role: string;
   is_active: boolean;
   created_at: string | null;
-  /** migration 014: when it was removed (UTC); null = not removed */
-  removed_at?: string | null;
 }
+
+type AccountView = 'active' | 'inactive';
 
 interface AccountList {
   source: 'cloud' | 'local';
+  status: AccountView | 'all';
   users: Account[];
+  /** both views, so the switcher can show how many each holds */
+  counts?: { active: number; inactive: number; total: number };
   assignable_roles: string[];
-  /** roles whose accounts can be removed (Staff, Production); never Owner / Admin */
-  removable_roles?: string[];
 }
 
 const PASSWORD_HINT = 'At least 8 characters, with a letter and a number.';
 
-// The ⋯ column stays visible when the table scrolls sideways (same as the Catalog)
-const STICKY_ACTIONS = 'sticky right-0 z-10 border-l';
+// The actions column stays visible when the table scrolls sideways (same as the Catalog).
+// w-px + whitespace-nowrap: the column is exactly as wide as its buttons, never narrower, so the
+// buttons can never spill left over its border into the Created column. Opaque backgrounds
+// (bg-muted header, bg-card body) keep scrolled cells from showing through it.
+const STICKY_ACTIONS = 'sticky right-0 z-10 w-px whitespace-nowrap border-l px-3';
+// Buttons in that column keep their one-line width (Button allows wrapping elsewhere)
+const ACTION_BUTTON = 'max-w-none whitespace-nowrap';
+
+const VIEW_COPY: Record<AccountView, { note: string; empty: string }> = {
+  active: {
+    note: 'People who can log in now. Deactivate someone who left: they are signed out everywhere and their account moves to Deactivated.',
+    empty: 'No active accounts.',
+  },
+  inactive: {
+    note: 'Deactivated accounts cannot log in. They are kept in the records, so past orders, payments and changes keep their names. Reactivate one anytime.',
+    empty: 'No deactivated accounts. When someone leaves, deactivate their account from the Active view; it is kept here.',
+  },
+};
 
 type Loaded = { key: string; list: AccountList | null; error: string };
 
@@ -88,17 +105,14 @@ export function AccountsScreen() {
   const [creating, setCreating] = useState(false);
   const [resetFor, setResetFor] = useState<Account | null>(null);
   const [confirm, setConfirm] = useState<{ account: Account; is_active: boolean } | null>(null);
-  // Remove (hide) or restore one account, after a confirmation
-  const [confirmRemoval, setConfirmRemoval] = useState<{ account: Account; remove: boolean } | null>(null);
-  // "Show removed": lists ONLY the removed accounts (like "Show archived" in Orders)
-  const [showRemoved, setShowRemoved] = useState(false);
+  const [view, setView] = useState<AccountView>('active');
 
-  const requestKey = `${tick}|${showRemoved}`;
+  const requestKey = `${tick}|${view}`;
   const reload = useCallback(() => setTick((t) => t + 1), []);
 
   useEffect(() => {
     let cancelled = false;
-    api<AccountList>('GET', showRemoved ? '/auth/users?removed=only' : '/auth/users').then(({ ok, data }) => {
+    api<AccountList>('GET', `/auth/users?status=${view}`).then(({ ok, data }) => {
       if (cancelled) return;
       setLoaded((prev) =>
         ok && Array.isArray(data.users)
@@ -109,18 +123,20 @@ export function AccountsScreen() {
     return () => {
       cancelled = true;
     };
-  }, [api, requestKey, showRemoved]);
+  }, [api, requestKey, view]);
 
   const loading = !loaded || loaded.key !== requestKey;
   const list = loaded?.list ?? null;
   const error = loaded && loaded.key === requestKey ? loaded.error : '';
   const offline = list?.source === 'local' || connection === 'offline_local' || connection === 'server_down';
   const assignable = list?.assignable_roles ?? [];
-  const removable = list?.removable_roles ?? [];
+  const counts = list?.counts;
+  // While a switch is loading, the previous view's rows stay on screen (dimmed), never mixed:
+  // the rows shown always belong to the view the server answered for.
+  const shownView: AccountView = list && list.status !== 'all' ? list.status : view;
 
   /** Rows this account may act on (the server checks again on every request) */
   const manageable = (a: Account) => !offline && a.user_id !== me?.user_id && assignable.includes(a.role);
-  const canRemove = (a: Account) => manageable(a) && removable.includes(a.role);
 
   const report = (ok: boolean, data: { message?: string }, title: string, fallback: string) => {
     setResult(ok ? { type: 'success', title, message: data.message ?? title } : { type: 'error', title: 'Not saved', message: errorMessage(data, fallback) });
@@ -135,6 +151,8 @@ export function AccountsScreen() {
     report(ok, data, 'Role changed', 'The role was not changed.');
   };
 
+  // Deactivate (Active view) or Reactivate (Deactivated view). The reload moves the account to
+  // the other view and updates both counts.
   const setActive = async () => {
     if (!confirm) return;
     setBusy(true);
@@ -146,27 +164,16 @@ export function AccountsScreen() {
     report(ok, data, confirm.is_active ? 'Account reactivated' : 'Account deactivated', 'The account was not changed.');
   };
 
-  const removeOrRestore = async () => {
-    if (!confirmRemoval) return;
-    const { account, remove } = confirmRemoval;
-    setBusy(true);
-    const { ok, data } = await api<{ message?: string }>(
-      'POST',
-      `/auth/users/${encodeURIComponent(account.user_id)}/${remove ? 'remove' : 'restore'}`
-    );
-    setBusy(false);
-    setConfirmRemoval(null);
-    if (ok) {
-      setResult({ type: 'success', title: remove ? 'Account removed' : 'Account restored', message: data.message ?? '' });
-      reload();
-    } else {
-      setResult({
-        type: 'error',
-        title: remove ? 'Not removed' : 'Not restored',
-        message: errorMessage(data, remove ? 'The account was not removed.' : 'The account was not restored.'),
-      });
-    }
-  };
+  const viewLabel = (label: string, count: number | undefined) => (
+    <>
+      {label}
+      {count !== undefined && (
+        <Badge variant="secondary" className="ml-1 tabular-nums">
+          {count}
+        </Badge>
+      )}
+    </>
+  );
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
@@ -176,7 +183,8 @@ export function AccountsScreen() {
             <Users className="size-6" aria-hidden /> Accounts
           </h1>
           <p className="text-sm text-muted-foreground">
-            Create staff accounts, change roles, reset forgotten passwords, and deactivate people who left.
+            Create staff accounts, change roles and reset forgotten passwords. Deactivate people who left: their accounts are kept for the records
+            and can be reactivated anytime.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -189,21 +197,23 @@ export function AccountsScreen() {
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <Toggle
+      <div className="flex min-w-0 flex-col gap-2">
+        <ToggleGroup
+          type="single"
           variant="outline"
-          size="sm"
-          pressed={showRemoved}
-          onPressedChange={setShowRemoved}
-          aria-label="Show removed accounts"
+          value={view}
+          onValueChange={(v) => v && setView(v as AccountView)}
+          aria-label="Which accounts to show"
+          className="flex-wrap"
         >
-          <Archive aria-hidden /> Show removed
-        </Toggle>
-        {showRemoved && (
-          <span className="text-xs text-muted-foreground">
-            Showing removed accounts only. Their names stay on their past work; Restore brings one back.
-          </span>
-        )}
+          <ToggleGroupItem value="active" aria-label={`Active accounts${counts ? `: ${counts.active}` : ''}`}>
+            <UserCheck aria-hidden /> {viewLabel('Active', counts?.active)}
+          </ToggleGroupItem>
+          <ToggleGroupItem value="inactive" aria-label={`Deactivated accounts${counts ? `: ${counts.inactive}` : ''}`}>
+            <UserX aria-hidden /> {viewLabel('Deactivated', counts?.inactive)}
+          </ToggleGroupItem>
+        </ToggleGroup>
+        <p className="text-xs text-muted-foreground">{VIEW_COPY[view].note}</p>
       </div>
 
       {offline && (
@@ -223,15 +233,16 @@ export function AccountsScreen() {
         </div>
       ) : (
         list && (
-          <div className={cn('max-w-full min-w-0 overflow-x-auto rounded-lg border bg-card transition-opacity', loading && 'opacity-60')} aria-busy={loading}>
-            <Table aria-label="Accounts">
+          <div className={cn('max-w-full min-w-0 overflow-hidden rounded-lg border bg-card transition-opacity', loading && 'opacity-60')} aria-busy={loading}>
+            {/* The Table primitive is the horizontal scroll container; the sticky column sticks to its right edge */}
+            <Table aria-label={shownView === 'active' ? 'Active accounts' : 'Deactivated accounts'}>
               <TableHeader className="bg-muted">
                 <TableRow>
                   <TableHead>Username</TableHead>
                   <TableHead>Role</TableHead>
                   <TableHead className="hidden sm:table-cell">Status</TableHead>
-                  <TableHead className="hidden md:table-cell">{showRemoved ? 'Removed on' : 'Created'}</TableHead>
-                  <TableHead className={cn(STICKY_ACTIONS, 'w-px bg-muted text-right')}>
+                  <TableHead className="hidden md:table-cell">Created</TableHead>
+                  <TableHead className={cn(STICKY_ACTIONS, 'bg-muted text-right')}>
                     <span className="sr-only">Actions</span>
                   </TableHead>
                 </TableRow>
@@ -239,29 +250,36 @@ export function AccountsScreen() {
               <TableBody>
                 {list.users.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={5} className="py-10 text-left leading-relaxed text-muted-foreground">
-                      {showRemoved ? 'No removed accounts.' : 'No accounts found.'}
+                    <TableCell colSpan={5} className="py-10 text-left leading-relaxed whitespace-normal text-muted-foreground">
+                      {VIEW_COPY[shownView].empty}
                     </TableCell>
                   </TableRow>
                 )}
                 {list.users.map((a) => {
                   const isMe = a.user_id === me?.user_id;
                   const canAct = manageable(a);
+                  const statusBadge = (
+                    <Badge variant="outline" className={a.is_active ? TONE_CLASSES.success.badge : TONE_CLASSES.muted.badge}>
+                      {a.is_active ? 'Active' : 'Deactivated'}
+                    </Badge>
+                  );
                   return (
                     <TableRow key={a.user_id} className={cn(!a.is_active && 'text-muted-foreground')}>
-                      <TableCell className="max-w-64 min-w-36 whitespace-normal wrap-anywhere">
-                        <span className="font-medium">{a.username}</span>
-                        {isMe && (
-                          <Badge variant="secondary" className="ml-2">
-                            you
-                          </Badge>
-                        )}
-                        <Badge variant="outline" className={cn('mt-1 sm:hidden', a.is_active ? TONE_CLASSES.success.badge : TONE_CLASSES.muted.badge)}>
-                          {a.removed_at ? 'Removed' : a.is_active ? 'Active' : 'Deactivated'}
-                        </Badge>
+                      <TableCell>
+                        {/* Width limits sit on this block (a td ignores max-width): long names
+                            without spaces wrap here instead of squeezing Created or the actions */}
+                        <div className="max-w-64 min-w-36 whitespace-normal wrap-anywhere">
+                          <span className="font-medium">{a.username}</span>
+                          {isMe && (
+                            <Badge variant="secondary" className="ml-2">
+                              you
+                            </Badge>
+                          )}
+                          <div className="mt-1 sm:hidden">{statusBadge}</div>
+                        </div>
                       </TableCell>
                       <TableCell className="min-w-32">
-                        {canAct && a.is_active && !a.removed_at ? (
+                        {canAct && a.is_active ? (
                           <Select value={a.role} onValueChange={(role) => changeRole(a, role)} disabled={busy}>
                             <SelectTrigger size="sm" className="w-36" aria-label={`Role of ${a.username}`}>
                               <SelectValue />
@@ -275,67 +293,53 @@ export function AccountsScreen() {
                             </SelectContent>
                           </Select>
                         ) : (
-                          a.role
+                          <span title={!a.is_active && canAct ? 'Reactivate the account to change its role' : undefined}>
+                            {a.role}
+                            {!a.is_active && canAct && <span className="sr-only"> (reactivate the account to change its role)</span>}
+                          </span>
                         )}
                       </TableCell>
-                      <TableCell className="hidden sm:table-cell">
-                        <Badge variant="outline" className={a.is_active ? TONE_CLASSES.success.badge : TONE_CLASSES.muted.badge}>
-                          {a.removed_at ? 'Removed' : a.is_active ? 'Active' : 'Deactivated'}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="hidden md:table-cell">
-                        {a.removed_at ? (
-                          <span title="Removed on">{formatDateTime(a.removed_at, { withTime: false, utc: true })}</span>
-                        ) : (
-                          formatDateTime(a.created_at, { withTime: false, utc: true })
-                        )}
-                      </TableCell>
+                      <TableCell className="hidden sm:table-cell">{statusBadge}</TableCell>
+                      <TableCell className="hidden md:table-cell">{formatDateTime(a.created_at, { withTime: false, utc: true })}</TableCell>
                       <TableCell className={cn(STICKY_ACTIONS, 'bg-card text-right')}>
-                        {a.removed_at ? (
-                          canRemove(a) ? (
-                            <div className="flex justify-end">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                disabled={busy}
-                                onClick={() => setConfirmRemoval({ account: a, remove: false })}
-                                aria-label={`Restore ${a.username}`}
-                              >
-                                <ArchiveRestore aria-hidden /> <span className="hidden lg:inline">Restore</span>
-                              </Button>
-                            </div>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">—</span>
-                          )
-                        ) : canAct ? (
-                          <div className="flex justify-end gap-1.5">
-                            <Button variant="outline" size="sm" disabled={busy} onClick={() => setResetFor(a)} aria-label={`Reset the password of ${a.username}`}>
+                        {canAct ? (
+                          <div className="ml-auto flex w-max flex-nowrap items-center justify-end gap-1.5">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className={ACTION_BUTTON}
+                              disabled={busy}
+                              onClick={() => setResetFor(a)}
+                              aria-label={`Reset the password of ${a.username}`}
+                            >
                               <KeyRound aria-hidden /> <span className="hidden lg:inline">Reset password</span>
                             </Button>
                             {a.is_active ? (
-                              <Button variant="destructive" size="sm" disabled={busy} onClick={() => setConfirm({ account: a, is_active: false })} aria-label={`Deactivate ${a.username}`}>
+                              <Button
+                                variant="destructive"
+                                size="sm"
+                                className={ACTION_BUTTON}
+                                disabled={busy}
+                                onClick={() => setConfirm({ account: a, is_active: false })}
+                                aria-label={`Deactivate ${a.username}`}
+                              >
                                 <UserX aria-hidden /> <span className="hidden lg:inline">Deactivate</span>
                               </Button>
                             ) : (
-                              <Button variant="outline" size="sm" disabled={busy} onClick={() => setConfirm({ account: a, is_active: true })} aria-label={`Reactivate ${a.username}`}>
-                                <UserCheck aria-hidden /> <span className="hidden lg:inline">Reactivate</span>
-                              </Button>
-                            )}
-                            {canRemove(a) && (
                               <Button
                                 variant="outline"
                                 size="sm"
+                                className={ACTION_BUTTON}
                                 disabled={busy}
-                                onClick={() => setConfirmRemoval({ account: a, remove: true })}
-                                aria-label={`Remove ${a.username}`}
-                                className="text-danger hover:text-danger"
+                                onClick={() => setConfirm({ account: a, is_active: true })}
+                                aria-label={`Reactivate ${a.username}`}
                               >
-                                <UserMinus aria-hidden /> <span className="hidden lg:inline">Remove</span>
+                                <UserCheck aria-hidden /> <span className="hidden lg:inline">Reactivate</span>
                               </Button>
                             )}
                           </div>
                         ) : (
-                          <span className="text-xs whitespace-normal text-muted-foreground">
+                          <span className="ml-auto block w-44 text-xs whitespace-normal text-muted-foreground">
                             {isMe ? 'Use "Change my password" in your account menu' : '—'}
                           </span>
                         )}
@@ -380,8 +384,9 @@ export function AccountsScreen() {
         message={
           confirm
             ? confirm.is_active
-              ? `${confirm.account.username} will be able to log in again.`
-              : `${confirm.account.username} will be signed out right away and cannot log in. Their past work stays in the records.`
+              ? `${confirm.account.username} will be able to log in again and moves back to the Active accounts.`
+              : `${confirm.account.username} will be signed out right away and cannot log in. The account moves to Deactivated and ` +
+                'stays in the records (their name stays on the orders, payments and changes they made). You can reactivate it anytime.'
             : ''
         }
         confirmLabel={confirm?.is_active ? 'Reactivate' : 'Deactivate'}
@@ -389,25 +394,6 @@ export function AccountsScreen() {
         busy={busy}
         onConfirm={setActive}
         onCancel={() => setConfirm(null)}
-      />
-      <ConfirmDialog
-        open={Boolean(confirmRemoval)}
-        title={confirmRemoval?.remove ? 'Remove this account?' : 'Restore this account?'}
-        message={
-          confirmRemoval
-            ? confirmRemoval.remove
-              ? `${confirmRemoval.account.username} will be signed out right away, cannot log in, and is hidden from this list.\n` +
-                'Nothing is deleted: their name stays on the payments, orders and records they made. ' +
-                'You can bring the account back with "Show removed" → Restore.'
-              : `${confirmRemoval.account.username} comes back to the Accounts list, still deactivated.\n` +
-                'Press Reactivate afterwards if they may log in again.'
-            : ''
-        }
-        confirmLabel={confirmRemoval?.remove ? 'Remove account' : 'Restore account'}
-        danger={Boolean(confirmRemoval?.remove)}
-        busy={busy}
-        onConfirm={removeOrRestore}
-        onCancel={() => setConfirmRemoval(null)}
       />
       <ResultDialog result={result} onClose={() => setResult(null)} />
     </div>

@@ -7,9 +7,8 @@
 // "Stock value" per row is item.stock_value from the server (Batch M6); the whole-catalog value
 // is summary.stock_value. Not ported from the MVP on purpose (rules guard: no-rule-math): the
 // totals footer over the filtered rows, which would add up stock and money here.
-import { ArrowDown, ArrowUp, ArrowUpDown, FlaskConical, Minus, MoreHorizontal, Pencil, Plus, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, ArrowUpDown, FlaskConical, MoreHorizontal, Pencil, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { peso } from '@xiaowu/client-core/format';
-import type { StockAction } from '@/components/catalog/stock-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -114,7 +113,8 @@ export function InventoryTable({
   canEdit: boolean;
   recentlyChanged: string[];
   onEdit: (item: InventoryItem) => void;
-  onAdjust: (item: InventoryItem, action: StockAction) => void;
+  /** Opens Adjust Stock for this item (Add Stock / Subtract Stock are switched in the dialog) */
+  onAdjust: (item: InventoryItem) => void;
   onDelete: (item: InventoryItem) => void;
   /** PB 15: open the usage rates (consumables) of this item */
   onRates: (item: InventoryItem) => void;
@@ -206,11 +206,8 @@ export function InventoryTable({
                       <DropdownMenuContent align="end" className="w-52">
                         <DropdownMenuLabel className="truncate">{item.item_name}</DropdownMenuLabel>
                         <DropdownMenuSeparator />
-                        <DropdownMenuItem onSelect={() => onAdjust(item, 'add')}>
-                          <Plus aria-hidden /> Add stock
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => onAdjust(item, 'subtract')}>
-                          <Minus aria-hidden /> Subtract / record loss
+                        <DropdownMenuItem onSelect={() => onAdjust(item)}>
+                          <SlidersHorizontal aria-hidden /> Adjust Stock
                         </DropdownMenuItem>
                         <DropdownMenuItem onSelect={() => onEdit(item)}>
                           <Pencil aria-hidden /> Edit details

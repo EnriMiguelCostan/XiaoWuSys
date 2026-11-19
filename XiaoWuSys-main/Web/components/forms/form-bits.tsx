@@ -132,14 +132,3 @@ export const bannerText = (data: unknown, shownFields: readonly string[], fallba
   }
   return errorMessage(data, fallback);
 };
-
-/** Suggestions for free-text inputs (<Input list="…">). */
-export function Suggestions({ id, values }: { id: string; values: readonly string[] }) {
-  return (
-    <datalist id={id}>
-      {values.map((v) => (
-        <option key={v} value={v} />
-      ))}
-    </datalist>
-  );
-}

@@ -58,7 +58,7 @@ let workLabel = 'Saving…';
 function trackWork(method: HttpMethod, path: string, body: unknown): () => void {
   if (method === 'GET' || typeof window === 'undefined' || OWN_INDICATOR.includes(path)) return () => {};
   const dryRun = Boolean(body && typeof body === 'object' && (body as { dry_run?: unknown }).dry_run);
-  workLabel = dryRun ? 'Calculating…' : method === 'DELETE' || /\/remove$/.test(path) ? 'Removing…' : 'Saving…';
+  workLabel = dryRun ? 'Calculating…' : method === 'DELETE' ? 'Removing…' : 'Saving…';
   inFlight += 1;
   if (inFlight === 1 && !showTimer && workToast === null) {
     showTimer = setTimeout(() => {

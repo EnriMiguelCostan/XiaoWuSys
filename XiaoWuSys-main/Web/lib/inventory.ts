@@ -99,8 +99,16 @@ const INVENTORY_PURGE: Capability = 'purge_inventory';
 export const canEditInventory = (user: SessionUser | null) => can(user, INVENTORY_EDIT);
 export const canPurgeInventory = (user: SessionUser | null) => can(user, INVENTORY_PURGE);
 
-// Suggestions only: any unit can be typed
+// Always offered in the Unit picker (item-form-dialog.tsx); any other unit can be created there
 export const COMMON_UNITS = ['pcs', 'pack', 'ream', 'box', 'roll', 'meter', 'yard', 'bottle', 'pad', 'set', 'sheet'];
+
+/** Adjust Stock > Add Stock reasons, sent as the adjustment's reason text (POST /adjust). */
+export const ADD_STOCK_REASONS = ['Supplier Delivery', 'Unused Stock Return', 'Stock Count Correction', 'Other'] as const;
+
+/** Adjust Stock > Subtract Stock reasons that are NOT material loss (POST /adjust, action
+ *  'subtract'), so a count correction never shows up as production waste. Material loss uses
+ *  LOSS_REASONS (lib/orders.ts) and POST /loss. */
+export const SUBTRACT_STOCK_REASONS = ['Stock Count Correction', 'Internal / Sample Use', 'Other Adjustment'] as const;
 
 /** Saved-offline note appended to success messages (data.source === 'local'). */
 export const offlineNote = (data: { source?: unknown }) =>

@@ -6,10 +6,11 @@
 // Rule split (steering §3.1): this form only checks that numbers are numbers. Duplicate names
 // (case/space-insensitive), whole-number and 2-decimal limits and the edit-conflict check are
 // the server's; its 400/409 message is shown in the form. Quantities are never edited here:
-// stock changes go through Adjust stock so every movement is recorded.
-import { useState } from 'react';
+// stock changes go through Adjust Stock so every movement is recorded.
+import { useMemo, useState } from 'react';
 import { Pencil, Plus } from 'lucide-react';
-import { Field, FormProblem, Suggestions, RequiredNote, fieldError } from '@/components/forms/form-bits';
+import { CreatableCombobox } from '@/components/forms/creatable-combobox';
+import { Field, FormProblem, RequiredNote, fieldError } from '@/components/forms/form-bits';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { Button } from '@/components/ui/button';
 import {
@@ -37,11 +38,14 @@ interface ItemResponse {
 export function ItemFormDialog({
   item,
   categories,
+  units,
   onClose,
   onDone,
 }: {
   item: InventoryItem | null;
   categories: string[];
+  /** Units already used in the catalog (may repeat or be empty) */
+  units: readonly (string | null)[];
   onClose: () => void;
   onDone: (result: ResultMessage) => void;
 }) {
@@ -57,11 +61,17 @@ export function ItemFormDialog({
     unit_cost: item ? String(item.unit_cost) : '',
     selling_price: item ? String(item.selling_price ?? 0) : '',
   });
+  // Units the catalog already uses first, so their spelling wins over a suggestion's
+  const unitOptions = useMemo(() => [...units, ...COMMON_UNITS], [units]);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<{ message: string; tone: 'danger' | 'warning' } | null>(null);
   // The server's last 400 answer: its details[] put each message next to the field it names
   const [failed, setFailed] = useState<unknown>(null);
   const errorFor = (field: string) => fieldError(failed, field);
+  // Set when the browser's form check finds Category empty (the picker is a button, not an input)
+  const [categoryMissing, setCategoryMissing] = useState(false);
+  const categoryError =
+    errorFor('item_category') || (categoryMissing && !form.item_category ? 'Choose a category, or type a new one and pick Create.' : '');
 
   const bind = (key: keyof typeof form) => ({
     value: form[key],
@@ -154,13 +164,11 @@ export function ItemFormDialog({
           </DialogTitle>
           <DialogDescription>
             {editing
-              ? 'Change the details of this item. Stock quantities are changed with Adjust stock.'
+              ? 'Change the details of this item. Stock quantities are changed with Adjust Stock.'
               : 'Add a material to the catalog.'}
           </DialogDescription>
         </DialogHeader>
 
-        <Suggestions id="catalog-category-options" values={categories} />
-        <Suggestions id="catalog-unit-options" values={COMMON_UNITS} />
 
         <form onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
           <RequiredNote className="sm:col-span-2" />
@@ -172,11 +180,27 @@ export function ItemFormDialog({
           <Field id="item-name" error={errorFor('item_name')} label="Item name *" className="sm:col-span-2">
             <Input id="item-name" required maxLength={TEXT_MAX.default} placeholder="e.g. Valiant Columnar Notebook" autoFocus {...bind('item_name')} />
           </Field>
-          <Field id="item-category" error={errorFor('item_category')} label="Category *">
-            <Input id="item-category" required maxLength={TEXT_MAX.category} list="catalog-category-options" placeholder="e.g. Notebooks" {...bind('item_category')} />
+          <Field id="item-category" error={categoryError} label="Category *">
+            <CreatableCombobox
+              id="item-category"
+              noun="category"
+              required
+              maxLength={TEXT_MAX.category}
+              value={form.item_category}
+              options={categories}
+              onChange={(value) => setForm((f) => ({ ...f, item_category: value }))}
+              onMissing={() => setCategoryMissing(true)}
+            />
           </Field>
           <Field id="item-unit" error={errorFor('unit')} label="Unit (what 1 means)">
-            <Input id="item-unit" maxLength={TEXT_MAX.unit} list="catalog-unit-options" placeholder="pcs, pack, ream…" {...bind('unit')} />
+            <CreatableCombobox
+              id="item-unit"
+              noun="unit"
+              maxLength={TEXT_MAX.unit}
+              value={form.unit}
+              options={unitOptions}
+              onChange={(value) => setForm((f) => ({ ...f, unit: value }))}
+            />
           </Field>
           <Field id="item-supplier" error={errorFor('supplier')} label="Supplier (optional)" className="sm:col-span-2">
             <Input id="item-supplier" maxLength={TEXT_MAX.default} placeholder="e.g. Quaff PH" {...bind('supplier')} />
@@ -206,7 +230,7 @@ export function ItemFormDialog({
               Cancel
             </Button>
             <Button busy={busy} type="submit" disabled={busy}>
-              {busy ? 'Saving…' : editing ? 'Save changes' : 'Add item'}
+              {busy ? 'Saving…' : editing ? 'Save changes' : 'Add Item'}
             </Button>
           </DialogFooter>
         </form>

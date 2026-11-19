@@ -130,6 +130,50 @@ describe('Account management', () => {
     assert.ok(owner.body.assignable_roles.includes('Owner'));
   });
 
+  it('splits Active / Deactivated on is_active, the same way from the offline copy', async () => {
+    const all = await t.request('GET', '/api/auth/users', { token: t.tokens.admin });
+    const active = await t.request('GET', '/api/auth/users?status=active', { token: t.tokens.admin });
+    const inactive = await t.request('GET', '/api/auth/users?status=inactive', { token: t.tokens.admin });
+    assert.equal(active.body.source, 'local');
+    assert.ok(active.body.users.length > 0 && active.body.users.every((u) => u.is_active));
+    assert.ok(inactive.body.users.some((u) => u.username === 'former.staff'));
+    assert.ok(inactive.body.users.every((u) => !u.is_active));
+    assert.equal(active.body.users.length + inactive.body.users.length, all.body.users.length);
+    assert.deepEqual(active.body.counts, { active: active.body.users.length, inactive: inactive.body.users.length, total: all.body.users.length });
+    assert.equal((await t.request('GET', '/api/auth/users?status=gone', { token: t.tokens.admin })).status, 400);
+  });
+
+  it('lists accounts by role, then username A-Z ignoring case, from the offline copy too', async () => {
+    // Inserted in a scrambled role order, straight into this computer's copy
+    const extra = [
+      ['s-zed', 'Zed.staff', 'Staff', 1], ['a-bea', 'bea.admin', 'Admin', 1], ['p-ana', 'Ana.prod', 'Production', 1],
+      ['o-carl', 'carl.owner', 'Owner', 1], ['a-abe', 'Abe.admin', 'Admin', 1], ['p-ben', 'ben.prod', 'Production', 0]
+    ];
+    for (const [user_id, username, role, is_active] of extra) {
+      await t.run(`INSERT INTO users (user_id, username, password_hash, role, is_active, sync_status) VALUES (?, ?, 'x', ?, ?, 'synced')`,
+        [user_id, username, role, is_active]);
+    }
+    try {
+      const rank = { Owner: 4, Admin: 3, Production: 2, Staff: 1 };
+      const ordered = (list) => list.every((u, i) => i === 0
+        || rank[list[i - 1].role] > rank[u.role]
+        || (rank[list[i - 1].role] === rank[u.role] && list[i - 1].username.localeCompare(u.username, 'en', { sensitivity: 'base' }) <= 0));
+      const mine = (list) => list.filter((u) => extra.some(([id]) => id === u.user_id)).map((u) => u.username);
+
+      const all = await t.request('GET', '/api/auth/users', { token: t.tokens.admin });
+      assert.equal(all.body.source, 'local');
+      assert.ok(ordered(all.body.users), all.body.users.map((u) => `${u.role}:${u.username}`).join(', '));
+      assert.deepEqual(all.body.users.map((u) => u.role).filter((r, i, a) => a.indexOf(r) === i), ['Owner', 'Admin', 'Production', 'Staff']);
+      assert.deepEqual(mine(all.body.users), ['carl.owner', 'Abe.admin', 'bea.admin', 'Ana.prod', 'ben.prod', 'Zed.staff']);
+      for (const status of ['active', 'inactive']) {
+        const r = await t.request('GET', `/api/auth/users?status=${status}`, { token: t.tokens.admin });
+        assert.ok(ordered(r.body.users), `${status}: ${r.body.users.map((u) => `${u.role}:${u.username}`).join(', ')}`);
+      }
+    } finally {
+      await t.run(`DELETE FROM users WHERE user_id IN (${extra.map(() => '?').join(', ')})`, extra.map(([id]) => id));
+    }
+  });
+
   it('hides account management from Staff', async () => {
     const r = await t.request('GET', '/api/auth/users', { token: t.tokens.staff });
     assert.equal(r.status, 403);
