@@ -154,7 +154,7 @@ describe('Account management', () => {
         [user_id, username, role, is_active]);
     }
     try {
-      const rank = { Owner: 4, Admin: 3, Staff: 2, Production: 1 }; // swapped in November 2026
+      const rank = { Owner: 4, Admin: 3, Staff: 2, Production: 1 }; // the list order: Staff above Production
       const ordered = (list) => list.every((u, i) => i === 0
         || rank[list[i - 1].role] > rank[u.role]
         || (rank[list[i - 1].role] === rank[u.role] && list[i - 1].username.localeCompare(u.username, 'en', { sensitivity: 'base' }) <= 0));

@@ -14,7 +14,7 @@ describe('Who may do what (rules only)', () => {
     }
     assert.ok(can('Admin', 'view_finance'));
     assert.ok(!can('Admin', 'set_quote'));
-    assert.deepEqual(capabilitiesFor('Production'), ['view_orders', 'view_stock']);
+    assert.deepEqual(capabilitiesFor('Production'), capabilitiesFor('Staff'), 'Production works like Staff (November 2026)');
     assert.throws(() => can('Owner', 'fly_to_the_moon'), /Unknown capability/);
   });
 
@@ -44,10 +44,9 @@ describe('Who may do what (rules only)', () => {
     const closed = allowedActions({ production_status: 'Cancelled' }, 'Owner');
     assert.deepEqual([closed.statuses, closed.edit_deadline, closed.record_payment, closed.log_loss, closed.void_payment],
       [[], false, false, false, true], 'a cancelled order can still have its payments voided (refunds)');
-    const { print_receipt: staffPrints, print_quote: staffQuote, ...staff } = allowedActions(pending, 'Production');
-    assert.deepEqual([staffPrints, staffQuote], [true, true], 'Staff can print a payment acknowledgement and the quotation');
-    assert.ok(Object.values(staff).every((v) => v === false || v === 0 || v === null || (Array.isArray(v) && v.length === 0)),
-      'otherwise Staff can only look');
+    for (const order of [pending, { production_status: 'Printing', total_quote_amount: 900 }, { production_status: 'Completed' }]) {
+      assert.deepEqual(allowedActions(order, 'Production'), allowedActions(order, 'Staff'), 'Production gets the same buttons as Staff');
+    }
   });
 
   it('adds up lines of the same material and reports what is short', () => {

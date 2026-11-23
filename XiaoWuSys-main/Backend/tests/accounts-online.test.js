@@ -266,7 +266,7 @@ describe('Account management (online)', () => {
     for (const [user_id, username, role, is_active] of extra) {
       users.set(user_id, { user_id, username, password_hash: 'x', role, is_active, tokens_valid_after: null, created_at: '2026-11-01 00:00:00' });
     }
-    const RANK = { Owner: 4, Admin: 3, Staff: 2, Production: 1 }; // Staff and Production swapped (migration 015)
+    const RANK = { Owner: 4, Admin: 3, Staff: 2, Production: 1 }; // the list order: Staff above Production
     const inOrder = (list) => list.every((u, i) => i === 0 || (() => {
       const p = list[i - 1];
       const rp = RANK[p.role] || 0; const ru = RANK[u.role] || 0;

@@ -119,10 +119,14 @@ const USER_COLUMNS = 'user_id, username, password_hash, role, is_active, tokens_
 const LIST_STATUSES = ['active', 'inactive', 'all'];
 
 // The Accounts list order, decided here so no screen sorts by role name: role hierarchy first
-// (ROLE_RANK: Owner, Admin, Production, Staff; an unknown role ranks 0, so it comes last), then
-// username A-Z ignoring case, then user_id so the order is always the same.
+// (ROLE_RANK: Owner, Admin, then Staff and Production, which share a rank; an unknown role ranks 0,
+// so it comes last), Staff listed before Production so each role stays together, then username
+// A-Z ignoring case, then user_id so the order is always the same.
+const LIST_ORDER = ['Owner', 'Admin', 'Staff', 'Production'];
+const listPosition = (role) => (LIST_ORDER.includes(role) ? LIST_ORDER.indexOf(role) : LIST_ORDER.length);
 const byRoleThenUsername = (a, b) =>
   rankOf(b.role) - rankOf(a.role)
+  || listPosition(a.role) - listPosition(b.role)
   || String(a.username).localeCompare(String(b.username), 'en', { sensitivity: 'base' })
   || (a.user_id < b.user_id ? -1 : a.user_id > b.user_id ? 1 : 0);
 

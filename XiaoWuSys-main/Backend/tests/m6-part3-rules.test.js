@@ -146,7 +146,7 @@ describe('Payment voids (PB 23)', () => {
   it('offers the void button to the Owner only', () => {
     const order = { production_status: 'Printing', total_quote_amount: 1000 };
     assert.deepEqual(['Owner', 'Admin', 'Staff', 'Production'].map((r) => allowedActions(order, r).void_payment), [true, false, false, false]);
-    assert.deepEqual(['Owner', 'Admin', 'Staff', 'Production'].map((r) => allowedActions(order, r).log_loss), [true, true, true, false]);
+    assert.deepEqual(['Owner', 'Admin', 'Staff', 'Production'].map((r) => allowedActions(order, r).log_loss), [true, true, true, true]);
   });
 });
 

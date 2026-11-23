@@ -82,6 +82,17 @@ describe('M6 part 4 offline: archived orders and customers', () => {
     assert.ok(!list.body.customers.some((c) => c.customer_id === quiet));
     const all = await t.request('GET', '/api/customers?include_archived=true', { token: production });
     assert.equal(all.body.customers.find((c) => c.customer_id === quiet).archived_by, 'u-admin');
+    // "Show archived" lists the archived ones alone; the default list is the active ones alone
+    const only = await t.request('GET', '/api/customers?include_archived=only', { token: production });
+    assert.equal(only.status, 200, only.text);
+    assert.ok(only.body.customers.length > 0 && only.body.customers.every((c) => c.archived_at), 'archived clients only');
+    assert.ok(only.body.customers.some((c) => c.customer_id === quiet));
+    assert.ok(list.body.customers.every((c) => !c.archived_at));
+    assert.equal(only.body.customers.length + list.body.customers.length, all.body.customers.length);
+    const suppliersOnly = await t.request('GET', '/api/suppliers?include_archived=only', { token: production });
+    assert.equal(suppliersOnly.status, 200, suppliersOnly.text);
+    assert.ok(suppliersOnly.body.suppliers.every((x) => x.archived_at));
+    assert.equal((await t.request('GET', '/api/customers?include_archived=maybe', { token: production })).status, 400);
     const r = await t.request('POST', '/api/orders', { token: production, body: { customer_id: quiet, production_deadline: shopDate(5), resolution: 'Delayed' } });
     assert.deepEqual([r.status, r.body.error], [409, 'RECORD_ARCHIVED']);
     assert.match(r.body.message, /customer is archived/);

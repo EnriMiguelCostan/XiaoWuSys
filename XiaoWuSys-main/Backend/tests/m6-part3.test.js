@@ -112,8 +112,7 @@ describe('M6 part 3 offline: misprints, waste, overheads, P&L, voids', () => {
       [['Cap', 1, 'Machine Failure'], ['Jersey Blank', 2, 'Human Error']]);
     assert.equal(owners.body.allowed_actions.log_loss, true);
     const staffView = await t.request('GET', `/api/orders/${orderId}`, { token: staff });
-    assert.deepEqual([staffView.body.allowed_actions.log_loss, staffView.body.allowed_actions.void_payment], [false, false]);
-    assert.equal((await loss(shirt, { quantity_lost: 1, reason_code: 'misprint_alignment' }, staff)).status, 403);
+    assert.deepEqual([staffView.body.allowed_actions.log_loss, staffView.body.allowed_actions.void_payment], [true, false], 'Production logs losses like Staff');
   });
 
   it('sums this month’s waste on the dashboard, with costs for finance accounts only', async () => {

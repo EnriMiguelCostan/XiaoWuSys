@@ -26,7 +26,8 @@ describe('Archived orders (PB 23, D2)', () => {
     assert.equal(owner.payment_blocked_reason, ARCHIVED_REASON);
     assert.deepEqual([owner.print_receipt, owner.print_quote], [true, true]);
     assert.equal(allowedActions(archived, 'Staff').restore_order, false);
-    assert.equal(allowedActions(archived, 'Production').payment_blocked_reason, null, 'Staff cannot pay anyway');
+    assert.equal(allowedActions(archived, 'Production').payment_blocked_reason, ARCHIVED_REASON, 'Production may pay, so it is told why not');
+    assert.equal(allowedActions(archived, 'Production').restore_order, false);
   });
 });
 

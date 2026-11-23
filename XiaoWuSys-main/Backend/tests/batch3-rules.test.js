@@ -19,16 +19,16 @@ const { PRODUCTION_STATUSES } = require('../utils/validation');
 
 describe('Batch 3 rules (no database)', () => {
   it('gives the catalog its own capabilities', () => {
-    assert.deepEqual(rolesWith('edit_inventory'), ['Owner', 'Admin', 'Staff']);
+    assert.deepEqual(rolesWith('edit_inventory'), ['Owner', 'Admin', 'Staff', 'Production']);
     assert.deepEqual(rolesWith('purge_inventory'), ['Owner', 'Admin']);
     assert.ok(can('Staff', 'edit_inventory') && !can('Staff', 'purge_inventory'));
-    assert.ok(!can('Production', 'edit_inventory'));
-    assert.deepEqual(capabilitiesFor('Production'), ['view_orders', 'view_stock'], 'Production only looks (it swapped places with Staff)');
+    assert.ok(can('Production', 'edit_inventory') && !can('Production', 'purge_inventory'));
+    assert.deepEqual(capabilitiesFor('Production'), capabilitiesFor('Staff'), 'Production works like Staff');
   });
 
-  it('ranks Owner over Admin over Production over Staff, and nobody over an equal', () => {
-    assert.ok(outranks('Owner', 'Admin') && outranks('Admin', 'Staff') && outranks('Staff', 'Production'));
-    assert.ok(!outranks('Admin', 'Admin') && !outranks('Admin', 'Owner') && !outranks('Production', 'Staff'));
+  it('ranks Owner over Admin over Staff = Production, and nobody over an equal', () => {
+    assert.ok(outranks('Owner', 'Admin') && outranks('Admin', 'Staff') && outranks('Admin', 'Production'));
+    assert.ok(!outranks('Admin', 'Admin') && !outranks('Admin', 'Owner') && !outranks('Production', 'Staff') && !outranks('Staff', 'Production'));
     assert.equal(rankOf('Intern'), 0, 'an unknown role ranks below everyone');
     assert.ok(!outranks(undefined, null), 'two unknown editors are equal: nobody wins automatically');
   });
@@ -156,15 +156,14 @@ describe('Batch 3 on the offline server (API)', () => {
   it('tells each account its catalog capabilities, and the routes follow them', async () => {
     const caps = async (username) =>
       (await t.request('POST', '/api/auth/login', { body: { username, password: fixtures.PASSWORD } })).body.capabilities;
-    const [admin, production, staff] = await Promise.all([caps('admin'), caps('staff'), caps('production')]);
+    const [admin, staff, production] = await Promise.all([caps('admin'), caps('staff'), caps('production')]);
     assert.ok(admin.includes('edit_inventory') && admin.includes('purge_inventory'));
-    assert.ok(production.includes('edit_inventory') && !production.includes('purge_inventory'));
-    assert.ok(!staff.includes('edit_inventory') && !staff.includes('purge_inventory'));
+    for (const role of [staff, production]) assert.ok(role.includes('edit_inventory') && !role.includes('purge_inventory'));
 
-    const add = await t.request('POST', '/api/inventory', { token: t.tokens.production, body: { item_name: 'Ballpen', item_category: 'Office' } });
-    assert.deepEqual([add.status, add.body.error], [403, 'FORBIDDEN']);
-    const purge = await t.request('DELETE', `/api/inventory/${items['Vinyl Sticker Paper']}/permanent`, { token: t.tokens.staff });
-    assert.deepEqual([purge.status, purge.body.error], [403, 'FORBIDDEN'], 'Production may edit but not purge');
+    for (const token of [t.tokens.staff, t.tokens.production]) {
+      const purge = await t.request('DELETE', `/api/inventory/${items['Vinyl Sticker Paper']}/permanent`, { token });
+      assert.deepEqual([purge.status, purge.body.error], [403, 'FORBIDDEN'], 'Staff and Production may edit but not purge');
+    }
     const empty = await t.request('POST', '/api/inventory/recycle-bin/empty', { token: t.tokens.staff });
     assert.equal(empty.status, 403);
     const adminPurge = await t.request('DELETE', `/api/inventory/${items['Vinyl Sticker Paper']}/permanent`, { token: t.tokens.admin });

@@ -115,7 +115,7 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.equal(add.status, 201, add.text);
     ids.quaff = add.body.supplier.supplier_id;
     assert.deepEqual([(await call('POST', '/api/suppliers', staff, { supplier_name: 'quaff  ph' })).body.error], ['DUPLICATE_SUPPLIER']);
-    assert.equal((await call('POST', '/api/suppliers', production, { supplier_name: 'Viewer Supply' })).status, 403);
+    assert.equal((await call('POST', '/api/suppliers', production, { supplier_name: 'Prod Supply', email: 'nope' })).status, 400, 'Production passes the role check');
     assert.equal((await call('POST', '/api/suppliers', staff, { supplier_name: 'Bad Mail', email: 'nope' })).status, 400);
 
     const renamed = await call('PATCH', `/api/suppliers/${ids.davao}`, staff, { supplier_name: 'Davao Garments Supply' });
@@ -131,6 +131,10 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
       document_type: 'stock_in', occurred_at: pastLocal(1), supplier_id: ids.quaff, reference_type: 'No paper', lines: [{ inventory_id: 'i-ink', quantity: 1, unit_cost: 2 }]
     });
     assert.deepEqual([blocked.status, blocked.body.error], [409, 'SUPPLIER_ARCHIVED']);
+    const names = async (q) => (await call('GET', `/api/suppliers${q}`, production)).body.suppliers.map((x) => x.supplier_name);
+    assert.deepEqual(await names('?include_archived=only'), ['Quaff PH'], '"Show archived" lists the archived ones alone');
+    assert.deepEqual(await names(''), ['Davao Garments Supply']);
+    assert.deepEqual(await names('?include_archived=true'), ['Davao Garments Supply', 'Quaff PH']);
     assert.equal((await call('POST', `/api/suppliers/${ids.quaff}/restore`, admin)).status, 200);
   });
 
@@ -143,7 +147,8 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.deepEqual([future.status, future.body.details[0].field], [400, 'occurred_at']);
     const twice = await call('POST', '/api/stock/documents', staff, { ...base, reference_no: 'DR-1', lines: [lines[0], lines[0]] });
     assert.equal(twice.status, 400, 'one line per item');
-    assert.equal((await call('POST', '/api/stock/documents', production, { ...base, reference_no: 'DR-1', lines })).status, 403);
+    assert.equal((await call('POST', '/api/stock/documents', production, { ...base, reference_no: 'DR-1', lines: [lines[0], lines[0]] })).status, 400,
+      'Production records stock like Staff, so it reaches the same checks');
 
     const r = await call('POST', '/api/stock/documents', staff, { ...base, reference_no: 'DR-0457', lines });
     assert.equal(r.status, 201, r.text);
@@ -202,7 +207,9 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.equal((await call('POST', `/api/stock/documents/${ids.stockOut}/void`, admin, { reason: 'again' })).body.error, 'STOCK_DOCUMENT_VOIDED');
     const shown = await call('GET', `/api/stock/documents/${ids.stockIn}`, production);
     assert.deepEqual([shown.status, shown.body.document.status, shown.body.history[0].action, shown.body.history[0].by_name], [200, 'Corrected', 'Corrected', 'staff']);
-    assert.deepEqual([shown.body.document.allowed_actions.edit, shown.body.document.allowed_actions.void], [false, false], 'Production only looks');
+    const staffSees = (await call('GET', `/api/stock/documents/${ids.stockIn}`, staff)).body.document.allowed_actions;
+    assert.deepEqual(shown.body.document.allowed_actions, staffSees, 'Production gets the same buttons as Staff');
+    assert.equal(shown.body.document.allowed_actions.void, false, 'voiding stays with the Owner / Admin');
   });
 
   it('sets the count from a physical count, never below what orders hold', async () => {
@@ -294,7 +301,8 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.equal((await batch(100, { delivered_at: pastLocal(1, 16) })).status, 201);
     const tooMany = await batch(50);
     assert.deepEqual([tooMany.status, tooMany.body.error, tooMany.body.remaining], [409, 'DELIVERY_EXCEEDS_REMAINING', 40]);
-    assert.equal((await call('POST', `/api/orders/${ids.order}/deliveries`, production, { quantity: 1 })).status, 403);
+    assert.equal((await call('POST', `/api/orders/${ids.order}/deliveries`, production, { quantity: 50 })).body.error, 'DELIVERY_EXCEEDS_REMAINING',
+      'Production records deliveries like Staff');
 
     const early = await call('PATCH', `/api/orders/${ids.order}/status`, staff, { status: 'Completed' });
     assert.deepEqual([early.status, early.body.error, early.body.missing.map((m) => m.code)], [409, 'COMPLETION_REQUIREMENTS_NOT_MET', ['BALANCE_DUE', 'PIECES_NOT_DELIVERED']]);
@@ -374,13 +382,14 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
       customer_type: 'School', contact_person: 'Mrs. Lopez', email: 'pta@agdaonhs.edu.ph', address: 'Agdao, Davao City', social_media: 'fb.com/agdaonhs'
     });
     assert.equal(r.status, 200, r.text);
-    assert.equal((await call('PATCH', '/api/customers/c-1', production, { notes: 'x' })).status, 403);
+    assert.equal((await call('PATCH', '/api/customers/c-1', production, { notes: 'x' })).status, 200, 'Production edits clients like Staff');
     const p = await call('GET', '/api/customers/c-1', production);
     assert.equal(p.status, 200, p.text);
     assert.deepEqual([p.body.customer.customer_type, p.body.customer.contact_person], ['School', 'Mrs. Lopez']);
     assert.deepEqual([p.body.totals.order_count, p.body.totals.open_orders], [2, 1], 'the old Pending order and the completed one');
     assert.equal(p.body.totals.total_billed, 32600);
-    assert.equal(p.body.allowed_actions.edit, false, 'Production only looks');
+    assert.equal(p.body.allowed_actions.edit, true, 'Production edits like Staff');
+    assert.equal(p.body.allowed_actions.archive, false, 'archiving stays with the Owner / Admin');
   });
 
   it('records bulk waste, and reports payments, waste and the month’s transactions', async () => {

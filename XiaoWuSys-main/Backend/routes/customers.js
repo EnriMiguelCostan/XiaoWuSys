@@ -5,7 +5,8 @@
 //      Body: { full_name, contact_number?, platform_source? }
 //      contact_number: 11 digits starting with 0 (e.g. 09171234567); spaces/dashes are removed
 //      409 DUPLICATE_CUSTOMER when the same name + contact number already exists
-// GET  /api/customers?include_archived=true   archived customers are hidden unless asked for
+// GET  /api/customers?include_archived=true|only   archived customers are hidden unless asked for
+//      (only = the archived ones alone, for the "Show archived" view)
 // POST /api/customers/:customer_id/archive | restore   (PB 23, D2; Owner / Admin, online only)
 //      409 ORDER_STILL_OPEN while the customer has an order that is not Completed / Cancelled
 // Migration 015 (client profiles):
@@ -42,13 +43,14 @@ router.use(verifyToken);
 
 router.get('/', requireRole(READ_ROLES), async (req, res) => {
   const v = createValidator();
-  const includeArchived = v.oneOf(req.query.include_archived, 'include_archived', ['true', 'false'], { required: false }) === 'true';
+  const archivedMode = v.oneOf(req.query.include_archived, 'include_archived', ['true', 'false', 'only'], { required: false }) || 'false';
   if (v.failed()) return v.send(res);
+  const includeArchived = archivedMode !== 'false';
   try {
     const result = await listRecords(req, 'customers', {
-      orderBy: 'full_name, customer_id', limit: 1000, where: includeArchived ? null : 'archived_at IS NULL'
+      orderBy: 'full_name, customer_id', limit: 1000, where: { true: null, only: 'archived_at IS NOT NULL', false: 'archived_at IS NULL' }[archivedMode]
     });
-    res.status(200).json({ source: result.source, customers: result.records, include_archived: includeArchived });
+    res.status(200).json({ source: result.source, customers: result.records, include_archived: includeArchived, archived_only: archivedMode === 'only' });
   } catch (err) {
     sendDbError(res, err, 'listing customers');
   }

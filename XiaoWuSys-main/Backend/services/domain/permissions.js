@@ -6,9 +6,9 @@
 // ==========================================
 
 const ALL_ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
-// Adviser consultation (November 2026): the Staff role now does what Production did (create
-// orders, record payments, run the stock), and Production now views only, as Staff did.
-const WRITE_ROLES = ['Owner', 'Admin', 'Staff'];
+// Adviser consultation (November 2026): Staff and Production both do the day-to-day work
+// (create and edit orders, record payments, run the stock). Only the Owner / Admin manage.
+const WRITE_ROLES = ['Owner', 'Admin', 'Staff', 'Production'];
 const MANAGER_ROLES = ['Owner', 'Admin'];
 const OWNER_ONLY = ['Owner'];
 
@@ -46,8 +46,8 @@ const CAPABILITIES = {
 
 // Who outranks whom (PB 5): a higher rank may take over an edit lock and replace a lower
 // rank's conflicting edit. An unknown or missing role ranks below everyone.
-// Staff and Production swapped places with their capabilities (November 2026).
-const ROLE_RANK = { Owner: 4, Admin: 3, Staff: 2, Production: 1 };
+// Staff and Production share a rank (November 2026): neither overrides the other.
+const ROLE_RANK = { Owner: 4, Admin: 3, Staff: 2, Production: 2 };
 const rankOf = (role) => ROLE_RANK[role] || 0;
 // May "role" replace a conflicting change last made by "lastEditedRole"? Strictly higher only.
 const outranks = (role, lastEditedRole) => rankOf(role) > rankOf(lastEditedRole);
