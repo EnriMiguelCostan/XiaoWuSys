@@ -6,8 +6,10 @@
 // Rule split (steering §3.1): this form only checks that numbers are numbers. Duplicate names
 // (case/space-insensitive), whole-number and 2-decimal limits and the edit-conflict check are
 // the server's; its 400/409 message is shown in the form. Quantities are never edited here:
-// stock changes go through Adjust Stock so every movement is recorded.
-import { useMemo, useState } from 'react';
+// stock changes go through Stock in / Stock out / Stock count so every movement has a record.
+// Migration 015: the usual supplier is chosen from the supplier profiles, and "Garment" marks
+// items whose print details have sizes (shirts, jerseys) and that go through the Pressing step.
+import { useEffect, useMemo, useState } from 'react';
 import { Pencil, Plus } from 'lucide-react';
 import { CreatableCombobox } from '@/components/forms/creatable-combobox';
 import { Field, FormProblem, RequiredNote, fieldError } from '@/components/forms/form-bits';
@@ -22,7 +24,10 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Select, SelectValue } from '@/components/ui/select';
+import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@/components/forms/bounded-select';
 import { useApi } from '@/hooks/use-api';
+import type { Supplier } from '@/lib/stock';
 import { errorMessage } from '@/lib/api';
 import { COMMON_UNITS, offlineNote, toNumberInput, type InventoryItem } from '@/lib/inventory';
 import { MONEY_INPUT_MAX, TEXT_MAX, WHOLE_NUMBER_MAX } from '@/lib/input-limits';
@@ -56,6 +61,8 @@ export function ItemFormDialog({
     item_category: item?.item_category ?? '',
     unit: item?.unit || 'pcs',
     supplier: item?.supplier ?? '',
+    supplier_id: item?.supplier_id ?? '',
+    has_sizes: Boolean(item?.has_sizes),
     quantity_available: '',
     minimum_threshold: item ? String(item.minimum_threshold) : '',
     unit_cost: item ? String(item.unit_cost) : '',
@@ -63,6 +70,10 @@ export function ItemFormDialog({
   });
   // Units the catalog already uses first, so their spelling wins over a suggestion's
   const unitOptions = useMemo(() => [...units, ...COMMON_UNITS], [units]);
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  useEffect(() => {
+    api<{ suppliers: Supplier[] }>('GET', '/suppliers').then(({ ok, data }) => ok && setSuppliers(data.suppliers));
+  }, [api]);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<{ message: string; tone: 'danger' | 'warning' } | null>(null);
   // The server's last 400 answer: its details[] put each message next to the field it names
@@ -73,7 +84,7 @@ export function ItemFormDialog({
   const categoryError =
     errorFor('item_category') || (categoryMissing && !form.item_category ? 'Choose a category, or type a new one and pick Create.' : '');
 
-  const bind = (key: keyof typeof form) => ({
+  const bind = (key: 'item_name' | 'supplier' | 'quantity_available' | 'minimum_threshold' | 'unit_cost' | 'selling_price') => ({
     value: form[key],
     onChange: (e: React.ChangeEvent<HTMLInputElement>) => setForm((f) => ({ ...f, [key]: e.target.value })),
   });
@@ -102,7 +113,9 @@ export function ItemFormDialog({
         item_name: name,
         item_category: category,
         unit,
-        supplier: supplier || undefined,
+        supplier: form.supplier_id ? undefined : supplier || undefined,
+        supplier_id: form.supplier_id || undefined,
+        has_sizes: form.has_sizes,
         quantity_available: quantity,
         minimum_threshold: threshold,
         unit_cost: cost,
@@ -114,7 +127,9 @@ export function ItemFormDialog({
       if (name !== item.item_name) body.item_name = name;
       if (category !== item.item_category) body.item_category = category;
       if (unit !== (item.unit || 'pcs')) body.unit = unit;
-      if (supplier !== (item.supplier ?? '')) body.supplier = supplier || null;
+      if (form.supplier_id !== (item.supplier_id ?? '')) body.supplier_id = form.supplier_id || null;
+      else if (!form.supplier_id && supplier !== (item.supplier ?? '')) body.supplier = supplier || null;
+      if (form.has_sizes !== Boolean(item.has_sizes)) body.has_sizes = form.has_sizes;
       if (form.minimum_threshold.trim() !== String(item.minimum_threshold)) body.minimum_threshold = threshold;
       if (form.unit_cost.trim() !== String(item.unit_cost)) body.unit_cost = cost;
       if (form.selling_price.trim() !== String(item.selling_price ?? 0)) body.selling_price = price;
@@ -164,7 +179,7 @@ export function ItemFormDialog({
           </DialogTitle>
           <DialogDescription>
             {editing
-              ? 'Change the details of this item. Stock quantities are changed with Adjust Stock.'
+              ? 'Change the details of this item. Quantities change only through Stock in, Stock out, a count or a recorded loss.'
               : 'Add a material to the catalog.'}
           </DialogDescription>
         </DialogHeader>
@@ -202,11 +217,31 @@ export function ItemFormDialog({
               onChange={(value) => setForm((f) => ({ ...f, unit: value }))}
             />
           </Field>
-          <Field id="item-supplier" error={errorFor('supplier')} label="Supplier (optional)" className="sm:col-span-2">
-            <Input id="item-supplier" maxLength={TEXT_MAX.default} placeholder="e.g. Quaff PH" {...bind('supplier')} />
+          <Field id="item-supplier" error={errorFor('supplier_id') || errorFor('supplier')} label="Usual supplier" className="sm:col-span-2"
+            hint={suppliers.length === 0 ? 'Add suppliers on the Suppliers page to choose one here.' : 'Set automatically on the first stock in if left empty.'}>
+            <Select value={form.supplier_id || '__none__'} onValueChange={(v) => setForm((f) => ({ ...f, supplier_id: v === '__none__' ? '' : v }))}>
+              <BoundedSelectTrigger id="item-supplier">
+                <SelectValue placeholder="No supplier yet" />
+              </BoundedSelectTrigger>
+              <BoundedSelectContent>
+                <BoundedSelectItem value="__none__" label="No supplier yet">{item?.supplier && !item.supplier_id ? `Keep "${item.supplier}"` : 'No supplier yet'}</BoundedSelectItem>
+                {suppliers.map((s) => (
+                  <BoundedSelectItem key={s.supplier_id} value={s.supplier_id} label={s.supplier_name}>
+                    {s.supplier_name}
+                  </BoundedSelectItem>
+                ))}
+              </BoundedSelectContent>
+            </Select>
           </Field>
+          <label className="flex min-h-10 items-start gap-2 text-sm sm:col-span-2">
+            <input type="checkbox" className="mt-0.5 size-4" checked={form.has_sizes} onChange={(e) => setForm((f) => ({ ...f, has_sizes: e.target.checked }))} />
+            <span>
+              <span className="font-medium">Garment (has sizes)</span>
+              <span className="block text-xs text-muted-foreground">Shirts, jerseys, polos… Their print details get a size, name and number, and they go through Pressing.</span>
+            </span>
+          </label>
           {!editing && (
-            <Field id="item-quantity" error={errorFor('quantity_available')} label="Quantity in stock">
+            <Field id="item-quantity" error={errorFor('quantity_available')} label="Opening stock" hint="What is on the shelf now. Later deliveries go through Stock in.">
               <Input id="item-quantity" type="number" min={0} max={WHOLE_NUMBER_MAX} step={1} inputMode="numeric" placeholder="0" {...bind('quantity_available')} />
             </Field>
           )}

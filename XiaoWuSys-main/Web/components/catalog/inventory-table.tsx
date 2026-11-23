@@ -7,7 +7,8 @@
 // "Stock value" per row is item.stock_value from the server (Batch M6); the whole-catalog value
 // is summary.stock_value. Not ported from the MVP on purpose (rules guard: no-rule-math): the
 // totals footer over the filtered rows, which would add up stock and money here.
-import { ArrowDown, ArrowUp, ArrowUpDown, FlaskConical, MoreHorizontal, Pencil, SlidersHorizontal, Trash2 } from 'lucide-react';
+import Link from 'next/link';
+import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpDown, ArrowUpFromLine, FlaskConical, History, Minus, MoreHorizontal, Pencil, Shirt, Trash2 } from 'lucide-react';
 import { peso } from '@xiaowu/client-core/format';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -103,9 +104,11 @@ export function InventoryTable({
   canEdit,
   recentlyChanged,
   onEdit,
-  onAdjust,
+  onLoss,
   onDelete,
   onRates,
+  canReceive = false,
+  canIssue = false,
 }: {
   rows: InventoryItem[];
   sort: SortState;
@@ -113,8 +116,11 @@ export function InventoryTable({
   canEdit: boolean;
   recentlyChanged: string[];
   onEdit: (item: InventoryItem) => void;
-  /** Opens Adjust Stock for this item (Add Stock / Subtract Stock are switched in the dialog) */
-  onAdjust: (item: InventoryItem) => void;
+  /** Record loss (waste) for this item */
+  onLoss: (item: InventoryItem) => void;
+  /** migration 015: Stock in / Stock out links in the row menu */
+  canReceive?: boolean;
+  canIssue?: boolean;
   onDelete: (item: InventoryItem) => void;
   /** PB 15: open the usage rates (consumables) of this item */
   onRates: (item: InventoryItem) => void;
@@ -134,7 +140,7 @@ export function InventoryTable({
             {COLUMNS.map((col) => (
               <SortHead key={col.key} col={col} sort={sort} onSort={onSort} />
             ))}
-            {canEdit && (
+            {(
               <TableHead className={cn(STICKY_ACTIONS, 'w-px bg-muted text-right')}>
                 <span className="sr-only">Actions</span>
               </TableHead>
@@ -157,7 +163,10 @@ export function InventoryTable({
                     so one giant unbroken word wraps inside the cell instead of widening the table;
                     break-words alone does not, in an auto-layout table. */}
                 <TableCell className={cn('min-w-40 border-l-4 whitespace-normal wrap-anywhere', TONE_EDGE[look.tone])}>
-                  <span className="block font-medium">{item.item_name}</span>
+                  <span className="flex items-center gap-1 font-medium">
+                    {item.item_name}
+                    {item.has_sizes && <Shirt className="size-3.5 shrink-0 text-muted-foreground" aria-label="Garment (has sizes)" />}
+                  </span>
                   <span className="block text-xs text-muted-foreground md:hidden">{item.item_category}</span>
                   {item.sync_status !== 'synced' && (
                     <Badge variant="outline" className={cn('mt-1', TONE_CLASSES.info.badge)}>
@@ -194,7 +203,7 @@ export function InventoryTable({
                 <TableCell className="hidden text-right tabular-nums lg:table-cell">
                   {item.stock_value === undefined ? '—' : peso(item.stock_value)}
                 </TableCell>
-                {canEdit && (
+                {(
                   <TableCell className={cn(STICKY_ACTIONS, 'bg-card text-right')}>
                     {/* modal={false}: these items open dialogs; a modal menu can leave the page unclickable */}
                     <DropdownMenu modal={false}>
@@ -206,19 +215,43 @@ export function InventoryTable({
                       <DropdownMenuContent align="end" className="w-52">
                         <DropdownMenuLabel className="truncate">{item.item_name}</DropdownMenuLabel>
                         <DropdownMenuSeparator />
-                        <DropdownMenuItem onSelect={() => onAdjust(item)}>
-                          <SlidersHorizontal aria-hidden /> Adjust Stock
+                        <DropdownMenuItem asChild>
+                          <Link href={`/inventory/movements?item=${encodeURIComponent(item.inventory_id)}`}>
+                            <History aria-hidden /> Stock card
+                          </Link>
                         </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => onEdit(item)}>
-                          <Pencil aria-hidden /> Edit details
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => onRates(item)}>
-                          <FlaskConical aria-hidden /> Usage rates (consumables)
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem variant="destructive" onSelect={() => onDelete(item)}>
-                          <Trash2 aria-hidden /> Move to Recycle Bin
-                        </DropdownMenuItem>
+                        {canReceive && (
+                          <DropdownMenuItem asChild>
+                            <Link href={`/inventory/stock-in?new=1&item=${encodeURIComponent(item.inventory_id)}`}>
+                              <ArrowDownToLine aria-hidden /> Stock in
+                            </Link>
+                          </DropdownMenuItem>
+                        )}
+                        {canIssue && (
+                          <DropdownMenuItem asChild>
+                            <Link href={`/inventory/stock-out?new=1&item=${encodeURIComponent(item.inventory_id)}`}>
+                              <ArrowUpFromLine aria-hidden /> Stock out
+                            </Link>
+                          </DropdownMenuItem>
+                        )}
+                        {canEdit && (
+                          <>
+                            <DropdownMenuItem onSelect={() => onLoss(item)}>
+                              <Minus aria-hidden /> Record loss
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem onSelect={() => onEdit(item)}>
+                              <Pencil aria-hidden /> Edit details
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => onRates(item)}>
+                              <FlaskConical aria-hidden /> Usage rates (consumables)
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem variant="destructive" onSelect={() => onDelete(item)}>
+                              <Trash2 aria-hidden /> Move to Recycle Bin
+                            </DropdownMenuItem>
+                          </>
+                        )}
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </TableCell>

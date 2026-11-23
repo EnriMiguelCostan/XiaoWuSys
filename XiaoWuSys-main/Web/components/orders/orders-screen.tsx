@@ -14,7 +14,7 @@ import { LogoSpinner } from '@/components/brand/brand-logo';
 import { useConnection } from '@/components/connection/connection-provider';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { OrderDetailSheet } from '@/components/orders/order-detail-sheet';
-import { DeadlineBadge, OrderStatusBadge } from '@/components/orders/status-badges';
+import { DeadlineBadge, OrderStatusBadge, PaymentStatusBadge } from '@/components/orders/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -456,7 +456,9 @@ export function OrdersScreen() {
                 <SortHead label="Created" k="date_created" sort={sort} onSort={sortByColumn} className="hidden lg:table-cell" />
                 <SortHead label="Deadline" k="production_deadline" sort={sort} onSort={sortByColumn} className="hidden sm:table-cell" />
                 <SortHead label="Status" k="production_status" sort={sort} onSort={sortByColumn} />
-                <SortHead label="Quote" k="total_quote_amount" sort={sort} onSort={sortByColumn} className="hidden text-right md:table-cell" />
+                <SortHead label="Bill" k="total_quote_amount" sort={sort} onSort={sortByColumn} className="hidden text-right md:table-cell" />
+                {/* migration 015: what is left to pay, from the server */}
+                <TableHead className="text-right text-xs font-semibold tracking-wide text-muted-foreground uppercase">Left to pay</TableHead>
                 <TableHead className="w-10">
                   <span className="sr-only">Open</span>
                 </TableHead>
@@ -465,7 +467,7 @@ export function OrdersScreen() {
             <TableBody>
               {shownOrders.length === 0 && !loading && !loaded?.error && (
                 <TableRow>
-                  <TableCell colSpan={7} className="py-10 text-left leading-relaxed whitespace-normal text-muted-foreground">
+                  <TableCell colSpan={8} className="py-10 text-left leading-relaxed whitespace-normal text-muted-foreground">
                     {numberFilter
                       ? `No order number contains "${numberFilter}".`
                       : showArchived
@@ -547,6 +549,16 @@ export function OrdersScreen() {
                     )}
                   </TableCell>
                   <TableCell className="hidden text-right tabular-nums md:table-cell">{peso(o.total_quote_amount)}</TableCell>
+                  <TableCell className="text-right">
+                    {o.payment_status ? (
+                      <>
+                        <span className="block tabular-nums">{peso(o.remaining ?? 0)}</span>
+                        <PaymentStatusBadge status={o.payment_status} />
+                      </>
+                    ) : (
+                      '—'
+                    )}
+                  </TableCell>
                   <TableCell className="w-10 text-muted-foreground">
                     <ChevronRight className="size-4 transition-transform group-hover/row:translate-x-0.5" aria-hidden />
                   </TableCell>

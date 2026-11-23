@@ -15,21 +15,26 @@ const { withAvailability } = require('../services/inventorySnapshot');
 const { rolesWith, can, capabilitiesFor, outranks } = require('../services/domain/permissions');
 const {
   STATUS_TRANSITIONS, CLOSED_STATUSES, EDITABLE_STATUSES, QUOTE_FROZEN_STATUSES, APPROVABLE_STATUSES, capabilityForTransition, allowedActions,
-  withDeadlineFlag, deadlineWindows, ARCHIVED_REASON
+  withDeadlineFlag, deadlineWindows, ARCHIVED_REASON, DELIVERY_METHODS, fulfillmentSummary, completionCheck
 } = require('../services/domain/orderLifecycle');
 const { refreshLocalRows } = require('../services/sync');
 const { writeAudit, writeAuditLocal } = require('../services/auditLog');
-const { computeQuote, quoteBreakdown, quoteLines, manualQuoteColumns, DISCOUNT_REASON_MAX } = require('../services/domain/pricing');
+const { computeQuote, quoteBreakdown, quoteLines, manualQuoteColumns, DISCOUNT_REASON_MAX, INCIDENTAL_PERCENT_MAX } = require('../services/domain/pricing');
 const { planConsumables, applyConsumables, consumablesSentence, loadOrderConsumables } = require('../services/consumables');
 const { needsReservation, stockNeeds, buildStockCheck } = require('../services/domain/stockCheck');
 const {
-  paymentSummary, runningTotals, checkPayment, downpaymentWarnings, toCentavos, toPesos, pesoText, checkPaymentVoid, voidStatusOf
+  paymentSummary, runningTotals, checkPayment, downpaymentWarnings, toCentavos, toPesos, pesoText, checkPaymentVoid, voidStatusOf,
+  needsVerification
 } = require('../services/domain/payments');
 const { loadOrderLosses } = require('../services/waste');
+const { loadOrderContext } = require('../services/orderContext');
+const { setMovementContext, clearMovementContext } = require('../services/stockMovements');
+const { checkPaymentDetails, PAYMENT_DETAIL_NAMES } = require('../services/domain/payments');
 
 const VERSION_SQL = `to_char(last_modified, '${PG_VERSION_FORMAT}')`;
 const READ_ROLES = rolesWith('view_orders');
 const CANCEL_REASON_MAX = 1000; // PB 23
+const ORDER_DESCRIPTION_MAX = 2000; // migration 015
 const CUSTOMER_ARCHIVED = {
   error: 'RECORD_ARCHIVED',
   message: 'This customer is archived. Restore the customer first to create a new order for them.'
@@ -123,7 +128,8 @@ const overrideInCloud = (req, order_id, updates, guard = () => null) => withPgTr
 });
 
 // The money fields of an order, for the audit trail of a quote change
-const QUOTE_FIELDS = ['total_quote_amount', 'subtotal_amount', 'discount_amount', 'discount_reason'];
+const QUOTE_FIELDS = ['total_quote_amount', 'subtotal_amount', 'discount_amount', 'discount_reason', 'labor_amount', 'incidental_amount',
+  'adjustment_amount', 'adjustment_reason'];
 const quoteFieldsOf = (order) => (order ? Object.fromEntries([...QUOTE_FIELDS, 'version'].map((f) => [f, order[f] ?? null])) : null);
 
 // After the override is committed: refresh every screen and tell the account whose change was replaced
@@ -234,6 +240,16 @@ const paymentTotals = (order, summary) => ({
   payment_status: summary.payment_status,
   downpayment: summary.downpayment
 });
+
+// migration 015: the order's buttons, with what they depend on beyond the order row (garments for
+// Pressing, deliveries and payments for Completed, what may be refunded). Loads what it needs.
+// -> { allowed_actions, context }
+const actionsWithContext = async (req, order, view = null) => {
+  const payments = view || await loadPaymentView(req, order);
+  const items = await listRecords(req, 'order_items', { filters: [['order_id', order.order_id]], orderBy: 'line_item_id' });
+  const context = await loadOrderContext(req, order, items.records, payments);
+  return { allowed_actions: allowedActions(order, req.user.role, payments.summary, context), context, view: payments };
+};
 
 // Statuses staff can log when an order is halted for insufficient inventory (PB 10)
 const HALT_RESOLUTIONS = ['Delayed', 'Cancelled'];
@@ -385,8 +401,23 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
       limit,
       offset
     });
+    // migration 015: what is left to pay on each order (the list's Balance column), from the same
+    // rules as the order screen. One query for the whole page.
+    const ids = result.records.map((o) => o.order_id);
+    const byOrder = new Map(ids.map((id) => [id, []]));
+    if (ids.length) {
+      const pays = await listRecords(req, 'payments', {
+        where: `order_id IN (${ids.map((id) => `'${String(id).replace(/'/g, "''")}'`).join(', ')})`, limit: 10000
+      });
+      for (const p of pays.records) if (byOrder.has(p.order_id)) byOrder.get(p.order_id).push(p);
+    }
     res.status(200).json({
-      source: result.source, orders: result.records.map((o) => withDeadlineFlag(o)), limit, offset, sort, dir, unsynced: result.unsynced,
+      source: result.source,
+      orders: result.records.map((o) => {
+        const s = paymentSummary({ quote: o.total_quote_amount, payments: byOrder.get(o.order_id) || [] });
+        return { ...withDeadlineFlag(o), total_paid: s.total_paid, remaining: s.remaining, payment_status: s.payment_status };
+      }),
+      limit, offset, sort, dir, unsynced: result.unsynced,
       include_archived: includeArchived,
       archived_only: archivedMode === 'only',
       capabilities: capabilitiesFor(req.user.role)
@@ -430,20 +461,31 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
     const losses = await loadOrderLosses(req, order_id);
     const needs = needsReservation(order) ? stockNeeds(items.records) : [];
     const evaluation = needs.length > 0 ? await evaluateCapacity(req, needs) : null;
-    const sources = [source, items.source, view.source, timeline.source, used.source, losses.source, evaluation && evaluation.source];
+    const context = await loadOrderContext(req, order, items.records, view); // migration 015
+    const sources = [source, items.source, view.source, timeline.source, used.source, losses.source, evaluation && evaluation.source, context.source];
 
     res.status(200).json({
       source: sources.includes('local') ? 'local' : 'cloud',
       order: withDeadlineFlag(order),
       status_history: timeline.history,
-      items: items.records,
-      payments: view.payments,
+      items: context.materials,
+      // migration 015: print details apart from the materials, deliveries in batches, and what the
+      // order still needs before it can be Completed
+      print_details: context.print_details,
+      deliveries: context.deliveries,
+      fulfillment: context.fulfillment,
+      completion: context.completion,
+      has_garments: context.has_garments,
+      payments: view.payments.map((p) => ({ ...p, needs_verification: needsVerification(p) && !p.voided })),
       totals: {
         item_count: items.records.length,
         total_quantity: items.records.reduce((sum, i) => sum + i.quantity, 0),
-        ...paymentTotals(order, view.summary)
+        pieces: context.fulfillment.pieces_ordered,
+        ...paymentTotals(order, view.summary),
+        total_refunded: view.summary.total_refunded,
+        max_refund: context.max_refund
       },
-      allowed_actions: allowedActions(order, req.user.role, view.summary),
+      allowed_actions: allowedActions(order, req.user.role, view.summary, context),
       stock_check: buildStockCheck(order, items.records, evaluation),
       quote: { ...quoteBreakdown(order), lines: quoteLines(items.records, quoteBreakdown(order)) },
       consumables_deducted: used.consumables,
@@ -545,6 +587,8 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
   const production_deadline = v.deadline(body.production_deadline, 'production_deadline');
   const resolution = v.oneOf(body.resolution, 'resolution', HALT_RESOLUTIONS, { required: false });
   const total_quote_amount = v.nonNegativeMoney(body.total_quote_amount, 'total_quote_amount', { required: false, defaultValue: 0 });
+  // migration 015: what to do, in the customer's words (instructions, colours, placement...)
+  const order_description = v.optionalString(body.order_description, 'order_description', ORDER_DESCRIPTION_MAX);
   if (v.failed()) return v.send(res);
   // PB 2: staff create the order; the Owner prices it (0 = "no quote yet")
   if (total_quote_amount !== 0 && !can(req.user.role, 'set_quote')) return quoteOwnerOnly(res);
@@ -576,9 +620,10 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
     if (reserve && shortages.length) throw shortageRejection(shortages, 'cloud');
 
     const { rows } = await client.query(
-      `INSERT INTO order_profiles (order_id, customer_id, production_deadline, production_status, total_quote_amount, stock_reserved)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${selectList('order_profiles', 'pg')}`,
-      [order_id, customer_id, production_deadline, production_status, total_quote_amount, reserve]
+      `INSERT INTO order_profiles (order_id, customer_id, production_deadline, production_status, total_quote_amount, stock_reserved,
+                                   order_description)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING ${selectList('order_profiles', 'pg')}`,
+      [order_id, customer_id, production_deadline, production_status, total_quote_amount, reserve, order_description]
     );
     const items = [];
     for (let i = 0; i < needs.length; i++) {
@@ -613,9 +658,9 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 
     await sqliteRun(tx,
       `INSERT INTO order_profiles (order_id, customer_id, production_deadline, production_status, total_quote_amount,
-                                   stock_reserved, sync_status, last_modified)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
-      [order_id, customer_id, production_deadline, production_status, total_quote_amount, reserve ? 1 : 0]);
+                                   stock_reserved, order_description, sync_status, last_modified)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+      [order_id, customer_id, production_deadline, production_status, total_quote_amount, reserve ? 1 : 0, order_description]);
     const items = [];
     for (let i = 0; i < needs.length; i++) {
       const { inventory_id, quantity_needed } = needs[i];
@@ -721,7 +766,16 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
   }
   if (v.failed()) return v.send(res);
   const cancellation_reason = v.optionalString(body.cancellation_reason, 'cancellation_reason', CANCEL_REASON_MAX);
+  // migration 015: Completed. allow_unpaid = the Owner hands it over with a balance due (confirmed);
+  // handover = who took the pieces when no batch was recorded (the whole order at once)
+  const allow_unpaid = v.bool(body.allow_unpaid, 'allow_unpaid');
+  const handover = body.handover && typeof body.handover === 'object' ? body.handover : {};
+  const handover_name = v.optionalString(handover.received_by_name, 'received_by_name', 255);
+  const handover_method = v.oneOf(handover.method, 'method', DELIVERY_METHODS, { required: false }) || 'Pick-up';
   if (v.failed()) return v.send(res);
+  if (allow_unpaid && !can(req.user.role, 'complete_with_balance')) {
+    return res.status(403).json({ error: 'COMPLETE_WITH_BALANCE_OWNER_ONLY', message: 'Only the Owner can hand over an order that is not fully paid.' });
+  }
   if (status === 'Cancelled' && !can(req.user.role, capabilityForTransition(status))) return voidOwnerOnly(res);
   if (cancellation_reason && status !== 'Cancelled') {
     return res.status(400).json({
@@ -771,6 +825,49 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
         });
       }
 
+      // migration 015: Pressing is the heat press, for garments only
+      if (status === 'Pressing') {
+        const garments = await client.query(
+          `SELECT 1 FROM order_items oi JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id
+            WHERE oi.order_id = $1 AND ii.has_sizes LIMIT 1`, [order_id]);
+        if (garments.rowCount === 0) {
+          throw new Rejected(409, {
+            error: 'PRESSING_NOT_APPLICABLE',
+            message: 'Pressing is the heat-press step for garments (shirts, jerseys...). This order has none, so it goes straight to Completed.'
+          });
+        }
+      }
+      // migration 015: what Completed needs (paid, every piece handed over), checked on the locked order
+      let autoHandover = null;
+      let completedWithBalance = null;
+      if (status === 'Completed') {
+        const pays = await client.query(
+          `SELECT amount::text AS amount, payment_type, is_refund, voids_payment_id, verified_at FROM payments WHERE order_id = $1`, [order_id]);
+        const summary = paymentSummary({ quote: order.total_quote_amount, payments: pays.rows });
+        const facts = await client.query(
+          `SELECT COALESCE(SUM(oi.quantity) FILTER (WHERE LOWER(BTRIM(COALESCE(ii.item_category, ''))) <> 'consumable'), 0)::int AS pieces
+             FROM order_items oi LEFT JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id WHERE oi.order_id = $1`, [order_id]);
+        const batches = await client.query('SELECT quantity FROM order_deliveries WHERE order_id = $1', [order_id]);
+        const fulfillment = fulfillmentSummary({ pieces_ordered: facts.rows[0].pieces, deliveries: batches.rows });
+        const check = completionCheck({ order, summary, fulfillment });
+        const blocking = check.missing.filter((m) => !(m.code === 'BALANCE_DUE' && allow_unpaid));
+        if (blocking.length > 0) {
+          throw new Rejected(409, {
+            error: 'COMPLETION_REQUIREMENTS_NOT_MET',
+            message: `This order cannot be completed yet. ${blocking.map((m) => m.message).join(' ')}`,
+            missing: blocking,
+            can_complete_with_balance: blocking.every((m) => m.code === 'BALANCE_DUE') && can(req.user.role, 'complete_with_balance')
+          });
+        }
+        if (check.missing.some((m) => m.code === 'BALANCE_DUE')) completedWithBalance = check.balance_due;
+        if (check.auto_handover) {
+          const who = handover_name
+            || (await client.query('SELECT full_name FROM customers WHERE customer_id = $1', [order.customer_id])).rows[0]?.full_name
+            || null;
+          autoHandover = { quantity: fulfillment.pieces_ordered, method: handover_method, received_by_name: who };
+        }
+      }
+
       // Materials of this order, summed per inventory item
       const lines = await client.query(
         `SELECT inventory_id, SUM(quantity)::int AS qty FROM order_items
@@ -812,6 +909,11 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
               [n.quantity_needed, n.inventory_id]);
             stockChanges.push({ inventory_id: n.inventory_id, item_name: rowsById.get(n.inventory_id).item_name, released: n.quantity_needed });
           } else {
+            // migration 015: the stock card says which order used it
+            await setMovementContext(client, {
+              type: 'order_used', reference_type: 'order', reference_id: order_id, reference_no: order.tracking_no,
+              note: 'Order completed', actor: req.user
+            });
             const used = await client.query(
               `UPDATE inventory_items SET quantity_available = quantity_available - $1,
                       quantity_reserved = GREATEST(quantity_reserved - $1, 0)
@@ -837,7 +939,21 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
             WHERE oi.order_id = $1 AND oi.inventory_id = ii.inventory_id`, [order_id]);
       }
       // PB 15: never blocks the change; a shortfall clamps the stock at 0 and is recorded
-      const consumables = await applyConsumables(client, req, { order_id, planned: consumablePlan.planned, rowsById });
+      const consumables = await applyConsumables(client, req, { order_id, planned: consumablePlan.planned, rowsById, order_no: order.tracking_no });
+      await clearMovementContext(client);
+      if (autoHandover) {
+        // migration 015: no batch was recorded, so the whole order is handed over now (batch 1)
+        await client.query(
+          `INSERT INTO order_deliveries (delivery_id, order_id, batch_no, quantity, delivered_at, method, received_by_name, notes, recorded_by)
+           VALUES ($1, $2, 1, $3, NOW() AT TIME ZONE 'UTC', $4, $5, 'Handed over when the order was completed', $6)`,
+          [crypto.randomUUID(), order_id, autoHandover.quantity, autoHandover.method, autoHandover.received_by_name, req.user.user_id]);
+      }
+      if (completedWithBalance !== null) {
+        await writeAudit(client, {
+          entity: 'order_profiles', entity_id: order_id, action: 'completed_with_balance', actor: req.user,
+          details: { tracking_no: order.tracking_no, balance_due: completedWithBalance }
+        });
+      }
       changedIds = [...new Set([...stockChanges.map((c) => c.inventory_id), ...consumables.map((c) => c.consumable_inventory_id)])];
 
       const updated = await client.query(
@@ -866,6 +982,9 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
 
     pushStockChange(req, changedIds, `order_${status.toLowerCase()}`);
     pushOrderChange(req, result.order);
+    if (status === 'Completed') {
+      await refreshLocalRows(req.pgPool, req.localDb, 'order_deliveries', null).catch(() => {});
+    }
     console.log(`🔁 Order ${order_id}: ${result.from} -> ${status} by ${req.user.user_id} (${req.user.role})`);
     res.status(200).json({
       message: `Order is now ${status}.` + (result.stockChanges.length
@@ -919,9 +1038,15 @@ router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess
   const size = v.optionalString(body.size, 'size', 50);
   const custom_name = v.optionalString(body.custom_name, 'custom_name', 255);
   const custom_number = v.optionalString(body.custom_number, 'custom_number', 50);
-  // Sprint 11 / PB 13: an item MAY link to a stock item. It is optional here, but items
-  // without an inventory_id block job-order approval (see POST /:order_id/approve).
+  // migration 015: a material is always a catalog item. Sizes, names and numbers are print
+  // details (POST /:order_id/print-details), so they never stop the quote or the approval.
   const inventory_id = v.id(body.inventory_id, 'inventory_id', { required: false });
+  if (!inventory_id && !v.failed()) {
+    v.errors.push({
+      field: 'inventory_id',
+      message: 'Choose the material from the catalog. Sizes, names and numbers are added under Print details.'
+    });
+  }
   if (v.failed()) return v.send(res);
 
   const line_item_id = crypto.randomUUID();
@@ -1057,7 +1182,7 @@ const checkBulkItems = (list) => {
       size: v.optionalString(r.size, 'size', 50),
       custom_name: v.optionalString(r.custom_name, 'custom_name', 255),
       custom_number: v.optionalString(r.custom_number, 'custom_number', 50),
-      inventory_id: v.id(r.inventory_id, 'inventory_id', { required: false }) || null
+      inventory_id: v.id(r.inventory_id, 'inventory_id') || null // migration 015: materials only (roster rows are print details)
     };
     for (const e of v.errors) errors.push({ field: `items[${i}].${e.field}`, message: `Row ${i + 1}: ${e.message}` });
     return row;
@@ -1212,7 +1337,8 @@ router.get('/:order_id/payments', requireRole(WRITE_ROLES), async (req, res) => 
   }
 });
 
-const SERVER_FILLED_PAYMENT_FIELDS = ['received_by', 'receipt_no', 'voids_payment_id', 'void_reason'];
+const SERVER_FILLED_PAYMENT_FIELDS = ['received_by', 'receipt_no', 'voids_payment_id', 'void_reason', 'is_refund', 'refund_reason',
+  'verified_by', 'verified_at'];
 
 router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), refuseArchivedOrder, async (req, res) => {
   const { order_id } = req.params;
@@ -1222,6 +1348,11 @@ router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), ref
   const v = createValidator();
   const amount = v.positiveMoney(body.amount, 'amount');
   const payment_type = v.oneOf(body.payment_type, 'payment_type', PAYMENT_TYPES);
+  // migration 015: when the customer really paid (default now; may be earlier than today)
+  const paid_at = v.pastShopDateTime(body.payment_date, 'payment_date', { required: false });
+  const checkedDetails = payment_type ? checkPaymentDetails(payment_type, body) : { errors: [], details: {} };
+  v.errors.push(...checkedDetails.errors);
+  const details = checkedDetails.details;
   for (const field of SERVER_FILLED_PAYMENT_FIELDS) {
     if (body[field] !== undefined) {
       v.errors.push({ field, message: 'The receiver and the receipt number are filled in by the system. Remove them and try again.' });
@@ -1254,13 +1385,14 @@ router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), ref
 
     // Defence in depth: the order lock already serialises payments for this order
     const inserted = await client.query(
-      `INSERT INTO payments (payment_id, order_id, amount, payment_type, received_by)
-       SELECT $1::text, $2::text, $3::numeric, $4::text, $5::text
+      `INSERT INTO payments (payment_id, order_id, amount, payment_type, received_by, payment_date, ${PAYMENT_DETAIL_NAMES.join(', ')})
+       SELECT $1::text, $2::text, $3::numeric, $4::text, $5::text, COALESCE($6::timestamp, NOW() AT TIME ZONE 'UTC'),
+              ${PAYMENT_DETAIL_NAMES.map((n, i) => `$${i + 7}${n === 'cheque_date' ? '::date' : '::text'}`).join(', ')}
         WHERE (SELECT ROUND(COALESCE(total_quote_amount, 0) * 100) FROM order_profiles WHERE order_id = $2::text)
             - (SELECT COALESCE(ROUND(SUM(amount) * 100), 0) FROM payments WHERE order_id = $2::text)
             >= ROUND($3::numeric * 100)
        RETURNING ${selectList('payments', 'pg')}`,
-      [payment_id, order_id, amount, payment_type, received_by]
+      [payment_id, order_id, amount, payment_type, received_by, paid_at, ...PAYMENT_DETAIL_NAMES.map((n) => details[n])]
     );
     if (inserted.rowCount !== 1) {
       const again = await client.query(
@@ -1285,9 +1417,10 @@ router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), ref
     });
     if (problem) throw reject(problem);
     await sqliteRun(tx,
-      `INSERT INTO payments (payment_id, order_id, amount, payment_type, received_by, payment_date, sync_status, last_modified)
-       VALUES (?, ?, ?, ?, ?, ${LOCAL_NOW}, 'pending_insert', ${LOCAL_NOW})`,
-      [payment_id, order_id, amount, payment_type, received_by]);
+      `INSERT INTO payments (payment_id, order_id, amount, payment_type, received_by, payment_date, recorded_at,
+                             ${PAYMENT_DETAIL_NAMES.join(', ')}, sync_status, last_modified)
+       VALUES (?, ?, ?, ?, ?, COALESCE(?, ${LOCAL_NOW}), ${LOCAL_NOW}, ${PAYMENT_DETAIL_NAMES.map(() => '?').join(', ')}, 'pending_insert', ${LOCAL_NOW})`,
+      [payment_id, order_id, amount, payment_type, received_by, paid_at, ...PAYMENT_DETAIL_NAMES.map((n) => details[n])]);
     return { source: 'local', record: await readLocal(tx, 'payments', payment_id), status: ord.production_status };
   });
 
@@ -1327,6 +1460,7 @@ router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), ref
     });
 
     console.log(`💰 Payment on order ${order_id} by ${received_by} saved to ${result.source}`);
+    const { allowed_actions } = await actionsWithContext(req, order, view);
     res.status(201).json({
       message: result.source === 'cloud'
         ? 'Payment recorded.'
@@ -1334,7 +1468,7 @@ router.post('/:order_id/payments', requireRole(rolesWith('record_payment')), ref
       source: result.source,
       payment,
       totals: paymentTotals(order, view.summary),
-      allowed_actions: allowedActions(order, req.user.role, view.summary),
+      allowed_actions,
       warnings
     });
   } catch (err) {
@@ -1598,6 +1732,11 @@ router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAcc
   const updates = {};
   if (body.production_deadline !== undefined) updates.production_deadline = v.deadline(body.production_deadline, 'production_deadline');
   if (body.total_quote_amount !== undefined) updates.total_quote_amount = v.nonNegativeMoney(body.total_quote_amount, 'total_quote_amount');
+  // migration 015: the order's description / instructions ('' or null clears it)
+  if (body.order_description !== undefined) {
+    updates.order_description = body.order_description === null ? null
+      : (v.optionalString(body.order_description, 'order_description', ORDER_DESCRIPTION_MAX) || null);
+  }
   if (body.expected_version !== undefined && body.expected_version !== null && typeof body.expected_version !== 'string') {
     v.errors.push({ field: 'expected_version', message: 'expected_version must be the string returned as "version".' });
   }
@@ -1605,7 +1744,7 @@ router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAcc
     v.errors.push({ field: 'override', message: 'override must be true or false.' });
   }
   if (Object.keys(updates).length === 0 && !v.failed()) {
-    v.errors.push({ field: 'body', message: 'Nothing to change: send a new deadline or quote amount.' });
+    v.errors.push({ field: 'body', message: 'Nothing to change: send a new deadline, description or quote amount.' });
   }
   if (v.failed()) return v.send(res);
   if (body.total_quote_amount !== undefined && !can(req.user.role, 'set_quote')) return quoteOwnerOnly(res);
@@ -1625,7 +1764,7 @@ router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAcc
       return res.status(409).json(quoteLocked);
     }
     const expected = body.expected_version || current.version || null;
-    const fields = Object.keys(updates).filter((f) => updates[f] !== current[f]
+    const fields = Object.keys(updates).filter((f) => (updates[f] ?? null) !== (current[f] ?? null)
       && !(f === 'production_deadline' && String(current[f]).slice(0, 10) === String(updates[f]).slice(0, 10)));
     if (fields.length === 0) {
       return res.status(200).json({ message: 'Nothing changed.', source: 'cloud', order: withDeadlineFlag(current), changed: [], overridden: false });
@@ -1776,6 +1915,21 @@ router.post('/:order_id/quote', requireRole(rolesWith('set_quote')), requireOrde
     }
   }
   const discount_reason = given(body.discount_reason) ? v.optionalString(body.discount_reason, 'discount_reason', DISCOUNT_REASON_MAX) : undefined;
+  // migration 015: labor / services and incidental charges (an amount, or a % of materials + labor)
+  const labor_amount = given(body.labor_amount) ? v.nonNegativeMoney(body.labor_amount, 'labor_amount') : undefined;
+  if (given(body.incidental_amount) && given(body.incidental_percent)) {
+    v.errors.push({ field: 'incidental_percent', message: 'Send either incidental charges in pesos or a percentage, not both.' });
+  }
+  const incidental_amount = given(body.incidental_amount) ? v.nonNegativeMoney(body.incidental_amount, 'incidental_amount') : undefined;
+  let incidental_percent;
+  if (given(body.incidental_percent)) {
+    const p = body.incidental_percent;
+    if (typeof p !== 'number' || !Number.isFinite(p) || p < 0 || p > INCIDENTAL_PERCENT_MAX || !atMostTwoDecimals(p)) {
+      v.errors.push({ field: 'incidental_percent', message: `Incidental charges (%) must be a number from 0 to ${INCIDENTAL_PERCENT_MAX}, with at most 2 decimals.` });
+    } else {
+      incidental_percent = p;
+    }
+  }
   if (given(body.expected_version) && typeof body.expected_version !== 'string') {
     v.errors.push({ field: 'expected_version', message: 'expected_version must be the string returned as "version".' });
   }
@@ -1821,8 +1975,8 @@ router.post('/:order_id/quote', requireRole(rolesWith('set_quote')), requireOrde
       const shown = quoteBreakdown(before);
       const { problem, quote } = computeQuote({
         items: items.rows,
-        requested: { amount: discount_amount, percent: discount_percent, reason: discount_reason },
-        existing: { amount: shown.discount_amount, reason: shown.discount_reason }
+        requested: { amount: discount_amount, percent: discount_percent, reason: discount_reason, labor: labor_amount, incidental: incidental_amount, incidental_percent },
+        existing: { amount: shown.discount_amount, reason: shown.discount_reason, labor: shown.labor_amount, incidental: shown.incidental_amount }
       });
       if (problem) throw new Rejected(problem.status, problem.body);
       if (dry_run) return { quote, order: before, saved: false };
@@ -1836,9 +1990,10 @@ router.post('/:order_id/quote', requireRole(rolesWith('set_quote')), requireOrde
       const updated = await client.query(
         `UPDATE order_profiles
             SET subtotal_amount = $2, discount_amount = $3, discount_reason = $4, total_quote_amount = $5,
-                last_edited_by = $6, last_edited_role = $7
+                last_edited_by = $6, last_edited_role = $7, labor_amount = $8, incidental_amount = $9
           WHERE order_id = $1 RETURNING ${selectList('order_profiles', 'pg')}`,
-        [order_id, quote.subtotal_amount, quote.discount_amount, quote.discount_reason, quote.total_quote_amount, ...editorOf(req)]);
+        [order_id, quote.subtotal_amount, quote.discount_amount, quote.discount_reason, quote.total_quote_amount, ...editorOf(req),
+          quote.labor_amount, quote.incidental_amount]);
       const after = serialize('order_profiles', updated.rows[0]);
       await writeAudit(client, {
         entity: 'order_profiles',
@@ -1850,6 +2005,9 @@ router.post('/:order_id/quote', requireRole(rolesWith('set_quote')), requireOrde
           tier: quote.tier,
           lines: quote.lines.map((l) => ({ line_item_id: l.line_item_id, quantity: l.quantity, unit_price: l.unit_price, line_total: l.line_total })),
           discount_percent: quote.discount_percent,
+          labor_amount: quote.labor_amount,
+          incidental_amount: quote.incidental_amount,
+          incidental_percent: quote.incidental_percent,
           before: quoteFieldsOf(before),
           after: quoteFieldsOf(after)
         }
@@ -2125,3 +2283,8 @@ router.post('/:order_id/approve', requireRole(APPROVE_ROLES), requireOrderEditAc
 });
 
 module.exports = router;
+// migration 015: shared with routes/orderExtras.js (print details, deliveries, refunds...)
+module.exports.helpers = {
+  Rejected, requireOrderEditAccess, refuseArchivedOrder, loadPaymentView, paymentTotals, actionsWithContext,
+  pushOrderChange, editorOf, NOT_FOUND_TEXT, COMMIT_UNKNOWN, RECORD_ARCHIVED, notFound
+};

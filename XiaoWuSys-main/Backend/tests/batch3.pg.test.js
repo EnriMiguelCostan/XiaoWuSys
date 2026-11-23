@@ -49,7 +49,7 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
     await resetDatabase(pool, { before: '009' });
     await pool.query(`INSERT INTO users (user_id, username, password_hash, role) VALUES
       ('u-owner', 'owner', 'x', 'Owner'), ('u-admin', 'admin', 'x', 'Admin'),
-      ('u-production', 'production', 'x', 'Production'), ('u-staff', 'staff', 'x', 'Staff')`);
+      ('u-production', 'staff', 'x', 'Staff'), ('u-staff', 'production', 'x', 'Production')`);
     await pool.query("INSERT INTO customers (customer_id, full_name) VALUES ('c-1', 'Agdao NHS')");
     await pool.query(`INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, unit_cost)
                       VALUES ('i-shirt', 'Custom Shirt', 'Apparel', 100, 150)`);
@@ -103,8 +103,8 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
     server = await startPgTestServer(pool);
     owner = server.tokenFor('u-owner', 'Owner');
     admin = server.tokenFor('u-admin', 'Admin');
-    production = server.tokenFor('u-production', 'Production');
-    staff = server.tokenFor('u-staff', 'Staff');
+    production = server.tokenFor('u-production', 'Staff');
+    staff = server.tokenFor('u-staff', 'Production');
 
     await insertOrder('o-shirts');
     await pool.query(`INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity) VALUES ('l-1', 'o-shirts', 'i-shirt', 'Custom Shirt', 10)`);
@@ -129,22 +129,26 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
     assert.deepEqual([pressing.body.order.production_status, pressing.body.stock_changes], ['Pressing', []], 'pressing moves no stock');
     const backwards = await setStatus('o-shirts', 'Printing');
     assert.deepEqual([backwards.status, backwards.body.error, backwards.body.allowed], [409, 'INVALID_STATUS_TRANSITION', ['Completed', 'Cancelled']]);
+    // Migration 015: an order is completed only once nothing is left to pay
+    const unpaid = await setStatus('o-shirts', 'Completed', admin);
+    assert.deepEqual([unpaid.status, unpaid.body.error, unpaid.body.missing.map((m) => m.code)], [409, 'COMPLETION_REQUIREMENTS_NOT_MET', ['BALANCE_DUE']]);
+    await pool.query(`INSERT INTO payments (payment_id, order_id, amount, payment_type) VALUES ('p-1b', 'o-shirts', 500, 'Cash')`);
     const done = await setStatus('o-shirts', 'Completed', admin);
     assert.equal(done.status, 200, done.text);
     assert.equal(done.body.order.deadline_flag, null);
 
     assert.deepEqual(await history('o-shirts'), [
       { from_status: 'Pending', to_status: 'Approved', changed_by: 'u-owner', changed_role: 'Owner' },
-      { from_status: 'Approved', to_status: 'Printing', changed_by: 'u-production', changed_role: 'Production' },
-      { from_status: 'Printing', to_status: 'Pressing', changed_by: 'u-production', changed_role: 'Production' },
+      { from_status: 'Approved', to_status: 'Printing', changed_by: 'u-production', changed_role: 'Staff' },
+      { from_status: 'Printing', to_status: 'Pressing', changed_by: 'u-production', changed_role: 'Staff' },
       { from_status: 'Pressing', to_status: 'Completed', changed_by: 'u-admin', changed_role: 'Admin' }
     ], 'the two refused moves wrote nothing');
     assert.deepEqual(server.orderEvents.updated.slice(eventsBefore).map((o) => o.production_status), ['Printing', 'Pressing', 'Completed']);
 
     const shown = await detail('o-shirts', staff);
     assert.deepEqual(shown.body.status_history.map((h) => [h.from_status, h.to_status, h.changed_by_name, h.changed_role]), [
-      ['Pending', 'Approved', 'owner', 'Owner'], ['Approved', 'Printing', 'production', 'Production'],
-      ['Printing', 'Pressing', 'production', 'Production'], ['Pressing', 'Completed', 'admin', 'Admin']
+      ['Pending', 'Approved', 'owner', 'Owner'], ['Approved', 'Printing', 'staff', 'Staff'],
+      ['Printing', 'Pressing', 'staff', 'Staff'], ['Pressing', 'Completed', 'admin', 'Admin']
     ]);
     assert.match(shown.body.status_history[0].changed_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/);
     assert.ok(!('changed_by' in shown.body.status_history[0]), 'names, not account ids');
@@ -153,14 +157,14 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
   });
 
   it('lets an order that is not pressed go from Printing straight to Completed', async () => {
-    await insertOrder('o-tarp', { status: 'Printing' });
+    await insertOrder('o-tarp', { status: 'Printing', quote: 0 }); // nothing left to pay
     const done = await setStatus('o-tarp', 'Completed');
     assert.equal(done.status, 200, done.text);
-    assert.deepEqual(await history('o-tarp'), [{ from_status: 'Printing', to_status: 'Completed', changed_by: 'u-production', changed_role: 'Production' }]);
+    assert.deepEqual(await history('o-tarp'), [{ from_status: 'Printing', to_status: 'Completed', changed_by: 'u-production', changed_role: 'Staff' }]);
   });
 
   it('rolls the history row back together with a status change that fails', async () => {
-    await insertOrder('o-short', { status: 'Printing' });
+    await insertOrder('o-short', { status: 'Printing', quote: 0 });
     await pool.query("UPDATE order_profiles SET stock_reserved = TRUE WHERE order_id = 'o-short'");
     await pool.query(`INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity) VALUES ('l-2', 'o-short', 'i-shirt', 'Custom Shirt', 5000)`);
     const r = await setStatus('o-short', 'Completed');
@@ -177,6 +181,8 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
     try {
       await listener.query('LISTEN orders_changed');
       await insertOrder('o-live', { status: 'Printing' });
+      // Pressing is for garments (migration 015): the order has a shirt on it
+      await pool.query(`INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity) VALUES ('l-live', 'o-live', 'i-shirt', 'Custom Shirt', 1)`);
       await new Promise((r) => setTimeout(r, 150));
       heard.length = 0;
 
@@ -270,7 +276,7 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
   });
 
   it('replaces a lower rank’s design link the same way, but never reopens a closed order', async () => {
-    await insertOrder('o-design', { editor: ['u-production', 'Production'] });
+    await insertOrder('o-design', { editor: ['u-production', 'Staff'] });
     const stale = (await detail('o-design')).body.order.version;
     await pool.query("UPDATE order_profiles SET design_drive_link = 'https://drive.google.com/file/d/theirs/view' WHERE order_id = 'o-design'");
     const link = 'https://drive.google.com/file/d/mine/view';
@@ -284,7 +290,7 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
       [1, 'conflict_override', 'https://drive.google.com/file/d/theirs/view', link]);
     assert.equal(server.orderEvents.overridden.at(-1).user_id, 'u-production');
 
-    await insertOrder('o-closed', { editor: ['u-production', 'Production'] });
+    await insertOrder('o-closed', { editor: ['u-production', 'Staff'] });
     const before = (await detail('o-closed')).body.order.version;
     await pool.query("UPDATE order_profiles SET production_status = 'Completed' WHERE order_id = 'o-closed'");
     const closed = await editDeadline('o-closed', 50, owner, { expected_version: before, override: true });
@@ -294,7 +300,7 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
   });
 
   it('never forces an approval or a status change over someone else’s change', async () => {
-    await insertOrder('o-status', { status: 'Printing', editor: ['u-production', 'Production'] });
+    await insertOrder('o-status', { status: 'Printing', editor: ['u-production', 'Staff'] });
     const stale = (await detail('o-status')).body.order.version;
     await pool.query("UPDATE order_profiles SET design_drive_link = 'https://drive.google.com/file/d/x/view' WHERE order_id = 'o-status'");
     const r = await setStatus('o-status', 'Pressing', owner, { expected_version: stale, override: true });
@@ -321,14 +327,14 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
     const { syncOfflineData } = require('../services/sync');
     await sqliteRun(server.localDb, "INSERT INTO customers (customer_id, full_name, sync_status) VALUES ('c-1', 'Agdao NHS', 'synced')");
     const cloudDay = shopDate(60);
-    await insertOrder('o-win', { deadline: `${cloudDay} 00:00:00`, editor: ['u-production', 'Production'] });
+    await insertOrder('o-win', { deadline: `${cloudDay} 00:00:00`, editor: ['u-production', 'Staff'] });
     await insertOrder('o-lose', { deadline: `${cloudDay} 00:00:00`, editor: ['u-admin', 'Admin'] });
     await insertOrder('o-equal', { deadline: `${cloudDay} 00:00:00`, editor: ['u-admin', 'Admin'] });
     await insertOrder('o-equal-2', { deadline: `${cloudDay} 00:00:00`, editor: ['u-admin', 'Admin'] });
-    await insertOrder('o-moved-on', { status: 'Completed', deadline: `${cloudDay} 00:00:00`, editor: ['u-production', 'Production'] });
+    await insertOrder('o-moved-on', { status: 'Completed', deadline: `${cloudDay} 00:00:00`, editor: ['u-production', 'Staff'] });
     await insertOrder('o-unknown', { deadline: `${cloudDay} 00:00:00` }); // changed before 009: editor unknown
     await offlineEdit('o-win', { role: 'Owner', user: 'u-owner', deadline: shopDate(70) });
-    await offlineEdit('o-lose', { role: 'Production', user: 'u-production', deadline: shopDate(71) });
+    await offlineEdit('o-lose', { role: 'Staff', user: 'u-production', deadline: shopDate(71) });
     await offlineEdit('o-equal', { role: 'Admin', user: 'u-admin', deadline: shopDate(72) });
     await offlineEdit('o-equal-2', { role: 'Admin', user: 'u-admin', deadline: shopDate(73) });
     await offlineEdit('o-moved-on', { role: 'Owner', user: 'u-owner', deadline: shopDate(74) });

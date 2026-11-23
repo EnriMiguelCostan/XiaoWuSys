@@ -18,7 +18,8 @@ import { can } from '@xiaowu/client-core/permissions';
 import { LogoSpinner } from '@/components/brand/brand-logo';
 import { useConnection } from '@/components/connection/connection-provider';
 import { Cell, LowStockBanner, OrdersTableCard, SummaryCard } from '@/components/dashboard/dashboard-parts';
-import { OverheadsCard, PnlCard, WasteCard } from '@/components/dashboard/finance-sections';
+import { WasteCard } from '@/components/dashboard/finance-sections';
+import Link from 'next/link';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { OrderStatusBadge } from '@/components/orders/status-badges';
 import { Badge } from '@/components/ui/badge';
@@ -225,7 +226,8 @@ export function DashboardScreen() {
         />
       </section>
 
-      <div className="grid min-w-0 grid-cols-1 gap-6 xl:grid-cols-2">
+      {/* One above the other at full width: side by side, their columns did not fit and scrolled sideways */}
+      <div className="grid min-w-0 grid-cols-1 gap-6">
         <OrdersTableCard
           title="Overdue"
           icon={AlarmClock}
@@ -268,7 +270,8 @@ export function DashboardScreen() {
                   <TableHead className="hidden w-40 md:table-cell">Supplier</TableHead>
                   <TableHead className="w-24 text-right sm:w-28">Free</TableHead>
                   <TableHead className="hidden w-24 text-right sm:table-cell">Alert at</TableHead>
-                  <TableHead className="w-28 pr-4 text-right sm:w-36">Suggested to buy</TableHead>
+                  <TableHead className="w-28 text-right sm:w-36">Suggested to buy</TableHead>
+                  <TableHead className="w-24 pr-4"><span className="sr-only">Receive</span></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -291,8 +294,14 @@ export function DashboardScreen() {
                       <TableCell className="hidden text-right sm:table-cell">
                         <Cell className="tabular-nums" value={r.minimum_threshold.toLocaleString()} />
                       </TableCell>
-                      <TableCell className="pr-4 text-right">
+                      <TableCell className="text-right">
                         <Cell className="font-semibold tabular-nums" value={`${r.suggested_order.toLocaleString()} ${r.unit}`} />
+                      </TableCell>
+                      <TableCell className="pr-4 text-right">
+                        {/* One click to record the delivery when it arrives */}
+                        <Button variant="ghost" size="sm" asChild>
+                          <Link href={`/inventory/stock-in?new=1&item=${encodeURIComponent(r.inventory_id)}`}>Receive</Link>
+                        </Button>
                       </TableCell>
                     </TableRow>
                   );
@@ -309,6 +318,11 @@ export function DashboardScreen() {
             <CardHeader className="min-w-0">
               <CardTitle className="truncate">Payments received per month</CardTitle>
               <CardDescription className="truncate">Last six months, shop time.</CardDescription>
+              <CardAction>
+                <Button variant="outline" size="sm" asChild>
+                  <Link href="/finance/payments">Open</Link>
+                </Button>
+              </CardAction>
             </CardHeader>
             <CardContent className="flex min-w-0 flex-col gap-3">
               {income.map((m) => (
@@ -369,11 +383,25 @@ export function DashboardScreen() {
 
       {data.waste && <WasteCard waste={data.waste} onDownload={canSeeMoney ? () => download('waste') : undefined} />}
 
+      {/* Migration 015: expenses and the P&L have their own pages (Finance), so the dashboard stays short */}
       {(canSeePnl || canSeeMoney) && (
-        <div className="grid min-w-0 grid-cols-1 gap-6 xl:grid-cols-2">
-          {canSeePnl && <PnlCard onResult={setResult} />}
-          {canSeeMoney && <OverheadsCard onResult={setResult} />}
-        </div>
+        <Card className="min-w-0">
+          <CardHeader className="min-w-0">
+            <CardTitle>Finance</CardTitle>
+            <CardDescription>Each report has its own page.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
+            {canSeeMoney && (
+              <>
+                <Button variant="outline" asChild><Link href="/finance/payments">Payments per month</Link></Button>
+                <Button variant="outline" asChild><Link href="/finance/transactions">Monthly transactions</Link></Button>
+                <Button variant="outline" asChild><Link href="/finance/expenses">Expenses</Link></Button>
+              </>
+            )}
+            {canSeePnl && <Button variant="outline" asChild><Link href="/finance/profit-and-loss">Profit &amp; loss</Link></Button>}
+            <Button variant="outline" asChild><Link href="/finance/waste">Waste this week / month</Link></Button>
+          </CardContent>
+        </Card>
       )}
 
       {canSeeMoney && orders.unpaid.length > 0 && (

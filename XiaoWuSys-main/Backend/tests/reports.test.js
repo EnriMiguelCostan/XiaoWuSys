@@ -12,7 +12,7 @@ describe('Dashboard and exports', () => {
   before(async () => {
     t = await startTestServer();
     owner = await t.login('owner');
-    await t.login('staff');
+    await t.login('production');
     for (const it of fixtures.ITEMS) {
       items[it.item_name] = (await t.request('POST', '/api/inventory', { token: owner, body: it })).body.item.inventory_id;
     }
@@ -26,7 +26,7 @@ describe('Dashboard and exports', () => {
   after(async () => { await t.close(); });
 
   it('summarises orders due, unpaid balances, income and the restock list', async () => {
-    const r = await t.request('GET', '/api/reports/dashboard', { token: t.tokens.staff });
+    const r = await t.request('GET', '/api/reports/dashboard', { token: t.tokens.production });
     assert.equal(r.status, 200, r.text);
     const d = r.body;
     assert.equal(d.orders.open, 1);
@@ -41,7 +41,7 @@ describe('Dashboard and exports', () => {
   });
 
   it('exports the inventory as an Excel-ready CSV', async () => {
-    const r = await t.request('GET', '/api/reports/export/inventory.csv', { token: t.tokens.staff });
+    const r = await t.request('GET', '/api/reports/export/inventory.csv', { token: t.tokens.production });
     assert.equal(r.status, 200);
     assert.match(r.headers.get('content-type'), /text\/csv/);
     assert.match(r.headers.get('content-disposition'), /attachment; filename="xiaomei-inventory-\d{4}-\d{2}-\d{2}\.csv"/);
@@ -60,7 +60,7 @@ describe('Dashboard and exports', () => {
   });
 
   it('keeps money exports for Owner and Admin', async () => {
-    assert.equal((await t.request('GET', '/api/reports/export/payments.csv', { token: t.tokens.staff })).status, 403);
+    assert.equal((await t.request('GET', '/api/reports/export/payments.csv', { token: t.tokens.production })).status, 403);
     const r = await t.request('GET', '/api/reports/export/payments.csv', { token: owner });
     assert.equal(r.status, 200);
     assert.match(r.text, /Cash,1500/);

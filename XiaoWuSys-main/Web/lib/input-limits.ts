@@ -42,11 +42,7 @@ export const PRINT_LINE_LIMITS = {
 } as const;
 
 /** Garment sizes offered in the print-details size dropdown, smallest first */
-export const GARMENT_SIZES = [
-  'Kids 2', 'Kids 4', 'Kids 6', 'Kids 8', 'Kids 10', 'Kids 12', 'Kids 14', 'Kids 16',
-  'XXS', 'XS', 'S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL', '6XL', '7XL',
-  'Free size',
-] as const;
+export const GARMENT_SIZES = ['Kids S', 'Kids M', 'Kids L', 'Kids XL', 'XS', 'S', 'M', 'L', 'XL', '2XL', '3XL', 'Free size'] as const;
 
 /** Calculate quote & discount */
 export const DISCOUNT_LIMITS = { reasonMin: 3, reasonMax: 150, percentMin: 0.01, percentMax: 100 } as const;

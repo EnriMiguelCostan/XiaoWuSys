@@ -1,16 +1,16 @@
 'use client';
 
-// Top bar of the signed-in app. Wide screens: inline section links + account menu.
-// Phones and tablets in portrait: a menu button opens the same links in a side sheet.
+// Top bar of the signed-in app: the brand and the account menu. The sections are in the grouped
+// sidebar on wide screens (side-nav.tsx); below that a menu button opens the same list in a sheet.
 import { useState } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
 import { ChevronDown, KeyRound, LogOut, Menu, UserRound } from 'lucide-react';
 import type { SessionUser } from '@xiaowu/client-core/permissions';
 import { ChangePasswordDialog } from '@/components/account/change-password-dialog';
 import { APP_NAME, BrandLogo } from '@/components/brand/brand-logo';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
-import { activeHref, HOME_PATH, visibleNavItems, type NavItem } from '@/components/layout/nav-items';
+import { HOME_PATH } from '@/components/layout/nav-items';
+import { GroupedNav } from '@/components/layout/side-nav';
 import { ThemeToggle } from '@/components/layout/theme-toggle';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -25,48 +25,6 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
 import { useSession } from '@/hooks/use-session';
-import { cn } from '@/lib/utils';
-
-function NavLinks({
-  items,
-  current,
-  orientation,
-  onNavigate,
-}: {
-  items: NavItem[];
-  current: string | null;
-  orientation: 'horizontal' | 'vertical';
-  onNavigate?: () => void;
-}) {
-  // HCI (meaning beyond colour, WCAG 1.4.1): the current section is marked by a bar (under the tab,
-  // or at the left in the phone menu) and bold text as well as its colour, plus aria-current="page".
-  // min-h-10: a 40px touch target for shop tablets.
-  const vertical = orientation === 'vertical';
-  return (
-    <ul className={cn('flex gap-2', vertical && 'flex-col gap-1')}>
-      {items.map(({ href, label, icon: Icon }) => {
-        const active = href === current;
-        return (
-          <li key={href}>
-            <Link
-              href={href}
-              onClick={onNavigate}
-              aria-current={active ? 'page' : undefined}
-              className={cn(
-                'flex min-h-10 items-center gap-2 px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none',
-                vertical ? 'rounded-r-md border-l-2 border-transparent' : 'rounded-t-md border-b-2 border-transparent',
-                active && 'border-primary bg-muted font-semibold text-foreground'
-              )}
-            >
-              <Icon className="size-4" aria-hidden />
-              {label}
-            </Link>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
 
 // user.role is shown, never compared
 function WhoAmI({ user }: { user: SessionUser | null }) {
@@ -80,15 +38,11 @@ function WhoAmI({ user }: { user: SessionUser | null }) {
 
 export function AppHeader() {
   const { user, logout } = useSession();
-  const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   // Logging out is confirmed first, so a mis-click on the menu item costs nothing
   const [confirmLogout, setConfirmLogout] = useState(false);
-
-  const items = visibleNavItems(user);
-  const current = activeHref(pathname, items);
 
   const signOut = async () => {
     setSigningOut(true);
@@ -108,11 +62,11 @@ export function AppHeader() {
   return (
     // Sticky positioning lives on the shell's wrapper (header + connection bar as one block)
     <header className="border-b bg-background">
-      <div className="mx-auto flex h-14 max-w-6xl items-center gap-3 px-4">
+      <div className="flex h-14 items-center gap-3 px-4">
         {/* Phone / portrait tablet: sections in a sheet */}
         <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
           <SheetTrigger asChild>
-            <Button title="Open the menu" variant="ghost" size="icon" className="md:hidden" aria-label="Open the menu">
+            <Button title="Open the menu" variant="ghost" size="icon" className="lg:hidden" aria-label="Open the menu">
               <Menu aria-hidden />
             </Button>
           </SheetTrigger>
@@ -128,8 +82,8 @@ export function AppHeader() {
                 </div>
               </SheetDescription>
             </SheetHeader>
-            <nav aria-label="Sections" className="p-3">
-              <NavLinks items={items} current={current} orientation="vertical" onNavigate={() => setMenuOpen(false)} />
+            <nav aria-label="Sections" className="overflow-y-auto p-3">
+              <GroupedNav onNavigate={() => setMenuOpen(false)} />
             </nav>
             <Separator />
             <div className="flex flex-col gap-1 p-3">
@@ -151,9 +105,6 @@ export function AppHeader() {
           <span>{APP_NAME}</span>
         </Link>
 
-        <nav aria-label="Sections" className="ml-4 hidden md:block">
-          <NavLinks items={items} current={current} orientation="horizontal" />
-        </nav>
 
         <div className="ml-auto flex items-center gap-1">
           <ThemeToggle />

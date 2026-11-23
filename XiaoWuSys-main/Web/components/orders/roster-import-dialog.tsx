@@ -2,12 +2,12 @@
 
 // PB 7: a jersey roster (handwritten list typed into Excel / Google Sheets) added to an order in
 // one go. The sheet is read in the browser with parseCsv (client-core), shown as a preview, then
-// sent in ONE request:
-//   POST /api/orders/:id/items/bulk   { items: [{ product_type, quantity, size, custom_name, custom_number, inventory_id }] }
-// The server adds every row or none, reserves stock when the order already holds its stock, and
-// answers in plain words (e.g. "Row 4: Quantity must be at least 1."). This screen only reads the
-// sheet, checks that quantities are numbers, and shows the server's answer.
-import { useEffect, useMemo, useState } from 'react';
+// sent in ONE request (migration 015: print details, apart from the materials):
+//   POST /api/orders/:id/print-details/bulk   { rows: [{ print_type, quantity, size, custom_name, custom_number, line_item_id }] }
+// The server adds every row or none, never lists more pieces than the order has of the garment,
+// and answers in plain words (e.g. "Row 4: Quantity must be a whole number…"). This screen only
+// reads the sheet, checks that quantities are numbers, and shows the server's answer.
+import { useMemo, useState } from 'react';
 import { FileDown, ListPlus, Upload } from 'lucide-react';
 import { parseCsv } from '@xiaowu/client-core/csv';
 import { Field, FormProblem } from '@/components/forms/form-bits';
@@ -20,7 +20,8 @@ import { Select, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useApi } from '@/hooks/use-api';
 import { errorMessage, saveBlob } from '@/lib/api';
-import { toNumberInput, type InventorySnapshot } from '@/lib/inventory';
+import { toNumberInput } from '@/lib/inventory';
+import type { OrderItem } from '@/lib/orders';
 import { TEXT_MAX } from '@/lib/input-limits';
 import { cn } from '@/lib/utils';
 
@@ -64,34 +65,26 @@ const readRoster = (text: string): RosterRow[] => {
 
 export function RosterImportDialog({
   orderId,
+  garments,
   onClose,
   onDone,
 }: {
   orderId: string;
+  /** the order's garments (materials with sizes): the roster is printed on one of them */
+  garments: OrderItem[];
   onClose: () => void;
   onDone: (result: ResultMessage) => void;
 }) {
   const api = useApi();
-  const [catalog, setCatalog] = useState<InventorySnapshot['items']>([]);
-  const [linkTo, setLinkTo] = useState(NO_LINK);
+  const [linkTo, setLinkTo] = useState(garments.length === 1 ? garments[0].line_item_id : NO_LINK);
   const [productType, setProductType] = useState('Jersey print');
   const [text, setText] = useState('');
   const [fileName, setFileName] = useState('');
   const [problem, setProblem] = useState('');
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    api<InventorySnapshot>('GET', '/inventory').then(({ ok, data }) => {
-      if (!cancelled && ok && Array.isArray(data.items)) setCatalog(data.items);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [api]);
-
   const rows = useMemo(() => readRoster(text), [text]);
-  const linked = catalog.find((i) => i.inventory_id === linkTo);
+  const linked = garments.find((i) => i.line_item_id === linkTo);
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -109,12 +102,12 @@ export function RosterImportDialog({
   const submit = async () => {
     setProblem('');
     const items = rows.map((r) => ({
-      product_type: (linked?.item_name ?? productType).trim(),
+      print_type: productType.trim(),
       quantity: r.quantity === '' ? 1 : toNumberInput(r.quantity),
       size: r.size || undefined,
       custom_name: r.custom_name || undefined,
       custom_number: r.custom_number || undefined,
-      inventory_id: linked?.inventory_id,
+      line_item_id: linked?.line_item_id,
     }));
     const notNumber = items.findIndex((i) => i.quantity === undefined || Number.isNaN(i.quantity));
     if (notNumber !== -1) {
@@ -122,7 +115,7 @@ export function RosterImportDialog({
       return;
     }
     setBusy(true);
-    const { ok, data } = await api<{ message?: string }>('POST', `/orders/${encodeURIComponent(orderId)}/items/bulk`, { items });
+    const { ok, data } = await api<{ message?: string }>('POST', `/orders/${encodeURIComponent(orderId)}/print-details/bulk`, { rows: items });
     setBusy(false);
     if (!ok) {
       setProblem(errorMessage(data, 'The roster was not added. Nothing was changed.'));
@@ -145,28 +138,28 @@ export function RosterImportDialog({
         </DialogHeader>
 
         <div className="grid min-w-0 gap-3 overflow-y-auto sm:grid-cols-2">
-          <Field id="roster-link" label="Catalog item (blank) for every row">
+          <Field id="roster-link" label="Garment of this order the roster is printed on">
             <Select value={linkTo} onValueChange={setLinkTo} disabled={busy}>
               <BoundedSelectTrigger id="roster-link">
-                <SelectValue placeholder="Choose the blank…" />
+                <SelectValue placeholder="Choose the garment…" />
               </BoundedSelectTrigger>
               <BoundedSelectContent>
-                <BoundedSelectItem value={NO_LINK} label="Not linked to stock (print details only)">
-                  Not linked to stock (print details only)
-                </BoundedSelectItem>
-                {catalog.map((i) => (
-                  <BoundedSelectItem key={i.inventory_id} value={i.inventory_id} label={i.item_name} suffix={`(${i.quantity_available_net.toLocaleString()} free)`}>
-                    {i.item_name}
+                {garments.length !== 1 && (
+                  <BoundedSelectItem value={NO_LINK} label="The whole order">
+                    The whole order
+                  </BoundedSelectItem>
+                )}
+                {garments.map((i) => (
+                  <BoundedSelectItem key={i.line_item_id} value={i.line_item_id} label={i.product_type} suffix={`(${i.quantity.toLocaleString()} pcs)`}>
+                    {i.product_type}
                   </BoundedSelectItem>
                 ))}
               </BoundedSelectContent>
             </Select>
           </Field>
-          {!linked && (
-            <Field id="roster-what" label="What is printed">
-              <Input id="roster-what" maxLength={TEXT_MAX.productType} value={productType} onChange={(e) => setProductType(e.target.value)} disabled={busy} />
-            </Field>
-          )}
+          <Field id="roster-what" label="What is printed">
+            <Input id="roster-what" maxLength={TEXT_MAX.productType} value={productType} onChange={(e) => setProductType(e.target.value)} disabled={busy} />
+          </Field>
           <div className="flex flex-wrap items-center gap-2 sm:col-span-2">
             <Button asChild variant="outline" size="sm" disabled={busy}>
               <label className={cn('cursor-pointer', busy && 'pointer-events-none opacity-50')}>

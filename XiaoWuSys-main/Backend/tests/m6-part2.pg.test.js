@@ -65,7 +65,7 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     await resetDatabase(pool, { before: '011' });
     await pool.query(`INSERT INTO users (user_id, username, password_hash, role) VALUES
       ('u-owner', 'owner', 'x', 'Owner'), ('u-admin', 'admin', 'x', 'Admin'),
-      ('u-production', 'production', 'x', 'Production'), ('u-staff', 'staff', 'x', 'Staff')`);
+      ('u-production', 'staff', 'x', 'Staff'), ('u-staff', 'production', 'x', 'Production')`);
     await pool.query("INSERT INTO customers (customer_id, full_name) VALUES ('c-1', 'Agdao NHS')");
     for (const [id, name, category, qty, unit] of ITEMS) {
       await pool.query(`INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, unit_cost, unit)
@@ -135,8 +135,8 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     server = await startPgTestServer(pool);
     owner = server.tokenFor('u-owner', 'Owner');
     admin = server.tokenFor('u-admin', 'Admin');
-    production = server.tokenFor('u-production', 'Production');
-    staff = server.tokenFor('u-staff', 'Staff');
+    production = server.tokenFor('u-production', 'Staff');
+    staff = server.tokenFor('u-staff', 'Production');
     const put = (id, rates, token = production) => server.request('PUT', `/api/inventory/${id}/consumable-rates`, { token, body: { rates } });
 
     let r = await put('i-shirt-s', [
@@ -211,8 +211,8 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     ]);
     const trail = await trailOf('o-press');
     assert.deepEqual(trail.map((x) => [x.inventory_id, x.action, x.details.trigger_status, x.details.quantity_before, x.details.quantity_after, x.performed_role]), [
-      ['i-ink', 'stock_subtracted', 'Pressing', 100, 96, 'Production'],
-      ['i-paper', 'stock_subtracted', 'Pressing', 50, 35, 'Production'],
+      ['i-ink', 'stock_subtracted', 'Pressing', 100, 96, 'Staff'],
+      ['i-paper', 'stock_subtracted', 'Pressing', 50, 35, 'Staff'],
       ['i-thread', 'stock_subtracted', 'Completed', 10, 9, 'Admin']
     ]);
 
@@ -310,7 +310,7 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     const saved = await quote('o-quote', { discount_percent: 10, discount_reason: 'Loyal school customer' });
     assert.equal(saved.status, 200, saved.text);
     assert.deepEqual(saved.body.quote, {
-      has_quote: true, subtotal_amount: 11970, discount_amount: 1197, discount_reason: 'Loyal school customer', total_quote_amount: 10773
+      has_quote: true, subtotal_amount: 11970, labor_amount: 0, incidental_amount: 0, gross_amount: 11970, adjustment_amount: 0, adjustment_reason: null, discount_amount: 1197, discount_reason: 'Loyal school customer', total_quote_amount: 10773
     });
     assert.equal(saved.body.message, 'Quote saved: ₱10,773.00 after a ₱1,197.00 discount.');
     const prices = (await pool.query("SELECT price::text AS p FROM order_items WHERE order_id = 'o-quote' ORDER BY line_item_id")).rows.map((r) => r.p);

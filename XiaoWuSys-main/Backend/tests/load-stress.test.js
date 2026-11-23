@@ -26,7 +26,7 @@ describe('PB 26: 150+ concurrent requests (offline server)', () => {
     t = await startTestServer();
     owner = await t.login('owner');
     admin = await t.login('admin');
-    production = await t.login('production');
+    production = await t.login('staff');
     const item = async (item_name, quantity_available, unit_cost) =>
       (await t.request('POST', '/api/inventory', { token: production, body: { item_name, item_category: 'Raw', quantity_available, unit_cost } })).body.item.inventory_id;
     blank = await item('Limited Blank', 100, 120);
@@ -51,12 +51,13 @@ describe('PB 26: 150+ concurrent requests (offline server)', () => {
     add('capacity', 10, () => t.request('POST', '/api/inventory/check-capacity', {
       token: production, body: { required_items: [{ inventory_id: blank, quantity_needed: 3 }] }
     }));
-    add('ink_add', 15, () => t.request('POST', `/api/inventory/${ink}/adjust`, { token: production, body: { action: 'add', quantity: 2 } }));
-    add('ink_sub', 15, () => t.request('POST', `/api/inventory/${ink}/adjust`, { token: production, body: { action: 'subtract', quantity: 5 } }));
-    add('ink_loss', 10, (i) => t.request('POST', `/api/inventory/${ink}/loss`, {
+    // Migration 015: Add / Subtract stock is retired; stock leaves through recorded losses here
+    add('ink_loss', 25, (i) => t.request('POST', `/api/inventory/${ink}/loss`, {
       token: production, body: { quantity_lost: 3, reason_code: i % 2 ? 'printer_head_banding' : 'damaged_in_storage' }
     }));
-    add('paper_sub', 10, () => t.request('POST', `/api/inventory/${paper}/adjust`, { token: production, body: { action: 'subtract', quantity: 3 } }));
+    add('paper_sub', 10, () => t.request('POST', `/api/inventory/${paper}/loss`, {
+      token: production, body: { quantity_lost: 3, reason_code: 'damaged_in_storage' }
+    }));
     add('locked_edit', 10, (i) => t.request('PATCH', `/api/orders/${lockedOrder}/details`, { token: production, body: { production_deadline: shopDate(11 + i) } }));
     add('owner_edit', 5, (i) => t.request('PATCH', `/api/orders/${lockedOrder}/details`, { token: owner, body: { production_deadline: shopDate(30 + i) } }));
     add('dashboard', 10, () => t.request('GET', '/api/reports/dashboard', { token: admin }));
@@ -64,6 +65,7 @@ describe('PB 26: 150+ concurrent requests (offline server)', () => {
     add('orders', 5, () => t.request('GET', '/api/orders?sort=priority', { token: production }));
     add('inventory', 5, () => t.request('GET', '/api/inventory', { token: production }));
     add('waste_csv', 5, () => t.request('GET', '/api/reports/export/waste.csv', { token: admin }));
+    add('waste_report', 5, () => t.request('GET', '/api/reports/waste', { token: admin }));
     assert.ok(jobs.length >= 120, `${jobs.length} requests`);
 
     const started = Date.now();
@@ -88,12 +90,12 @@ describe('PB 26: 150+ concurrent requests (offline server)', () => {
     assert.deepEqual(b, { a: 100, r: 99 }, 'reserved = 33 orders x 3, never more than on hand');
 
     // 3. Shared stock: every movement counted once
-    assert.equal(count('ink_add', 200) + count('ink_sub', 200) + count('ink_loss', 201), 40);
+    assert.equal(count('ink_loss', 201), 25);
     const i = await t.get('SELECT quantity_available AS a FROM inventory_items WHERE inventory_id = ?', [ink]);
-    assert.equal(i.a, 200 + 15 * 2 - 15 * 5 - 10 * 3);
-    assert.equal((await t.get('SELECT COUNT(*) AS n FROM material_loss WHERE inventory_id = ?', [ink])).n, 10);
+    assert.equal(i.a, 200 - 25 * 3);
+    assert.equal((await t.get('SELECT COUNT(*) AS n FROM material_loss WHERE inventory_id = ?', [ink])).n, 25);
     // 20 sheets, 3 at a time: 6 go through, 4 are refused, 2 are left (never below 0)
-    assert.deepEqual([count('paper_sub', 200), count('paper_sub', 409)], [6, 4]);
+    assert.deepEqual([count('paper_sub', 201), count('paper_sub', 409)], [6, 4]);
     assert.equal((await t.get('SELECT quantity_available AS a FROM inventory_items WHERE inventory_id = ?', [paper])).a, 2);
 
     // 4. Edit-lock contention: the lower rank is refused, the Owner prevails
@@ -102,7 +104,7 @@ describe('PB 26: 150+ concurrent requests (offline server)', () => {
     assert.equal(count('owner_edit', 200), 5);
 
     // 5. Reads all answered
-    for (const kind of ['dashboard', 'pnl', 'orders', 'inventory', 'waste_csv']) assert.equal(count(kind, 200), of(kind).length, kind);
+    for (const kind of ['dashboard', 'pnl', 'orders', 'inventory', 'waste_csv', 'waste_report']) assert.equal(count(kind, 200), of(kind).length, kind);
 
     // 6. Stock invariants on every item, as stored and as the API shows them
     const rows = await t.all('SELECT inventory_id, quantity_available AS a, quantity_reserved AS r FROM inventory_items');

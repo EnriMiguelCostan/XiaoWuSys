@@ -81,10 +81,10 @@ describe('Sync: an order changed offline and online is settled by rank', () => {
     db = await prepareDatabase(path.join(dir, 'cache.db'));
     await sqliteRun(db, "INSERT INTO customers (customer_id, full_name, sync_status) VALUES ('c-1', 'Agdao NHS', 'synced')");
     cloud = createScriptedCloud();
-    cloud.put({ order_id: 'o-win', tracking_no: 'XM-2026-0001', production_deadline: CLOUD_DAY, last_edited_by: 'u-production', last_edited_role: 'Production' });
+    cloud.put({ order_id: 'o-win', tracking_no: 'XM-2026-0001', production_deadline: CLOUD_DAY, last_edited_by: 'u-production', last_edited_role: 'Staff' });
     cloud.put({ order_id: 'o-lose', tracking_no: 'XM-2026-0002', production_deadline: CLOUD_DAY, last_edited_by: 'u-owner', last_edited_role: 'Owner' });
     cloud.put({ order_id: 'o-equal', tracking_no: 'XM-2026-0003', production_deadline: CLOUD_DAY, last_edited_by: 'u-admin', last_edited_role: 'Admin' });
-    cloud.put({ order_id: 'o-done', tracking_no: 'XM-2026-0004', production_deadline: CLOUD_DAY, production_status: 'Cancelled', last_edited_by: 'u-production', last_edited_role: 'Production' });
+    cloud.put({ order_id: 'o-done', tracking_no: 'XM-2026-0004', production_deadline: CLOUD_DAY, production_status: 'Cancelled', last_edited_by: 'u-production', last_edited_role: 'Staff' });
     await offlineEdit('o-win', 'Admin', 'u-admin', '2026-12-10T00:00:00');
     await offlineEdit('o-lose', 'Admin', 'u-admin', '2026-12-11T00:00:00');
     await offlineEdit('o-equal', 'Admin', 'u-admin2', '2026-12-12T00:00:00');
@@ -132,7 +132,7 @@ describe('Sync: an order changed offline and online is settled by rank', () => {
     assert.deepEqual([(await local('o-done')).production_status, (await local('o-done')).sync_conflict], ['Cancelled', null]);
 
     assert.deepEqual(summary.resolved.map((r) => [r.id, r.winner, r.notify_user, r.by_role, r.tracking_no]).sort(), [
-      ['o-done', 'cloud', 'u-owner', 'Production', 'XM-2026-0004'],
+      ['o-done', 'cloud', 'u-owner', 'Staff', 'XM-2026-0004'],
       ['o-lose', 'cloud', 'u-admin', 'Owner', 'XM-2026-0002'],
       ['o-win', 'local', 'u-production', 'Admin', 'XM-2026-0001']
     ]);

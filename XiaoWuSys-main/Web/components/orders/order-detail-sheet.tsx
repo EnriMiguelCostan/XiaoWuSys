@@ -19,8 +19,13 @@
 // payments section) and the reason the Owner gives when cancelling (PB 23, saved and audited).
 // M6 part 4: Archive / Restore (PB 23, D2) from allowed_actions.archive_order / restore_order.
 // An archived order is read-only: the server sends no edit actions until it is restored.
+// Migration 015 (adviser consultation): the order profile is full screen. The left column keeps
+// who / when / money and what the order still needs (approval, or completion); the right side
+// splits the order into tabs (Details, Materials & print, Quote, Payments, Deliveries, History)
+// instead of one long scroll. "Mark completed" follows the server's completion check
+// (allowed_actions.complete_blocked_reason / complete_with_balance, detail.completion).
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Archive, ArchiveRestore, CircleCheck, CircleX, Copy, Flame, Lock, Printer, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-react';
+import { Archive, ArchiveRestore, CircleCheck, CircleDashed, CircleX, Copy, Flame, Lock, Printer, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { orderNumber, shortfallLines } from '@xiaowu/client-core/orders';
 import { orderActions } from '@xiaowu/client-core/permissions';
@@ -38,12 +43,14 @@ import {
   StatusTimeline,
 } from '@/components/orders/order-sections';
 import { useOrderLocks } from '@/components/providers/order-locks-provider';
-import { JumpToSection, type OrderSectionKey } from '@/components/orders/jump-to-section';
+import { JumpToSection, ORDER_SECTION_EVENT, type OrderSectionKey } from '@/components/orders/jump-to-section';
+import { DeliveriesSection } from '@/components/orders/deliveries-section';
 import { PaymentsSection } from '@/components/orders/payments-section';
-import { ConsumablesUsed, QuoteSection } from '@/components/orders/pricing-section';
+import { PrintDetailsSection } from '@/components/orders/print-details-section';
+import { ConsumablesUsed, PriceCutPanel, QuoteSection } from '@/components/orders/pricing-section';
 import { MaterialLossesSection } from '@/components/orders/waste-section';
 import { ShortageTable } from '@/components/orders/shortage-table';
-import { OrderStatusBadge } from '@/components/orders/status-badges';
+import { OrderStatusBadge, PaymentStatusBadge } from '@/components/orders/status-badges';
 import { RequiredNote } from '@/components/forms/form-bits';
 import { Button } from '@/components/ui/button';
 import {
@@ -57,6 +64,7 @@ import {
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SHEET_SCROLL_BODY } from '@/components/ui/sheet';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useApi } from '@/hooks/use-api';
 import { useOrderEditLock } from '@/hooks/use-order-edit-lock';
 import { useSocketEvent } from '@/hooks/use-socket-event';
@@ -122,6 +130,10 @@ export function OrderDetailSheet({
   const [openForms, setOpenForms] = useState<Record<string, boolean>>({});
   const [formsEpoch, setFormsEpoch] = useState(0);
   const reloadAfterEditing = useRef(false);
+  const [tab, setTab] = useState('details');
+  const [completing, setCompleting] = useState<{ unpaid: boolean } | null>(null);
+  const [handoverName, setHandoverName] = useState('');
+  const [handoverMethod, setHandoverMethod] = useState('Pick-up');
   const { lockedByOther } = useOrderLocks();
 
   const requestKey = `${orderId}|${tick}|${syncGeneration}`;
@@ -131,6 +143,23 @@ export function OrderDetailSheet({
   const reportDetails = useCallback((open: boolean) => setOpenForms((f) => ({ ...f, details: open })), []);
   const reportDesign = useCallback((open: boolean) => setOpenForms((f) => ({ ...f, design: open })), []);
   const reportMaterials = useCallback((open: boolean) => setOpenForms((f) => ({ ...f, materials: open })), []);
+  const reportPrints = useCallback((open: boolean) => setOpenForms((f) => ({ ...f, prints: open })), []);
+
+  // "Go to the quote" etc. (jump-to-section.tsx) opens the section's tab first
+  useEffect(() => {
+    const onJump = (e: Event) => {
+      const next = (e as CustomEvent<string>).detail;
+      if (typeof next === 'string') setTab(next);
+    };
+    window.addEventListener(ORDER_SECTION_EVENT, onJump);
+    return () => window.removeEventListener(ORDER_SECTION_EVENT, onJump);
+  }, []);
+  // A different order opens on its first tab (state adjusted while rendering, as React recommends)
+  const [tabOrder, setTabOrder] = useState(orderId);
+  if (tabOrder !== orderId) {
+    setTabOrder(orderId);
+    setTab('details');
+  }
   const closeForms = useCallback(() => {
     setFormsEpoch((n) => n + 1);
     setOpenForms({});
@@ -372,6 +401,43 @@ export function OrderDetailSheet({
   };
 
   const open = Boolean(orderId);
+  const completion = detail?.completion;
+  const fulfillment = detail?.fulfillment;
+  const closed = order ? ['Completed', 'Cancelled'].includes(order.production_status) : false;
+
+  // Mark completed: when no batch was recorded, ask who took the pieces (the server records the
+  // hand-over); the Owner may complete with a balance due after confirming it.
+  const askComplete = () => {
+    if (!detail || !order) return;
+    setHandoverName(customer?.full_name ?? '');
+    setHandoverMethod('Pick-up');
+    setCompleting({ unpaid: false });
+  };
+  const sendComplete = async (unpaid: boolean) => {
+    if (!order) return;
+    setBusy(true);
+    setPendingStatus('Completed');
+    const { ok, data } = await api<{ message?: string; error?: string; missing?: { message: string }[] }>(
+      'PATCH',
+      `/orders/${encodeURIComponent(order.order_id)}/status`,
+      {
+        status: 'Completed',
+        expected_version: order.version || undefined,
+        ...(unpaid ? { allow_unpaid: true } : {}),
+        ...(completion?.auto_handover ? { handover: { received_by_name: handoverName.trim() || undefined, method: handoverMethod } } : {}),
+      }
+    );
+    setBusy(false);
+    setPendingStatus(null);
+    setCompleting(null);
+    setResult(
+      ok
+        ? { type: 'success', title: `${orderNumber(order)} is completed`, message: data.message ?? 'The order is completed.' }
+        : { type: 'warning', title: 'Not completed yet', message: errorMessage(data, 'The order could not be completed.') }
+    );
+    reloadDetail();
+    onChanged();
+  };
 
   return (
     <>
@@ -385,7 +451,8 @@ export function OrderDetailSheet({
       >
         <SheetContent
           side="right"
-          className="w-full gap-0 p-0 sm:max-w-2xl"
+          // Full screen (adviser consultation): the order profile uses the whole window
+          className="w-full gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-none"
           // While an edit form is open, a stray click outside must not close the panel and lose it
           onInteractOutside={(e) => editing && e.preventDefault()}
           onEscapeKeyDown={(e) => editing && e.preventDefault()}
@@ -395,9 +462,11 @@ export function OrderDetailSheet({
               <span>Order</span>
               <code className="font-mono wrap-anywhere">{order ? orderNumber(order) : '…'}</code>
               {order && <OrderStatusBadge status={order.production_status} />}
+              {detail && <PaymentStatusBadge status={detail.totals.payment_status} />}
             </SheetTitle>
             <SheetDescription className="min-w-0 truncate" title={customer?.full_name}>
               {customer?.full_name ?? (order ? 'Unknown customer' : 'Loading the order…')}
+              {fulfillment && fulfillment.pieces_ordered > 0 && ` · ${fulfillment.label}`}
             </SheetDescription>
             {order && (
               <div className="flex flex-wrap gap-2 pt-1">
@@ -421,69 +490,102 @@ export function OrderDetailSheet({
             )}
           </SheetHeader>
 
-          <div className={cn("min-h-0 flex-1 space-y-5 overflow-y-auto p-4", SHEET_SCROLL_BODY)} aria-busy={!detail}>
+          <div className={cn('min-h-0 flex-1 overflow-y-auto', SHEET_SCROLL_BODY)} aria-busy={!detail}>
             {loadError && (
-              <p role="alert" className={cn('rounded-md border p-3 text-sm', TONE_CLASSES.danger.banner)}>
+              <p role="alert" className={cn('m-4 rounded-md border p-3 text-sm', TONE_CLASSES.danger.banner)}>
                 {loadError}
               </p>
             )}
-            {!detail && !loadError && (
-              <LogoSpinner label="Loading the order…" className="min-h-64" />
-            )}
+            {!detail && !loadError && <LogoSpinner label="Loading the order…" className="min-h-64" />}
 
             {detail && order && (
-              <>
-                {otherLock && (
-                  <p role="status" className={cn('flex items-start gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.warning.banner)}>
-                    <Lock className="mt-0.5 size-4 shrink-0" aria-hidden />
-                    <span className="wrap-anywhere">
-                      A {otherLock.role} user is editing this order right now. You can look, but your changes may be refused until they finish.
-                    </span>
-                  </p>
-                )}
-                {order.archived_at && (
-                  <p role="status" className={cn('flex items-start gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.muted.banner)}>
-                    <Archive className="mt-0.5 size-4 shrink-0" aria-hidden />
-                    <span>Archived on {formatDateTime(order.archived_at, { utc: true })}. It is kept for the records and cannot be changed until it is restored.</span>
-                  </p>
-                )}
-                <OrderInfo detail={detail} customer={customer} />
-                {order.production_status === 'Cancelled' && order.cancellation_reason && (
-                  <p className={cn('rounded-md border p-3 text-sm wrap-anywhere', TONE_CLASSES.danger.banner)}>
-                    <strong>Reason for cancelling:</strong> {order.cancellation_reason}
-                  </p>
-                )}
-                <div className="flex flex-col gap-3">
-                  <DetailsEditor
-                    key={`details-${order.version}-${formsEpoch}`}
-                    detail={detail}
-                    actions={actions}
-                    onResult={sectionResult}
-                    onEditing={reportDetails}
-                  />
-                  <DesignLink
-                    key={`design-${order.version}-${formsEpoch}`}
-                    detail={detail}
-                    actions={actions}
-                    onResult={sectionResult}
-                    onEditing={reportDesign}
-                  />
-                </div>
-                <Separator />
-                <QuoteSection key={`pricing-${order.version}`} detail={detail} actions={actions} onResult={sectionResult} onPrintQuote={printQuote} />
-                <Separator />
-                <MaterialsSection key={`materials-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportMaterials} />
-                <MaterialLossesSection detail={detail} actions={actions} onResult={sectionResult} />
-                <Separator />
-                <PaymentsSection detail={detail} actions={actions} onPrintReceipt={printPayment} onResult={sectionResult} />
-                <Separator />
-                <StatusTimeline detail={detail} />
-                <ConsumablesUsed detail={detail} />
-                {awaitingApproval && <ApprovalPanel detail={detail} canApprove={actions.approve} />}
-                {order.sync_status !== 'synced' && (
-                  <p className="text-sm text-muted-foreground">This order was saved offline. Status changes are available once it syncs.</p>
-                )}
-              </>
+              <div className="mx-auto grid max-w-[110rem] gap-5 p-4 lg:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)]">
+                {/* Left: who, when, money, and what is still needed */}
+                <aside className="min-w-0 space-y-4 lg:sticky lg:top-0 lg:self-start">
+                  {otherLock && (
+                    <p role="status" className={cn('flex items-start gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.warning.banner)}>
+                      <Lock className="mt-0.5 size-4 shrink-0" aria-hidden />
+                      <span className="wrap-anywhere">
+                        A {otherLock.role} user is editing this order right now. You can look, but your changes may be refused until they finish.
+                      </span>
+                    </p>
+                  )}
+                  {order.archived_at && (
+                    <p role="status" className={cn('flex items-start gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.muted.banner)}>
+                      <Archive className="mt-0.5 size-4 shrink-0" aria-hidden />
+                      <span>Archived on {formatDateTime(order.archived_at, { utc: true })}. It is kept for the records and cannot be changed until it is restored.</span>
+                    </p>
+                  )}
+                  <OrderInfo detail={detail} customer={customer} />
+                  {order.production_status === 'Cancelled' && order.cancellation_reason && (
+                    <p className={cn('rounded-md border p-3 text-sm wrap-anywhere', TONE_CLASSES.danger.banner)}>
+                      <strong>Reason for cancelling:</strong> {order.cancellation_reason}
+                    </p>
+                  )}
+                  {awaitingApproval && <ApprovalPanel detail={detail} canApprove={actions.approve} />}
+                  {!closed && completion && !awaitingApproval && <CompletionChecklist detail={detail} />}
+                  {order.sync_status !== 'synced' && (
+                    <p className="text-sm text-muted-foreground">This order was saved offline. Status changes are available once it syncs.</p>
+                  )}
+                </aside>
+
+                {/* Right: the order's parts, one tab at a time (no long scroll) */}
+                <Tabs value={tab} onValueChange={setTab} className="min-w-0">
+                  <TabsList aria-label="Parts of this order">
+                    <TabsTrigger value="details">Details</TabsTrigger>
+                    <TabsTrigger value="materials">
+                      Materials &amp; print
+                      {(detail.print_details?.length ?? 0) > 0 && <CountBadge n={detail.print_details?.length ?? 0} />}
+                    </TabsTrigger>
+                    <TabsTrigger value="quote">Quote</TabsTrigger>
+                    <TabsTrigger value="payments">
+                      Payments
+                      {detail.payments.length > 0 && <CountBadge n={detail.payments.length} />}
+                    </TabsTrigger>
+                    <TabsTrigger value="deliveries">
+                      Deliveries
+                      {(detail.deliveries?.length ?? 0) > 0 && <CountBadge n={detail.deliveries?.length ?? 0} />}
+                    </TabsTrigger>
+                    <TabsTrigger value="history">History</TabsTrigger>
+                  </TabsList>
+
+                  <TabsContent value="details">
+                    <div className="flex flex-col gap-3">
+                      <DetailsEditor key={`details-${order.version}-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportDetails} />
+                      <DesignLink key={`design-${order.version}-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportDesign} />
+                    </div>
+                    {!order.order_description && actions.edit_description && (
+                      <p className="text-sm text-muted-foreground">No description yet. Use “Edit” to write what the customer wants (design, colours, placement).</p>
+                    )}
+                  </TabsContent>
+
+                  <TabsContent value="materials">
+                    <MaterialsSection key={`materials-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportMaterials} />
+                    <Separator />
+                    <PrintDetailsSection key={`prints-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportPrints} />
+                    <Separator />
+                    <MaterialLossesSection detail={detail} actions={actions} onResult={sectionResult} />
+                    <ConsumablesUsed detail={detail} />
+                  </TabsContent>
+
+                  <TabsContent value="quote">
+                    <QuoteSection key={`pricing-${order.version}`} detail={detail} actions={actions} onResult={sectionResult} onPrintQuote={printQuote} />
+                    <PriceCutPanel key={`cut-${order.version}`} detail={detail} actions={actions} onResult={sectionResult} />
+                  </TabsContent>
+
+                  <TabsContent value="payments">
+                    <PaymentsSection detail={detail} actions={actions} onPrintReceipt={printPayment} onResult={sectionResult} />
+                  </TabsContent>
+
+                  <TabsContent value="deliveries">
+                    <DeliveriesSection detail={detail} actions={actions} onResult={sectionResult} />
+                  </TabsContent>
+
+                  <TabsContent value="history">
+                    <StatusTimeline detail={detail} />
+                  </TabsContent>
+                </Tabs>
+              </div>
             )}
           </div>
 
@@ -492,11 +594,7 @@ export function OrderDetailSheet({
             <div className="flex flex-wrap items-center gap-2 border-t bg-muted/30 p-4">
               {awaitingApproval && actions.approve && (
                 <div className="flex min-w-0 flex-[1_1_16rem] flex-col gap-1">
-                  <Button
-                    className="w-fit"
-                    disabled={busy || Boolean(approval?.blocking.length)}
-                    onClick={() => setConfirmApprove(true)}
-                  >
+                  <Button className="w-fit" disabled={busy || Boolean(approval?.blocking.length)} onClick={() => setConfirmApprove(true)}>
                     <ShieldCheck aria-hidden /> Approve job order
                   </Button>
                   {approval?.blocking[0] && (
@@ -512,6 +610,11 @@ export function OrderDetailSheet({
                   )}
                 </div>
               )}
+              {actions.complete_blocked_reason && footerActions.some((a) => a.to === 'Completed') && (
+                <p className="min-w-0 flex-[1_1_16rem] text-xs leading-relaxed text-muted-foreground wrap-anywhere">
+                  <strong className="text-foreground">Not ready to complete:</strong> {actions.complete_blocked_reason}
+                </p>
+              )}
               {footerActions.length > 0 && (
                 // HCI (Fitts): destructive actions (Cancel order) come first, then a divider and 16px of
                 // space, then the constructive steps with the main one at the far right, so a quick tap on
@@ -519,18 +622,33 @@ export function OrderDetailSheet({
                 <div className="ml-auto flex flex-wrap items-center gap-2">
                   {[...footerActions.filter((a) => a.danger), ...footerActions.filter((a) => !a.danger)].map((a, i, all) => {
                     // PB 9: Resume reserves stock, so it is held back while the server says stock is short
-                    const blocked = a.to === 'Pending' && stockShort;
+                    const stockBlocked = a.to === 'Pending' && stockShort;
+                    // Migration 015: Completed waits for the server's requirements (paid, delivered)
+                    const completeBlocked = a.to === 'Completed' && Boolean(actions.complete_blocked_reason) && !actions.complete_with_balance;
                     const Icon = a.icon;
                     const afterDanger = i > 0 && all[i - 1].danger && !a.danger;
+                    const onClick = a.danger
+                      ? () => setConfirmCancel(true)
+                      : a.to === 'Completed'
+                        ? askComplete
+                        : () => changeStatus(a.to);
                     return (
                       <span key={a.to} className="contents">
                         {afterDanger && <span aria-hidden className="mx-2 h-8 w-px bg-border" />}
                         <Button
                           variant={a.danger ? 'destructive' : 'default'}
-                          disabled={busy || blocked}
+                          disabled={busy || stockBlocked || completeBlocked}
                           busy={pendingStatus === a.to && !a.danger}
-                          title={blocked ? `Not enough stock to resume: ${shortfallLines(detail?.stock_check)[0] ?? ''}` : undefined}
-                          onClick={() => (a.danger ? setConfirmCancel(true) : changeStatus(a.to))}
+                          title={
+                            stockBlocked
+                              ? `Not enough stock to resume: ${shortfallLines(detail?.stock_check)[0] ?? ''}`
+                              : completeBlocked
+                                ? actions.complete_blocked_reason ?? undefined
+                                : a.to === 'Pressing'
+                                  ? 'Pressing: the heat press that fixes the print on garments'
+                                  : undefined
+                          }
+                          onClick={onClick}
                         >
                           <Icon aria-hidden /> {pendingStatus === a.to && !a.danger ? 'Updating…' : a.label}
                         </Button>
@@ -543,6 +661,74 @@ export function OrderDetailSheet({
           )}
         </SheetContent>
       </Sheet>
+
+      {/* Migration 015: completing records who took the pieces when no batch was recorded */}
+      <Dialog open={Boolean(completing)} onOpenChange={(next) => !next && !busy && setCompleting(null)}>
+        <DialogContent className="min-w-0 sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Complete this order?</DialogTitle>
+            <DialogDescription>
+              {completion?.auto_handover
+                ? `No batch was recorded, so all ${fulfillment?.pieces_ordered ?? ''} pieces are handed over now.`
+                : 'Every piece was handed over.'}{' '}
+              The reserved materials are used up from stock.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {completion?.auto_handover && (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="handover-name">Received by</Label>
+                  <input
+                    id="handover-name"
+                    maxLength={255}
+                    value={handoverName}
+                    onChange={(e) => setHandoverName(e.target.value)}
+                    className="h-9 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="handover-method">How</Label>
+                  <select
+                    id="handover-method"
+                    value={handoverMethod}
+                    onChange={(e) => setHandoverMethod(e.target.value)}
+                    className="h-9 w-full rounded-lg border border-input bg-background px-2.5 text-sm"
+                  >
+                    {['Pick-up', 'Delivery', 'Courier'].map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            )}
+            {actions.complete_with_balance && (
+              <p className={cn('flex gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.warning.banner)}>
+                <TriangleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
+                <span>
+                  {peso(completion?.balance_due ?? 0)} is still unpaid. As the Owner you may hand it over now; the balance stays on the order and
+                  in Unpaid balances.
+                </span>
+              </p>
+            )}
+            {(completion?.warnings ?? []).map((w) => (
+              <p key={w.code} className="text-sm text-muted-foreground">
+                {w.message}
+              </p>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCompleting(null)} disabled={busy}>
+              Not yet
+            </Button>
+            <Button busy={busy} onClick={() => void sendComplete(Boolean(actions.complete_with_balance))} disabled={busy}>
+              <CircleCheck aria-hidden /> {actions.complete_with_balance ? 'Complete with balance due' : 'Mark completed'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* PB 23: cancelling is a void, so the Owner gives a reason; the server saves it with an audit row */}
       <Dialog open={confirmCancel} onOpenChange={(next) => !next && !busy && setConfirmCancel(false)}>
@@ -639,5 +825,53 @@ export function OrderDetailSheet({
 
       <ResultDialog result={result} onClose={() => setResult(null)} />
     </>
+  );
+}
+
+function CheckRow({ ok, text }: { ok: boolean; text: string }) {
+  return (
+    <li className="flex items-start gap-2">
+      {ok ? <CircleCheck className={cn('mt-0.5 size-4 shrink-0', TONE_CLASSES.success.text)} aria-hidden /> : <CircleDashed className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />}
+      <span className={cn(!ok && 'text-muted-foreground')}>
+        <span className="sr-only">{ok ? 'Done: ' : 'Still to do: '}</span>
+        {text}
+      </span>
+    </li>
+  );
+}
+
+function CountBadge({ n }: { n: number }) {
+  return <span className="rounded-full bg-muted px-1.5 text-xs font-medium tabular-nums text-muted-foreground">{n}</span>;
+}
+
+/** Migration 015: what the server says this order still needs before it is Completed */
+function CompletionChecklist({ detail }: { detail: OrderDetail }) {
+  const c = detail.completion;
+  const f = detail.fulfillment;
+  if (!c) return null;
+  const paidOk = !c.missing.some((m) => m.code === 'BALANCE_DUE');
+  const deliveredOk = !c.missing.some((m) => m.code === 'PIECES_NOT_DELIVERED');
+  const producedOk = !c.missing.some((m) => m.code === 'NOT_IN_PRODUCTION');
+  return (
+    <section className="space-y-2 rounded-md border bg-card p-3" aria-labelledby="completion-title">
+      <h3 id="completion-title" className="text-sm font-semibold">Before it can be completed</h3>
+      <ul className="space-y-1.5 text-sm">
+        <CheckRow ok={producedOk} text="Printing has started" />
+        <CheckRow ok={paidOk} text={paidOk ? 'Nothing left to pay' : `${peso(c.balance_due)} still to pay`} />
+        <CheckRow
+          ok={deliveredOk}
+          text={
+            c.auto_handover
+              ? 'All pieces handed over at once when completed'
+              : f
+                ? `${f.pieces_delivered.toLocaleString()} of ${f.pieces_ordered.toLocaleString()} pieces handed over`
+                : 'Pieces handed over'
+          }
+        />
+      </ul>
+      {c.warnings.map((w) => (
+        <p key={w.code} className={cn('rounded-md border p-2 text-xs', TONE_CLASSES.warning.banner)}>{w.message}</p>
+      ))}
+    </section>
   );
 }

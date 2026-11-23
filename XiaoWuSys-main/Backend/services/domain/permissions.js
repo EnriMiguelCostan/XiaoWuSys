@@ -6,7 +6,9 @@
 // ==========================================
 
 const ALL_ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
-const WRITE_ROLES = ['Owner', 'Admin', 'Production'];
+// Adviser consultation (November 2026): the Staff role now does what Production did (create
+// orders, record payments, run the stock), and Production now views only, as Staff did.
+const WRITE_ROLES = ['Owner', 'Admin', 'Staff'];
 const MANAGER_ROLES = ['Owner', 'Admin'];
 const OWNER_ONLY = ['Owner'];
 
@@ -15,22 +17,37 @@ const OWNER_ONLY = ['Owner'];
 const CAPABILITIES = {
   view_orders: ALL_ROLES,
   create_order: WRITE_ROLES,
-  edit_order: WRITE_ROLES,        // deadline, design link, print details
+  edit_order: WRITE_ROLES,        // deadline, design link, description, print details
   change_status: WRITE_ROLES,     // Start Printing, Mark Completed, Resume
   record_payment: WRITE_ROLES,
+  record_delivery: WRITE_ROLES,   // migration 015: a batch delivered / picked up
   set_quote: OWNER_ONLY,
   apply_discount: OWNER_ONLY,     // reserved for PB 12
   void_order: OWNER_ONLY,         // cancel an existing order (releases its stock)
   approve_order: OWNER_ONLY,
+  refund_payment: OWNER_ONLY,     // migration 015: money given back to the customer
+  complete_with_balance: OWNER_ONLY, // migration 015: hand over an order before it is fully paid
+  verify_payment: MANAGER_ROLES,  // migration 015: confirm a non-cash payment arrived
+  edit_payment: MANAGER_ROLES,    // migration 015: correct a payment's date / reference / payer
   view_finance: MANAGER_ROLES,
   manage_accounts: MANAGER_ROLES,
-  edit_inventory: WRITE_ROLES,    // add, edit, stock changes, move to / restore from the Recycle Bin
-  purge_inventory: MANAGER_ROLES  // permanent delete / empty the Recycle Bin
+  edit_inventory: WRITE_ROLES,    // add and edit items, record losses, move to / restore from the Recycle Bin
+  purge_inventory: MANAGER_ROLES, // permanent delete / empty the Recycle Bin
+  // migration 015: the inventory system
+  view_stock: ALL_ROLES,          // stock in / out / counts, stock card, suppliers (read)
+  receive_stock: WRITE_ROLES,     // stock in (deliveries) and corrections to them
+  issue_stock: WRITE_ROLES,       // stock out (returns, shop use, samples...) and corrections
+  count_stock: MANAGER_ROLES,     // physical count that sets the system count
+  void_stock_document: MANAGER_ROLES,
+  manage_suppliers: WRITE_ROLES,  // add / edit supplier profiles
+  archive_supplier: MANAGER_ROLES,
+  edit_customer: WRITE_ROLES      // client profile
 };
 
 // Who outranks whom (PB 5): a higher rank may take over an edit lock and replace a lower
 // rank's conflicting edit. An unknown or missing role ranks below everyone.
-const ROLE_RANK = { Owner: 4, Admin: 3, Production: 2, Staff: 1 };
+// Staff and Production swapped places with their capabilities (November 2026).
+const ROLE_RANK = { Owner: 4, Admin: 3, Staff: 2, Production: 1 };
 const rankOf = (role) => ROLE_RANK[role] || 0;
 // May "role" replace a conflicting change last made by "lastEditedRole"? Strictly higher only.
 const outranks = (role, lastEditedRole) => rankOf(role) > rankOf(lastEditedRole);

@@ -38,7 +38,7 @@ describe('Payments and receipt numbers on real PostgreSQL', { skip }, () => {
     pool = new Pool({ connectionString: url, max: 8 });
     // An existing shop database: everything up to 007, with payments already in it
     await resetDatabase(pool, { before: '008' });
-    await pool.query("INSERT INTO users (user_id, username, password_hash, role) VALUES ('u-owner', 'owner', 'x', 'Owner'), ('u-production', 'production', 'x', 'Production')");
+    await pool.query("INSERT INTO users (user_id, username, password_hash, role) VALUES ('u-owner', 'owner', 'x', 'Owner'), ('u-production', 'staff', 'x', 'Staff')");
     await pool.query("INSERT INTO customers (customer_id, full_name) VALUES ('c-1', 'Agdao NHS')");
     await insertOrder('o-legacy', 100000);
     // payment_date is UTC; the shop (Asia/Manila) is 8 hours ahead
@@ -100,13 +100,13 @@ describe('Payments and receipt numbers on real PostgreSQL', { skip }, () => {
 
   it('records a payment online with its receipt number, receiver and fresh totals', async () => {
     server = await startPgTestServer(pool);
-    production = server.tokenFor('u-production', 'Production');
+    production = server.tokenFor('u-production', 'Staff');
     await insertOrder('o-online', 1000);
     const r = await pay('o-online', 100);
     assert.equal(r.status, 201, r.text);
     assert.equal(r.body.source, 'cloud');
     assert.match(r.body.payment.receipt_no, /^AR-\d{4}-\d{4}$/);
-    assert.deepEqual([r.body.payment.received_by, r.body.payment.received_by_name], ['u-production', 'production']);
+    assert.deepEqual([r.body.payment.received_by, r.body.payment.received_by_name], ['u-production', 'staff']);
     assert.deepEqual([r.body.totals.payment_status, r.body.totals.remaining, r.body.totals.downpayment.paid_synced], ['Partial', 900, 100]);
     assert.deepEqual(r.body.warnings.map((w) => w.code), ['DOWNPAYMENT_SHORT']);
 

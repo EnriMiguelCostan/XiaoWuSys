@@ -66,7 +66,7 @@ describe('Sessions', () => {
     await t.login('staff');
     // A session that started a minute ago (tokens from the same second as a sign-out are
     // indistinguishable by design: the token's issue time has 1-second precision)
-    staffToken = jwt.sign({ user_id: 'u-staff', role: 'Staff', iat: Math.floor(Date.now() / 1000) - 60 }, process.env.JWT_SECRET, { expiresIn: '8h' });
+    staffToken = jwt.sign({ user_id: 'u-staff', role: 'Production', iat: Math.floor(Date.now() / 1000) - 60 }, process.env.JWT_SECRET, { expiresIn: '8h' });
   });
   after(async () => { await t.close(); });
 
@@ -90,7 +90,7 @@ describe('Sessions', () => {
   });
 
   it('explains an expired session in plain language', async () => {
-    const expired = jwt.sign({ user_id: 'u-staff', role: 'Staff', exp: Math.floor(Date.now() / 1000) - 60 }, process.env.JWT_SECRET);
+    const expired = jwt.sign({ user_id: 'u-staff', role: 'Production', exp: Math.floor(Date.now() / 1000) - 60 }, process.env.JWT_SECRET);
     const r = await t.request('GET', '/api/inventory', { token: expired });
     assert.equal(r.status, 401);
     assert.equal(r.body.error, 'SESSION_EXPIRED');
@@ -146,15 +146,15 @@ describe('Account management', () => {
   it('lists accounts by role, then username A-Z ignoring case, from the offline copy too', async () => {
     // Inserted in a scrambled role order, straight into this computer's copy
     const extra = [
-      ['s-zed', 'Zed.staff', 'Staff', 1], ['a-bea', 'bea.admin', 'Admin', 1], ['p-ana', 'Ana.prod', 'Production', 1],
-      ['o-carl', 'carl.owner', 'Owner', 1], ['a-abe', 'Abe.admin', 'Admin', 1], ['p-ben', 'ben.prod', 'Production', 0]
+      ['s-zed', 'Zed.staff', 'Production', 1], ['a-bea', 'bea.admin', 'Admin', 1], ['p-ana', 'Ana.prod', 'Staff', 1],
+      ['o-carl', 'carl.owner', 'Owner', 1], ['a-abe', 'Abe.admin', 'Admin', 1], ['p-ben', 'ben.prod', 'Staff', 0]
     ];
     for (const [user_id, username, role, is_active] of extra) {
       await t.run(`INSERT INTO users (user_id, username, password_hash, role, is_active, sync_status) VALUES (?, ?, 'x', ?, ?, 'synced')`,
         [user_id, username, role, is_active]);
     }
     try {
-      const rank = { Owner: 4, Admin: 3, Production: 2, Staff: 1 };
+      const rank = { Owner: 4, Admin: 3, Staff: 2, Production: 1 }; // swapped in November 2026
       const ordered = (list) => list.every((u, i) => i === 0
         || rank[list[i - 1].role] > rank[u.role]
         || (rank[list[i - 1].role] === rank[u.role] && list[i - 1].username.localeCompare(u.username, 'en', { sensitivity: 'base' }) <= 0));
@@ -163,7 +163,7 @@ describe('Account management', () => {
       const all = await t.request('GET', '/api/auth/users', { token: t.tokens.admin });
       assert.equal(all.body.source, 'local');
       assert.ok(ordered(all.body.users), all.body.users.map((u) => `${u.role}:${u.username}`).join(', '));
-      assert.deepEqual(all.body.users.map((u) => u.role).filter((r, i, a) => a.indexOf(r) === i), ['Owner', 'Admin', 'Production', 'Staff']);
+      assert.deepEqual(all.body.users.map((u) => u.role).filter((r, i, a) => a.indexOf(r) === i), ['Owner', 'Admin', 'Staff', 'Production']);
       assert.deepEqual(mine(all.body.users), ['carl.owner', 'Abe.admin', 'bea.admin', 'Ana.prod', 'ben.prod', 'Zed.staff']);
       for (const status of ['active', 'inactive']) {
         const r = await t.request('GET', `/api/auth/users?status=${status}`, { token: t.tokens.admin });
@@ -178,13 +178,13 @@ describe('Account management', () => {
     const r = await t.request('GET', '/api/auth/users', { token: t.tokens.staff });
     assert.equal(r.status, 403);
     assert.equal(r.body.error, 'FORBIDDEN');
-    const create = await t.request('POST', '/api/auth/register', { token: t.tokens.staff, body: { username: 'x', password: 'Abcdefg1', role: 'Staff' } });
+    const create = await t.request('POST', '/api/auth/register', { token: t.tokens.staff, body: { username: 'x', password: 'Abcdefg1', role: 'Production' } });
     assert.equal(create.status, 403);
   });
 
   it('checks the password rule before anything is saved', async () => {
     for (const [password, msg] of [['short1', /at least 8/], ['allletters', /letter and one number/], ['12345678', /letter and one number/]]) {
-      const r = await t.request('POST', '/api/auth/register', { token: t.tokens.admin, body: { username: 'new.staff', password, role: 'Staff' } });
+      const r = await t.request('POST', '/api/auth/register', { token: t.tokens.admin, body: { username: 'new.staff', password, role: 'Production' } });
       assert.equal(r.status, 400, password);
       assert.match(r.body.message, msg);
     }
@@ -196,7 +196,7 @@ describe('Account management', () => {
   });
 
   it('explains that account changes need the internet', async () => {
-    const r = await t.request('POST', '/api/auth/register', { token: t.tokens.admin, body: { username: 'new.staff', password: 'Abcdefg12', role: 'Staff' } });
+    const r = await t.request('POST', '/api/auth/register', { token: t.tokens.admin, body: { username: 'new.staff', password: 'Abcdefg12', role: 'Production' } });
     assert.equal(r.status, 503);
     assert.equal(r.body.error, 'ACCOUNTS_REQUIRE_CLOUD');
     const self = await t.request('PATCH', '/api/auth/users/u-admin', { token: t.tokens.admin, body: { is_active: false } });

@@ -21,6 +21,9 @@ export interface InventoryItem {
   /** on hand x unit cost, computed by the server (absent on an older server) */
   stock_value?: number;
   stock_status: StockStatus | string;
+  /** migration 015: the usual supplier's profile, and whether it is a garment (print details have sizes) */
+  supplier_id?: string | null;
+  has_sizes?: boolean;
   sync_status: string;
   version?: number | null;
   deleted_at?: string | null;
@@ -102,13 +105,8 @@ export const canPurgeInventory = (user: SessionUser | null) => can(user, INVENTO
 // Always offered in the Unit picker (item-form-dialog.tsx); any other unit can be created there
 export const COMMON_UNITS = ['pcs', 'pack', 'ream', 'box', 'roll', 'meter', 'yard', 'bottle', 'pad', 'set', 'sheet'];
 
-/** Adjust Stock > Add Stock reasons, sent as the adjustment's reason text (POST /adjust). */
-export const ADD_STOCK_REASONS = ['Supplier Delivery', 'Unused Stock Return', 'Stock Count Correction', 'Other'] as const;
-
-/** Adjust Stock > Subtract Stock reasons that are NOT material loss (POST /adjust, action
- *  'subtract'), so a count correction never shows up as production waste. Material loss uses
- *  LOSS_REASONS (lib/orders.ts) and POST /loss. */
-export const SUBTRACT_STOCK_REASONS = ['Stock Count Correction', 'Internal / Sample Use', 'Other Adjustment'] as const;
+// Migration 015: the Add / Subtract reasons are gone with "Adjust Stock". The reasons for stock
+// in / stock out / counts come from the server (GET /api/stock/options).
 
 /** Saved-offline note appended to success messages (data.source === 'local'). */
 export const offlineNote = (data: { source?: unknown }) =>

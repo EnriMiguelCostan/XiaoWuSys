@@ -22,8 +22,8 @@ describe('M6 part 2 offline: selling price, roster import, typed quote, cloud-on
     t = await startTestServer();
     owner = await t.login('owner');
     admin = await t.login('admin');
-    production = await t.login('production');
-    staff = await t.login('staff');
+    production = await t.login('staff');
+    staff = await t.login('production');
     customer = (await t.request('POST', '/api/customers', { token: production, body: { full_name: 'Agdao NHS', contact_number: '09391234567' } })).body.customer.customer_id;
   });
   after(async () => { await t.close(); });
@@ -102,16 +102,22 @@ describe('M6 part 2 offline: selling price, roster import, typed quote, cloud-on
       token: production, body: { items: [{ product_type: 'Jersey Blank', quantity: 1, inventory_id: shirt }] }
     });
     assert.deepEqual([r.status, r.body.error], [503, 'ITEM_RESERVATION_REQUIRES_CLOUD']);
+    // Migration 015: a row with no stock is a print detail, not a material
     const unlinked = await t.request('POST', `/api/orders/${reserved.body.order_id}/items/bulk`, {
       token: production, body: { items: [{ product_type: 'Name print', quantity: 1, custom_name: 'REYES' }] }
     });
-    assert.equal(unlinked.status, 201, 'rows with no stock link reserve nothing, so they may be added');
+    assert.deepEqual([unlinked.status, unlinked.body.details[0].field], [400, 'items[0].inventory_id'], 'materials come from the catalog');
+    const names = await t.request('POST', `/api/orders/${reserved.body.order_id}/print-details/bulk`, {
+      token: production, body: { rows: [{ print_type: 'Name print', quantity: 1, custom_name: 'REYES' }] }
+    });
+    assert.equal(names.status, 201, 'print details reserve nothing, so they may be added offline');
+    assert.deepEqual([names.body.source, names.body.print_details[0].custom_name], ['local', 'REYES']);
 
     const cancelled = await t.request('POST', '/api/orders', {
       token: production, body: { customer_id: customer, production_deadline: shopDate(12), resolution: 'Cancelled' }
     });
     const closed = await t.request('POST', `/api/orders/${cancelled.body.order_id}/items/bulk`, {
-      token: production, body: { items: [{ product_type: 'Jersey', quantity: 1 }] }
+      token: production, body: { items: [{ product_type: 'Jersey', quantity: 1, inventory_id: shirt }] }
     });
     assert.deepEqual([closed.status, closed.body.error], [409, 'ORDER_CLOSED']);
   });
@@ -137,7 +143,7 @@ describe('M6 part 2 offline: selling price, roster import, typed quote, cloud-on
 
     const detail = await t.request('GET', `/api/orders/${orderId}`, { token: staff });
     assert.deepEqual(detail.body.quote, {
-      has_quote: true, subtotal_amount: 1200, discount_amount: 0, discount_reason: null, total_quote_amount: 1200,
+      has_quote: true, subtotal_amount: 1200, labor_amount: 0, incidental_amount: 0, gross_amount: 1200, adjustment_amount: 0, adjustment_reason: null, discount_amount: 0, discount_reason: null, total_quote_amount: 1200,
       lines: null // typed by hand: the items carry no prices, so the quotation shows totals only
     });
     assert.deepEqual(detail.body.consumables_deducted, []);

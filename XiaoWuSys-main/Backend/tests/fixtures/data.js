@@ -17,7 +17,7 @@ const USERS = [
 
 // The whiteboard inventory (the Oct 8, 2026 delivery plus the shop's usual consumables)
 const ITEMS = [
-  { item_name: 'Custom Shirt', item_category: 'Apparel', unit: 'pcs', quantity_available: 381, minimum_threshold: 50, unit_cost: 150, supplier: 'Davao Garments Supply' },
+  { item_name: 'Custom Shirt', item_category: 'Apparel', unit: 'pcs', quantity_available: 381, minimum_threshold: 50, unit_cost: 150, supplier: 'Davao Garments Supply', has_sizes: true },
   { item_name: 'Valiant Record Book Regular Notebook', item_category: 'Notebooks', unit: 'pcs', quantity_available: 5, minimum_threshold: 2, unit_cost: 45 },
   { item_name: 'Valiant Columnar Notebook', item_category: 'Notebooks', unit: 'pcs', quantity_available: 3, minimum_threshold: 2, unit_cost: 55 },
   { item_name: 'Quaff Sublimation Transfer Paper', item_category: 'Paper', unit: 'pack', quantity_available: 1, minimum_threshold: 2, unit_cost: 650, supplier: 'Quaff PH' },

@@ -9,7 +9,10 @@ export const can = (user, capability) =>
 export const NO_ORDER_ACTIONS = Object.freeze({
   approve: false, statuses: [], edit_deadline: false, edit_quote: false, generate_quote: false, apply_discount: false,
   link_design: false, add_items: false, record_payment: false, max_payment: 0, payment_blocked_reason: null,
-  print_receipt: false, print_quote: false, void_payment: false, log_loss: false, archive_order: false, restore_order: false
+  print_receipt: false, print_quote: false, void_payment: false, log_loss: false, archive_order: false, restore_order: false,
+  // migration 015
+  edit_description: false, add_print_details: false, record_delivery: false, max_delivery: 0, complete_blocked_reason: null,
+  complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: false, edit_payment: false, adjust_price: false
 });
 
 export const orderActions = (detail) => ({ ...NO_ORDER_ACTIONS, ...(detail && detail.allowed_actions) });
@@ -19,8 +22,8 @@ export const orderActions = (detail) => ({ ...NO_ORDER_ACTIONS, ...(detail && de
 export const ROLE_HELP = Object.freeze({
   Owner: 'Everything, including approving job orders and managing Owners',
   Admin: 'Everything except approving job orders; manages non-Owner accounts',
-  Production: 'Catalog, stock and orders (no account management)',
-  Staff: 'View the catalog and orders only'
+  Staff: 'Orders, payments, deliveries and stock in / out (no account management)',
+  Production: 'View the inventory, orders and dashboard only'
 });
 
 /** Plain-words description of a role from the server, or '' for a role this version doesn't know. */

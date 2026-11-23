@@ -48,7 +48,7 @@ describe('M6 part 4 on real PostgreSQL: archiving, cost history, load and stress
     await resetDatabase(pool, { before: '013' });
     await pool.query(`INSERT INTO users (user_id, username, password_hash, role) VALUES
       ('u-owner', 'owner', 'x', 'Owner'), ('u-admin', 'admin', 'x', 'Admin'),
-      ('u-production', 'production', 'x', 'Production'), ('u-staff', 'staff', 'x', 'Staff')`);
+      ('u-production', 'staff', 'x', 'Staff'), ('u-staff', 'production', 'x', 'Production')`);
     await pool.query("INSERT INTO customers (customer_id, full_name) VALUES ('c-1', 'Agdao NHS'), ('c-2', 'Old Client'), ('c-3', 'Race Client')");
     for (const [id, name, qty, cost] of [['i-shirt', 'Jersey Blank', 500, 120], ['i-ink', 'Sublimation Ink', 1000, 2.5], ['i-blank', 'Limited Blank', 100, 50], ['i-paper', 'Scarce Paper', 30, 4]]) {
       await pool.query(`INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, unit_cost)
@@ -83,7 +83,7 @@ describe('M6 part 4 on real PostgreSQL: archiving, cost history, load and stress
     server = await startPgTestServer(pool);
     owner = server.tokenFor('u-owner', 'Owner');
     admin = server.tokenFor('u-admin', 'Admin');
-    production = server.tokenFor('u-production', 'Production');
+    production = server.tokenFor('u-production', 'Staff');
   });
 
   it('keeps the unit cost of the moment an order is completed and its consumables are taken', async () => {
@@ -91,8 +91,13 @@ describe('M6 part 4 on real PostgreSQL: archiving, cost history, load and stress
                       VALUES ('r-1', 'i-shirt', 'i-ink', 2, 'Pressing')`);
     await insertOrder('o-cost', 'Printing', { quote: 3000, lines: [['i-shirt', 5]], reserved: true });
     const pnlBefore = (await call('GET', '/api/reports/pnl', owner)).body;
-    const done = await call('PATCH', '/api/orders/o-cost/status', production, { status: 'Completed' });
+    // Migration 015: nothing has been paid, so only the Owner may hand it over, and must say so
+    const refused = await call('PATCH', '/api/orders/o-cost/status', production, { status: 'Completed' });
+    assert.deepEqual([refused.status, refused.body.error, refused.body.can_complete_with_balance], [409, 'COMPLETION_REQUIREMENTS_NOT_MET', false]);
+    assert.equal((await call('PATCH', '/api/orders/o-cost/status', production, { status: 'Completed', allow_unpaid: true })).status, 403);
+    const done = await call('PATCH', '/api/orders/o-cost/status', owner, { status: 'Completed', allow_unpaid: true });
     assert.equal(done.status, 200, done.text);
+    assert.equal((await one("SELECT COUNT(*)::int AS n FROM order_deliveries WHERE order_id = 'o-cost'")).n, 1, 'the hand-over of all 5 pieces is recorded');
     assert.equal((await one("SELECT unit_cost::text AS c FROM order_items WHERE order_id = 'o-cost'")).c, '120.00');
     assert.equal((await one("SELECT unit_cost::text AS c, quantity_deducted FROM order_consumables_log WHERE order_id = 'o-cost'")).c, '2.50');
     const pnlAfter = (await call('GET', '/api/reports/pnl', owner)).body;
@@ -132,7 +137,8 @@ describe('M6 part 4 on real PostgreSQL: archiving, cost history, load and stress
     assert.equal(back.status, 200, back.text);
     assert.equal(back.body.order.archived_at, null);
     assert.equal((await call('POST', '/api/orders/o-cost/payments', production, { amount: 100, payment_type: 'Cash' })).status, 201);
-    assert.deepEqual((await audits('o-cost')).map((a) => [a.action, a.performed_role]), [['order_archived', 'Admin'], ['order_restored', 'Owner']]);
+    assert.deepEqual((await audits('o-cost')).map((a) => [a.action, a.performed_role]),
+      [['completed_with_balance', 'Owner'], ['order_archived', 'Admin'], ['order_restored', 'Owner']]);
   });
 
   it('archives a customer only without open orders, and then refuses them new orders', async () => {
@@ -215,7 +221,7 @@ describe('M6 part 4 on real PostgreSQL: archiving, cost history, load and stress
         await sqliteRun(syncing.localDb, `INSERT INTO payments (payment_id, order_id, amount, payment_type, received_by, payment_date, sync_status)
                                           VALUES (?, 'o-sync', 10, 'Cash', 'u-production', '2026-11-15 01:00:00', 'pending_insert')`, [`p-burst-${i}`]);
       }
-      const token = syncing.tokenFor('u-production', 'Production');
+      const token = syncing.tokenFor('u-production', 'Staff');
       const presses = await Promise.all(Array.from({ length: 15 }, () => syncing.request('POST', '/api/sync', { token })));
       assert.deepEqual(presses.map((r) => r.status), Array(15).fill(200), presses.map((r) => r.text).join('\n'));
       assert.ok(presses.filter((r) => r.body.summary.joined).length >= 1, 'later presses join the run in progress');

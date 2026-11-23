@@ -130,21 +130,56 @@ const resolveDiscount = (subtotalC, requested, existing) => {
   return { discountC, reason: discountC > 0 ? String(reason).trim() : null, percent };
 };
 
+// Labor / services and incidental charges (migration 015, adviser consultation): a quote is
+//   materials (the priced lines) + labor and services + incidental charges - discount
+// Incidental charges cover what cannot be seen yet (reprints, small design changes): an amount,
+// or a percentage of materials + labor (e.g. a ₱60,000 job quoted at ₱65,000 is about 8.33%).
+// Neither sent: the order's current amounts are kept, like the discount.
+//   requested: { labor?, incidental?, incidental_percent? }   existing: { labor, incidental }
+// -> { problem } or { laborC, incidentalC, incidentalPercent }
+const INCIDENTAL_PERCENT_MAX = 50;
+const resolveCharges = (materialsC, requested = {}, existing = {}) => {
+  const given = (x) => x !== undefined && x !== null;
+  const laborC = toCentavos(given(requested.labor) ? requested.labor : existing.labor || 0);
+  let incidentalC;
+  let incidentalPercent = null;
+  if (given(requested.incidental_percent)) {
+    incidentalPercent = requested.incidental_percent;
+    incidentalC = Math.round(((materialsC + laborC) * Math.round(incidentalPercent * 100)) / 10000);
+  } else {
+    incidentalC = toCentavos(given(requested.incidental) ? requested.incidental : existing.incidental || 0);
+  }
+  if (laborC < 0 || incidentalC < 0) {
+    return { problem: { status: 400, body: { error: 'VALIDATION_FAILED', message: 'Labor and incidental charges cannot be below ₱0.' } } };
+  }
+  return { laborC, incidentalC, incidentalPercent };
+};
+
 // Everything the quote route needs -> { problem } or { quote }
-//   quote: { total_quantity, tier: { percent_off, label }, lines, subtotal_amount, discount_amount,
+//   quote: { total_quantity, tier: { percent_off, label }, lines, subtotal_amount (materials),
+//            labor_amount, incidental_amount, incidental_percent, gross_amount, discount_amount,
 //            discount_percent, discount_reason, total_quote_amount }
+// The discount (an amount, or a percentage) is taken from the gross amount: materials + labor +
+// incidental charges. With no labor or incidental charges that is the materials subtotal, as before.
 const computeQuote = ({ items, requested = {}, existing = { amount: 0, reason: null } }) => {
   const priced = priceLines(items);
   if (priced.problem) return { problem: priced.problem };
-  const discount = resolveDiscount(priced.subtotalC, requested, existing);
+  const charges = resolveCharges(priced.subtotalC, requested, existing);
+  if (charges.problem) return { problem: charges.problem };
+  const grossC = priced.subtotalC + charges.laborC + charges.incidentalC;
+  const discount = resolveDiscount(grossC, requested, existing);
   if (discount.problem) return { problem: discount.problem };
-  const totalC = Math.max(0, priced.subtotalC - discount.discountC);
+  const totalC = Math.max(0, grossC - discount.discountC);
   return {
     quote: {
       total_quantity: priced.total_quantity,
       tier: { min_quantity: priced.tier.min_quantity, percent_off: priced.tier.percent_off, label: priced.tier.label },
       lines: priced.lines,
       subtotal_amount: priced.subtotal_amount,
+      labor_amount: toPesos(charges.laborC),
+      incidental_amount: toPesos(charges.incidentalC),
+      incidental_percent: charges.incidentalPercent,
+      gross_amount: toPesos(grossC),
       discount_amount: toPesos(discount.discountC),
       discount_percent: discount.percent,
       discount_reason: discount.reason,
@@ -153,22 +188,69 @@ const computeQuote = ({ items, requested = {}, existing = { amount: 0, reason: n
   };
 };
 
-// The quote as screens and the printed quotation show it -> { has_quote, subtotal_amount,
-// discount_amount, discount_reason, total_quote_amount }. When the stored breakdown does not add
-// up to the quote (an order priced before migration 011, or a quote typed in offline on an older
-// server), the quote is shown as its own subtotal with no discount, so the three numbers always agree.
+// The quote as screens and the printed quotation show it -> { has_quote, subtotal_amount (materials),
+// labor_amount, incidental_amount, gross_amount, discount_amount, discount_reason, adjustment_amount,
+// adjustment_reason, total_quote_amount }.
+//   total = materials + labor + incidental - discount - adjustment (a price cut after approval)
+// When the stored breakdown does not add up to the quote (an order priced before migration 011,
+// or a quote typed in offline on an older server), the quote is shown as its own subtotal with no
+// other parts, so the numbers always agree.
 const quoteBreakdown = (order) => {
   const totalC = Math.max(0, toCentavos(order && order.total_quote_amount));
   const subtotalC = toCentavos(order && order.subtotal_amount);
+  const laborC = toCentavos(order && order.labor_amount);
+  const incidentalC = toCentavos(order && order.incidental_amount);
   const discountC = toCentavos(order && order.discount_amount);
-  const consistent = subtotalC > 0 && subtotalC - discountC === totalC;
+  const adjustmentC = toCentavos(order && order.adjustment_amount);
+  const grossC = subtotalC + laborC + incidentalC;
+  const consistent = grossC > 0 && grossC - discountC - adjustmentC === totalC;
   return {
-    has_quote: totalC > 0,
+    has_quote: totalC > 0 || (consistent && adjustmentC > 0),
     subtotal_amount: toPesos(consistent ? subtotalC : totalC),
+    labor_amount: toPesos(consistent ? laborC : 0),
+    incidental_amount: toPesos(consistent ? incidentalC : 0),
+    gross_amount: toPesos(consistent ? grossC : totalC),
     discount_amount: toPesos(consistent ? discountC : 0),
     discount_reason: consistent && discountC > 0 ? (order.discount_reason || null) : null,
+    adjustment_amount: toPesos(consistent ? adjustmentC : 0),
+    adjustment_reason: consistent && adjustmentC > 0 ? (order.adjustment_reason || null) : null,
     total_quote_amount: toPesos(totalC)
   };
+};
+
+// ---------- A price cut after approval (late delivery, production error) ----------
+// The Owner lowers the bill with a reason. It cannot take the bill below ₱0, and only one
+// adjustment is kept per order (a new one replaces the old: amount = the whole cut so far).
+//   -> { problem } | { adjustmentC, totalC }
+const ADJUSTMENT_REASON_MAX = 500;
+const resolveAdjustment = (order, { amount, reason }) => {
+  const b = quoteBreakdown(order);
+  const beforeC = toCentavos(b.total_quote_amount) + toCentavos(b.adjustment_amount); // the bill before any cut
+  const adjustmentC = toCentavos(amount);
+  if (adjustmentC > beforeC) {
+    return {
+      problem: {
+        status: 422,
+        body: {
+          error: 'ADJUSTMENT_TOO_LARGE',
+          message: `The price cut (${pesoText(toPesos(adjustmentC))}) is more than the bill (${pesoText(toPesos(beforeC))}).`,
+          bill_before_adjustment: toPesos(beforeC)
+        }
+      }
+    };
+  }
+  if (adjustmentC > 0 && !(reason && String(reason).trim())) {
+    return {
+      problem: {
+        status: 400,
+        body: {
+          error: 'VALIDATION_FAILED', message: 'Reason for the price cut is required (for example "Delivered 3 days late").',
+          details: [{ field: 'adjustment_reason', message: 'Reason for the price cut is required.' }]
+        }
+      }
+    };
+  }
+  return { adjustmentC, totalC: beforeC - adjustmentC };
 };
 
 // The priced lines of a SAVED quote, for the customer quotation: each item's stored unit price
@@ -200,9 +282,11 @@ const quoteLines = (items, breakdown) => {
 };
 
 // The breakdown columns written when the Owner types a quote by hand: it is its own subtotal
-const manualQuoteColumns = (total) => ({ subtotal_amount: total, discount_amount: 0, discount_reason: null });
+const manualQuoteColumns = (total) => ({
+  subtotal_amount: total, discount_amount: 0, discount_reason: null, labor_amount: 0, incidental_amount: 0
+});
 
 module.exports = {
-  VOLUME_TIERS, DISCOUNT_REASON_MAX, tierFor, unitPriceCentavos, priceLines, resolveDiscount, computeQuote,
-  quoteBreakdown, quoteLines, manualQuoteColumns
+  VOLUME_TIERS, DISCOUNT_REASON_MAX, INCIDENTAL_PERCENT_MAX, ADJUSTMENT_REASON_MAX, tierFor, unitPriceCentavos, priceLines,
+  resolveDiscount, resolveCharges, computeQuote, quoteBreakdown, quoteLines, manualQuoteColumns, resolveAdjustment
 };

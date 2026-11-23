@@ -7,11 +7,13 @@
 // ==========================================
 
 const sqlite3 = require('sqlite3');
-const { PRODUCTION_STATUSES } = require('../utils/validation');
+const { PRODUCTION_STATUSES, PAYMENT_TYPES } = require('../utils/validation');
 
 const SYNC_STATUS = `sync_status TEXT DEFAULT 'synced' CHECK (sync_status IN ('synced', 'pending_insert', 'pending_update'))`;
 // Same allow-list as Neon (migration 005) and the API validator
 const ORDER_STATUS_SQL = PRODUCTION_STATUSES.map((s) => `'${s}'`).join(', ');
+// Same payment methods as Neon (migration 015) and the API validator
+const PAYMENT_TYPE_SQL = PAYMENT_TYPES.map((s) => `'${s}'`).join(', ');
 
 const LOCAL_TABLES = [
   `CREATE TABLE IF NOT EXISTS inventory_items (
@@ -25,6 +27,8 @@ const LOCAL_TABLES = [
       unit TEXT NOT NULL DEFAULT 'pcs',
       supplier TEXT,
       selling_price REAL NOT NULL DEFAULT 0,
+      supplier_id TEXT,
+      has_sizes INTEGER DEFAULT 0,
       deleted_at TEXT,
       deleted_by TEXT,
       purged_at TEXT,
@@ -52,6 +56,12 @@ const LOCAL_TABLES = [
       platform_source TEXT,
       archived_at TEXT,
       archived_by TEXT,
+      customer_type TEXT DEFAULT 'Individual',
+      contact_person TEXT,
+      email TEXT,
+      address TEXT,
+      social_media TEXT,
+      notes TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -75,6 +85,11 @@ const LOCAL_TABLES = [
       cancellation_reason TEXT,
       archived_at TEXT,
       archived_by TEXT,
+      order_description TEXT,
+      labor_amount REAL DEFAULT 0,
+      incidental_amount REAL DEFAULT 0,
+      adjustment_amount REAL DEFAULT 0,
+      adjustment_reason TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -97,11 +112,23 @@ const LOCAL_TABLES = [
       order_id TEXT REFERENCES order_profiles(order_id) ON DELETE CASCADE,
       amount REAL NOT NULL,
       payment_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-      payment_type TEXT NOT NULL CHECK (payment_type IN ('Cash', 'GCash', 'Bank Transfer')),
+      payment_type TEXT NOT NULL CHECK (payment_type IN (${PAYMENT_TYPE_SQL})),
       received_by TEXT,
       receipt_no TEXT,
       voids_payment_id TEXT,
       void_reason TEXT,
+      payer_name TEXT,
+      reference_no TEXT,
+      bank_name TEXT,
+      account_name TEXT,
+      cheque_no TEXT,
+      cheque_date TEXT,
+      payment_notes TEXT,
+      is_refund INTEGER DEFAULT 0,
+      refund_reason TEXT,
+      verified_by TEXT,
+      verified_at TEXT,
+      recorded_at TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -117,6 +144,7 @@ const LOCAL_TABLES = [
       loss_category TEXT,
       production_stage TEXT,
       is_statistical_anomaly INTEGER DEFAULT 0,
+      loss_batch_id TEXT,
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -207,6 +235,66 @@ const LOCAL_TABLES = [
       ${SYNC_STATUS},
       last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
+  // Migration 015: supplier profiles (edited online only, copied down so an item can name its
+  // supplier offline), print details (added offline too, pushed insert-only) and deliveries
+  // (recorded online only, copied down for reading). No foreign keys, like the other caches.
+  `CREATE TABLE IF NOT EXISTS suppliers (
+      supplier_id TEXT PRIMARY KEY,
+      supplier_name TEXT NOT NULL,
+      contact_person TEXT,
+      contact_number TEXT,
+      email TEXT,
+      address TEXT,
+      notes TEXT,
+      archived_at TEXT,
+      archived_by TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      dirty_fields TEXT,
+      cloud_last_modified TEXT,
+      sync_conflict TEXT,
+      sync_error TEXT,
+      ${SYNC_STATUS},
+      last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS order_print_details (
+      print_detail_id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      line_item_id TEXT,
+      print_type TEXT NOT NULL,
+      quantity INTEGER NOT NULL,
+      size TEXT,
+      custom_name TEXT,
+      custom_number TEXT,
+      notes TEXT,
+      created_by TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      dirty_fields TEXT,
+      cloud_last_modified TEXT,
+      sync_conflict TEXT,
+      sync_error TEXT,
+      ${SYNC_STATUS},
+      last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS order_deliveries (
+      delivery_id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      batch_no INTEGER NOT NULL,
+      quantity INTEGER NOT NULL,
+      delivered_at DATETIME NOT NULL,
+      method TEXT NOT NULL DEFAULT 'Pick-up',
+      received_by_name TEXT,
+      notes TEXT,
+      recorded_by TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      dirty_fields TEXT,
+      cloud_last_modified TEXT,
+      sync_conflict TEXT,
+      sync_error TEXT,
+      ${SYNC_STATUS},
+      last_modified DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_local_print_details_order ON order_print_details (order_id)',
+  'CREATE INDEX IF NOT EXISTS idx_local_deliveries_order ON order_deliveries (order_id)',
   'CREATE INDEX IF NOT EXISTS idx_local_status_history_order ON order_status_history (order_id, changed_at)',
   'CREATE INDEX IF NOT EXISTS idx_local_consumable_rates_product ON consumable_rates (product_inventory_id)',
   'CREATE INDEX IF NOT EXISTS idx_local_consumables_log_order ON order_consumables_log (order_id)',
@@ -250,46 +338,77 @@ const listLocalTables = async (db) =>
 // Runs on its own connection so PRAGMA foreign_keys = OFF (needed so DROP TABLE does not
 // cascade into order_items / payments) never affects the server's shared connection.
 // -> true if the table was rebuilt, false if nothing had to change
-const upgradeLocalOrderStatusCheck = (dbPath) => new Promise((resolve, reject) => {
+// Migration 015 uses the same rebuild for payments.payment_type (Maya, PayPal, cheque, card...).
+const upgradeLocalCheck = (dbPath, { table: name, column, values, sqlList, what }) => new Promise((resolve, reject) => {
   const db = new sqlite3.Database(dbPath, async (openErr) => {
     if (openErr) return reject(openErr);
     db.configure('busyTimeout', 5000);
     const get = (sql) => new Promise((ok, fail) => db.get(sql, (err, row) => (err ? fail(err) : ok(row))));
+    const temp = `${name}__upgrade`;
     let began = false;
     try {
-      const table = await get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'order_profiles'");
-      const check = table && /production_status\s+IN\s*\([^)]*\)/i.exec(table.sql);
-      if (!check || PRODUCTION_STATUSES.every((s) => check[0].includes(`'${s}'`))) return resolve(false);
+      const table = await get(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '${name}'`);
+      const check = table && new RegExp(`${column}\\s+IN\\s*\\([^)]*\\)`, 'i').exec(table.sql);
+      if (!check || values.every((s) => check[0].includes(`'${s}'`))) return resolve(false);
 
       const newSql = table.sql
-        .replace(/CREATE TABLE\s+(IF NOT EXISTS\s+)?["`]?order_profiles["`]?/i, 'CREATE TABLE order_profiles__upgrade')
-        .replace(check[0], `production_status IN (${ORDER_STATUS_SQL})`);
-      if (!newSql.startsWith('CREATE TABLE order_profiles__upgrade')) {
-        throw new Error('unrecognised order_profiles definition');
+        .replace(new RegExp(`CREATE TABLE\\s+(IF NOT EXISTS\\s+)?["\`]?${name}["\`]?`, 'i'), `CREATE TABLE ${temp}`)
+        .replace(check[0], `${column} IN (${sqlList})`);
+      if (!newSql.startsWith(`CREATE TABLE ${temp}`)) {
+        throw new Error(`unrecognised ${name} definition`);
       }
 
       await run(db, 'PRAGMA foreign_keys = OFF'); // has no effect inside a transaction, so set first
       await run(db, 'BEGIN IMMEDIATE');
       began = true;
-      await run(db, 'DROP TABLE IF EXISTS order_profiles__upgrade');
+      await run(db, `DROP TABLE IF EXISTS ${temp}`);
       await run(db, newSql);
-      await run(db, 'INSERT INTO order_profiles__upgrade SELECT * FROM order_profiles');
+      await run(db, `INSERT INTO ${temp} SELECT * FROM ${name}`);
       const [before, after] = await Promise.all([
-        get('SELECT COUNT(*) AS n FROM order_profiles'), get('SELECT COUNT(*) AS n FROM order_profiles__upgrade')
+        get(`SELECT COUNT(*) AS n FROM ${name}`), get(`SELECT COUNT(*) AS n FROM ${temp}`)
       ]);
       if (before.n !== after.n) throw new Error(`row count mismatch (${before.n} vs ${after.n})`);
-      await run(db, 'DROP TABLE order_profiles');
-      await run(db, 'ALTER TABLE order_profiles__upgrade RENAME TO order_profiles');
+      await run(db, `DROP TABLE ${name}`);
+      await run(db, `ALTER TABLE ${temp} RENAME TO ${name}`);
       await run(db, 'COMMIT');
-      console.log(`🛠  Local order_profiles upgraded for the current order statuses (${after.n} row(s) kept)`);
+      console.log(`🛠  Local ${name} upgraded for the current ${what} (${after.n} row(s) kept)`);
       resolve(true);
     } catch (err) {
       if (began) await run(db, 'ROLLBACK').catch(() => {});
-      reject(new Error(`Could not upgrade local order_profiles: ${err.message}`));
+      reject(new Error(`Could not upgrade local ${name}: ${err.message}`));
     } finally {
       db.close();
     }
   });
 });
 
-module.exports = { createLocalSchema, createLocalIndexes, listLocalTables, upgradeLocalOrderStatusCheck };
+const upgradeLocalOrderStatusCheck = (dbPath) => upgradeLocalCheck(dbPath, {
+  table: 'order_profiles', column: 'production_status', values: PRODUCTION_STATUSES, sqlList: ORDER_STATUS_SQL, what: 'order statuses'
+});
+const upgradeLocalPaymentTypeCheck = (dbPath) => upgradeLocalCheck(dbPath, {
+  table: 'payments', column: 'payment_type', values: PAYMENT_TYPES, sqlList: PAYMENT_TYPE_SQL, what: 'payment methods'
+});
+
+// Migration 015: print lines used to be order_items without stock. In the cloud the migration
+// moved them to order_print_details (same ids); this computer's copy follows once, so an older
+// cache never shows them as materials, and a line typed offline before the upgrade is pushed as
+// a print detail. Safe to run on every start (nothing left to move the second time).
+// -> number of lines moved
+const upgradeLocalPrintDetails = async (db) => {
+  const legacy = await all(db, "SELECT COUNT(*) AS n FROM order_items WHERE inventory_id IS NULL AND order_id IS NOT NULL");
+  if (!legacy[0] || Number(legacy[0].n) === 0) return 0;
+  await run(db, `INSERT OR IGNORE INTO order_print_details
+      (print_detail_id, order_id, print_type, quantity, size, custom_name, custom_number, created_at, sync_status, last_modified)
+    SELECT line_item_id, order_id, substr(COALESCE(NULLIF(trim(product_type), ''), 'Print'), 1, 100), MAX(quantity, 1),
+           size, custom_name, custom_number, last_modified,
+           CASE WHEN sync_status = 'pending_insert' THEN 'pending_insert' ELSE 'synced' END, last_modified
+      FROM order_items WHERE inventory_id IS NULL AND order_id IS NOT NULL`);
+  await run(db, 'DELETE FROM order_items WHERE inventory_id IS NULL AND order_id IS NOT NULL');
+  console.log(`🛠  Moved ${legacy[0].n} print line(s) from the local materials to print details`);
+  return Number(legacy[0].n);
+};
+
+module.exports = {
+  createLocalSchema, createLocalIndexes, listLocalTables, upgradeLocalOrderStatusCheck, upgradeLocalPaymentTypeCheck,
+  upgradeLocalPrintDetails
+};

@@ -13,7 +13,7 @@ describe('Inventory catalog', () => {
   before(async () => {
     t = await startTestServer();
     admin = await t.login('admin');
-    await t.login('staff');
+    await t.login('production');
   });
   after(async () => { await t.close(); });
 
@@ -29,7 +29,7 @@ describe('Inventory catalog', () => {
   });
 
   it('counts In Stock / Low Stock / Out of Stock correctly', async () => {
-    const r = await t.request('GET', '/api/inventory', { token: t.tokens.staff });
+    const r = await t.request('GET', '/api/inventory', { token: t.tokens.production });
     assert.equal(r.status, 200);
     assert.equal(r.body.source, 'local');
     assert.deepEqual(
@@ -57,21 +57,23 @@ describe('Inventory catalog', () => {
   });
 
   it('only lets Owner / Admin / Production change the catalog', async () => {
-    const r = await t.request('POST', '/api/inventory', { token: t.tokens.staff, body: { item_name: 'Ballpen', item_category: 'Office' } });
+    const r = await t.request('POST', '/api/inventory', { token: t.tokens.production, body: { item_name: 'Ballpen', item_category: 'Office' } });
     assert.equal(r.status, 403);
   });
 
-  it('adds and subtracts stock, and never goes below zero', async () => {
+  it('no longer lets anyone type a new quantity by hand (Add / Subtract stock is retired)', async () => {
+    // Migration 015: stock changes come from a stock in / stock out / count record (routes/stock.js)
     const id = item('Valiant Columnar Notebook');
-    let r = await t.request('POST', `/api/inventory/${id}/adjust`, { token: admin, body: { action: 'add', quantity: 7 } });
-    assert.equal(r.status, 200);
-    assert.equal(r.body.item.quantity_available, 10);
-    r = await t.request('POST', `/api/inventory/${id}/adjust`, { token: admin, body: { action: 'subtract', quantity: 10 } });
-    assert.equal(r.body.item.quantity_available, 0);
-    assert.equal(r.body.item.stock_status, 'out_of_stock');
-    r = await t.request('POST', `/api/inventory/${id}/adjust`, { token: admin, body: { action: 'subtract', quantity: 1 } });
-    assert.equal(r.status, 409);
-    assert.equal(r.body.error, 'INSUFFICIENT_STOCK');
+    const r = await t.request('POST', `/api/inventory/${id}/adjust`, { token: admin, body: { action: 'add', quantity: 7 } });
+    assert.deepEqual([r.status, r.body.error], [410, 'STOCK_ADJUST_RETIRED']);
+    assert.match(r.body.message, /Stock in/);
+    assert.equal((await t.get('SELECT quantity_available AS q FROM inventory_items WHERE inventory_id = ?', [id])).q, 3, 'nothing changed');
+    // The stock records need the cloud: offline they say so and save nothing
+    const offline = await t.request('POST', '/api/stock/documents', {
+      token: admin,
+      body: { document_type: 'stock_out', occurred_at: '2026-01-05T09:00', reason: 'Used in the shop (not for an order)', lines: [{ inventory_id: id, quantity: 1 }] }
+    });
+    assert.deepEqual([offline.status, offline.body.error], [503, 'STOCK_REQUIRES_CLOUD']);
   });
 
   it('records lost / damaged stock with its cost', async () => {
@@ -122,7 +124,7 @@ describe('Inventory catalog', () => {
   it('writes a hidden audit trail for every change', async () => {
     const rows = await t.all('SELECT action FROM inventory_audit_log');
     const actions = new Set(rows.map((r) => r.action));
-    for (const a of ['created', 'edited', 'stock_added', 'stock_subtracted', 'deleted', 'restored']) assert.ok(actions.has(a), a);
+    for (const a of ['created', 'edited', 'stock_subtracted', 'deleted', 'restored']) assert.ok(actions.has(a), a);
     const routes = await t.request('GET', '/api/inventory/audit-log', { token: admin });
     assert.equal(routes.status, 404, 'the audit trail is not exposed on the website');
   });

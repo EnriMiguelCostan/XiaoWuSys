@@ -148,14 +148,14 @@ export function OrdersTableCard({
             {/* table-fixed: widths come from this header row; Customer takes the rest. */}
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead className="w-32 pl-4 sm:w-40">Order #</TableHead>
+                <TableHead className="w-36 pl-4 sm:w-44">Order #</TableHead>
                 <TableHead className="hidden sm:table-cell">Customer</TableHead>
                 {overpaid && <TableHead className="hidden w-28 text-right md:table-cell">Price</TableHead>}
                 {overpaid && <TableHead className="hidden w-28 text-right md:table-cell">Paid</TableHead>}
                 {money && <TableHead className="w-28 text-right sm:w-36">{overpaid ? 'Paid too much' : 'Balance'}</TableHead>}
-                {money === 'balance' && <TableHead className="hidden w-28 lg:table-cell">Payment</TableHead>}
-                <TableHead className="w-28 pr-4 xl:pr-2">Status</TableHead>
-                {!overpaid && <TableHead className="hidden w-32 pr-4 md:table-cell">Deadline</TableHead>}
+                {money === 'balance' && <TableHead className="hidden w-32 lg:table-cell">Payment</TableHead>}
+                <TableHead className="w-32 pr-4 xl:pr-2">Status</TableHead>
+                {!overpaid && <TableHead className="hidden w-48 pr-4 md:table-cell">Deadline</TableHead>}
                 <TableHead className="w-8 pr-2">
                   <span className="sr-only">Open</span>
                 </TableHead>
@@ -223,8 +223,10 @@ export function OrdersTableCard({
                   </TableCell>
                   {!overpaid && (
                     <TableCell className="hidden pr-4 text-muted-foreground md:table-cell">
-                      <Cell value={formatDateTime(order.production_deadline, { withTime: false })} />
-                      <DeadlineBadge flag={order.deadline_flag} className="mt-1" />
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <Cell value={formatDateTime(order.production_deadline, { withTime: false })} />
+                        <DeadlineBadge flag={order.deadline_flag} />
+                      </div>
                     </TableCell>
                   )}
                   <TableCell className="w-8 pr-2 text-muted-foreground">

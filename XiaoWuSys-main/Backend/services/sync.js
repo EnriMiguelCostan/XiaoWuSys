@@ -17,6 +17,7 @@ const { outranks } = require('./domain/permissions');
 const { CLOSED_STATUSES, QUOTE_FROZEN_STATUSES } = require('./domain/orderLifecycle');
 const { withPgTransaction } = require('./records');
 const { writeAudit } = require('./auditLog');
+const { setMovementContext } = require('./stockMovements');
 
 // Order matters: children can only be inserted in Neon after their parent exists.
 //   inventory_items, customers -> order_profiles -> order_items, payments, material_loss
@@ -37,10 +38,20 @@ const SYNC_TABLES = [
     columns: ['session_id', 'user_id', 'expires_at', 'revoked_at']
   },
   {
+    // Migration 015: supplier profiles are edited online only; copied down so an item can name
+    // its supplier (and the Suppliers page can be read) offline
+    table: 'suppliers',
+    id: 'supplier_id',
+    columns: ['supplier_id', 'supplier_name', 'contact_person', 'contact_number', 'email', 'address', 'notes',
+              'archived_at', 'archived_by', 'created_at'],
+    pullOnly: true
+  },
+  {
     table: 'inventory_items',
     id: 'inventory_id',
+    // supplier_id / has_sizes (migration 015): the usual supplier, and whether it is a garment
     columns: ['inventory_id', 'item_name', 'item_category', 'quantity_available', 'quantity_reserved', 'minimum_threshold', 'unit_cost',
-              'unit', 'supplier', 'deleted_at', 'deleted_by', 'purged_at', 'selling_price'],
+              'unit', 'supplier', 'deleted_at', 'deleted_by', 'purged_at', 'selling_price', 'supplier_id', 'has_sizes'],
     // M9: keep the locally reduced stock while an offline loss for this item is still unsynced
     refreshGuard: ` AND NOT EXISTS (SELECT 1 FROM material_loss ml
                       WHERE ml.inventory_id = excluded.inventory_id
@@ -50,7 +61,9 @@ const SYNC_TABLES = [
     table: 'customers',
     id: 'customer_id',
     // archived_at / archived_by (migration 013): archiving needs the cloud, so they only travel down
-    columns: ['customer_id', 'full_name', 'contact_number', 'platform_source', 'archived_at', 'archived_by'],
+    // customer_type ... notes (migration 015): the client profile (an offline new customer pushes them)
+    columns: ['customer_id', 'full_name', 'contact_number', 'platform_source', 'archived_at', 'archived_by',
+              'customer_type', 'contact_person', 'email', 'address', 'social_media', 'notes'],
     cloudOwned: ['archived_at', 'archived_by']
   },
   {
@@ -61,10 +74,12 @@ const SYNC_TABLES = [
     // subtotal_amount / discount_amount / discount_reason (migration 011): the quote's breakdown
     columns: ['order_id', 'customer_id', 'date_created', 'production_deadline', 'production_status', 'design_drive_link', 'total_quote_amount',
               'stock_reserved', 'approved_by', 'approved_at', 'tracking_no', 'last_edited_by', 'last_edited_role',
-              'subtotal_amount', 'discount_amount', 'discount_reason', 'cancellation_reason', 'archived_at', 'archived_by'],
+              'subtotal_amount', 'discount_amount', 'discount_reason', 'cancellation_reason', 'archived_at', 'archived_by',
+              'order_description', 'labor_amount', 'incidental_amount', 'adjustment_amount', 'adjustment_reason'],
     // Given by the cloud database (migration 007 trigger): never pushed, copied back after a push.
     // archived_at / archived_by (migration 013): archiving needs the cloud, so a push never clears them.
-    cloudOwned: ['tracking_no', 'archived_at', 'archived_by']
+    // labor_amount / incidental_amount / adjustment_* (migration 015): set only by the Owner, online
+    cloudOwned: ['tracking_no', 'archived_at', 'archived_by', 'labor_amount', 'incidental_amount', 'adjustment_amount', 'adjustment_reason']
   },
   {
     table: 'order_items',
@@ -74,20 +89,42 @@ const SYNC_TABLES = [
     cloudOwned: ['unit_cost']
   },
   {
+    // Migration 015: print details (sizes / names / numbers). Added online or offline (pushed
+    // insert-only); changed and removed online only. Rows removed in the cloud go here too.
+    table: 'order_print_details',
+    id: 'print_detail_id',
+    columns: ['print_detail_id', 'order_id', 'line_item_id', 'print_type', 'quantity', 'size', 'custom_name', 'custom_number',
+              'notes', 'created_by', 'created_at'],
+    prune: true
+  },
+  {
+    // Migration 015: deliveries / pick-ups, recorded online only and copied down for reading
+    table: 'order_deliveries',
+    id: 'delivery_id',
+    columns: ['delivery_id', 'order_id', 'batch_no', 'quantity', 'delivered_at', 'method', 'received_by_name', 'notes',
+              'recorded_by', 'created_at'],
+    pullOnly: true,
+    prune: true
+  },
+  {
     table: 'payments',
     id: 'payment_id',
     // D2: offline payments are pushed as they are, with no balance cap, so a payment is never
     // dropped. received_by is pushed; the receipt number is given by the cloud (migration 008).
     // voids_payment_id / void_reason (migration 012): voids need the cloud, so offline rows never set them
-    columns: ['payment_id', 'order_id', 'amount', 'payment_date', 'payment_type', 'received_by', 'receipt_no', 'voids_payment_id', 'void_reason'],
-    cloudOwned: ['receipt_no']
+    // Migration 015: payer and method details and recorded_at travel with an offline payment;
+    // refunds, verification and corrections need the cloud, so verified_by / verified_at only travel down
+    columns: ['payment_id', 'order_id', 'amount', 'payment_date', 'payment_type', 'received_by', 'receipt_no', 'voids_payment_id', 'void_reason',
+              'payer_name', 'reference_no', 'bank_name', 'account_name', 'cheque_no', 'cheque_date', 'payment_notes',
+              'is_refund', 'refund_reason', 'verified_by', 'verified_at', 'recorded_at'],
+    cloudOwned: ['receipt_no', 'verified_by', 'verified_at']
   },
   {
     table: 'material_loss',
     id: 'loss_id',
     // reason_code / loss_category / production_stage / is_statistical_anomaly: diagnostics (migration 012)
     columns: ['loss_id', 'order_id', 'inventory_id', 'quantity_lost', 'loss_reason', 'date_recorded', 'financial_cost',
-              'reason_code', 'loss_category', 'production_stage', 'is_statistical_anomaly']
+              'reason_code', 'loss_category', 'production_stage', 'is_statistical_anomaly', 'loss_batch_id']
   },
   {
     // PB 22 overheads (migration 012): recorded online or offline (pushed insert-only), deleted
@@ -138,8 +175,8 @@ const SYNC_TABLES = [
 
 // Tables copied Neon -> SQLite (parents first) so offline writes satisfy foreign keys
 // M10: children are refreshed too, so offline reads show the same items/payments/losses.
-const REFRESH_TABLES = ['users', 'customers', 'inventory_items', 'consumable_rates', 'order_profiles', 'order_items', 'payments',
-  'material_loss', 'order_status_history', 'order_consumables_log', 'overhead_expenses'];
+const REFRESH_TABLES = ['users', 'customers', 'suppliers', 'inventory_items', 'consumable_rates', 'order_profiles', 'order_items',
+  'order_print_details', 'order_deliveries', 'payments', 'material_loss', 'order_status_history', 'order_consumables_log', 'overhead_expenses'];
 
 const specFor = (table) => SYNC_TABLES.find((t) => t.table === table);
 const updatableColumns = (spec) => spec.columns.filter((c) => c !== spec.id);
@@ -205,12 +242,22 @@ const markAsConflict = (localDb, spec, row, reason) =>
     [reason, row[spec.id], row.last_modified]
   );
 
+// Stock held for orders is never pushed as a number (migration 015 reservation fix): an offline
+// order reserves its stock in the cloud when the ORDER is pushed (pushOrderInsert), as an amount
+// added to what the cloud holds. Pushing this computer's total instead clashed with every other
+// change of the item made meanwhile, and the reservation was lost in the conflict.
+const NEVER_PUSHED = { inventory_items: ['quantity_reserved'] };
+const neverPushed = (spec) => NEVER_PUSHED[spec.table] || [];
+
 // JSON list of fields edited offline; falls back to every updatable column
 const dirtyFieldsFor = (spec, row) => {
-  const allowed = pushUpdatableColumns(spec);
+  const allowed = pushUpdatableColumns(spec).filter((c) => !neverPushed(spec).includes(c));
   try {
     const parsed = JSON.parse(row.dirty_fields || '[]');
     const fields = allowed.filter((c) => parsed.includes(c));
+    if (fields.length === 0 && Array.isArray(parsed) && parsed.length > 0 && parsed.every((c) => neverPushed(spec).includes(c))) {
+      return []; // only the reservation changed here: nothing to push for the item itself
+    }
     return fields.length > 0 ? fields : allowed;
   } catch {
     return allowed;
@@ -236,6 +283,11 @@ const pushMaterialLossInsert = async (pgPool, spec, row) => {
       cols.map((c) => row[c])
     );
     if (inserted.rowCount === 1) {
+      // Migration 015: the stock card shows it as a loss (recorded offline), not a bare sync
+      await setMovementContext(client, {
+        type: 'loss', reference_type: 'material_loss', reference_id: row[spec.id],
+        note: `${row.loss_reason || 'Loss'} (recorded offline)`, actor: { user_id: null, role: null }
+      });
       const stock = await client.query(
         `UPDATE inventory_items
             SET quantity_available = GREATEST(quantity_available - $1::int, 0), last_modified = NOW()
@@ -262,10 +314,57 @@ const pushMaterialLossInsert = async (pgPool, spec, row) => {
   return { outcome: 'synced', version: rows[0] ? rows[0].version : null };
 };
 
-const pushInsert = async (pgPool, spec, row) => {
+// Migration 015 reservation fix: an order saved offline with its stock reserved on this computer
+// reserves it in the cloud now, in ONE transaction with the order insert: the stock rows are
+// locked (inventory_id order), and only if every material still has enough FREE stock in the
+// cloud is it reserved (quantity_reserved + what the order needs). Otherwise the order arrives
+// without a reservation (stock_reserved = false): the screens show the shortage, and approving
+// it reserves the stock (or says what is missing). The order's items are read from this
+// computer (they are pushed right after the order).
+const pushOrderInsert = async (pgPool, localDb, spec, row) => {
+  const cols = pushColumns(spec).filter((c) => row[c] !== undefined && row[c] !== null);
+  const lines = await sqliteAll(localDb,
+    `SELECT inventory_id, SUM(quantity) AS qty FROM order_items
+      WHERE order_id = ? AND inventory_id IS NOT NULL GROUP BY inventory_id ORDER BY inventory_id`, [row[spec.id]]);
+  const needs = lines.map((l) => ({ inventory_id: l.inventory_id, quantity: Number(l.qty) }));
+  const outcome = await withPgTransaction(pgPool, async (client) => {
+    const there = await client.query(`SELECT 1 FROM ${spec.table} WHERE ${spec.id} = $1`, [row[spec.id]]);
+    if (there.rowCount > 0) return { reserved: null }; // already pushed earlier (a lost reply): nothing to do again
+    let reserve = Number(row.stock_reserved) === 1 && needs.length > 0;
+    if (reserve) {
+      const stock = await client.query(
+        `SELECT inventory_id, quantity_available, quantity_reserved FROM inventory_items
+          WHERE inventory_id = ANY($1::text[]) AND deleted_at IS NULL AND purged_at IS NULL ORDER BY inventory_id FOR UPDATE`,
+        [needs.map((n) => n.inventory_id)]);
+      const byId = new Map(stock.rows.map((r) => [r.inventory_id, r]));
+      reserve = needs.every((n) => byId.has(n.inventory_id)
+        && Number(byId.get(n.inventory_id).quantity_available) - Number(byId.get(n.inventory_id).quantity_reserved) >= n.quantity);
+      if (reserve) {
+        for (const n of needs) {
+          await client.query('UPDATE inventory_items SET quantity_reserved = quantity_reserved + $1 WHERE inventory_id = $2', [n.quantity, n.inventory_id]);
+        }
+      }
+    }
+    const values = cols.map((c) => (c === 'stock_reserved' ? reserve : row[c]));
+    await client.query(
+      `INSERT INTO ${spec.table} (${cols.join(', ')}, last_modified) VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')}, NOW())`, values);
+    return { reserved: reserve };
+  });
+  if (outcome.reserved === false && Number(row.stock_reserved) === 1) {
+    console.warn(`⚠️ Offline order ${row[spec.id]}: not enough free stock in the cloud any more; it waits for approval to reserve.`);
+  }
+  const { rows } = await pgPool.query(
+    `SELECT ${versionExpr} AS version${cloudOwnedSelect(spec)} FROM ${spec.table} WHERE ${spec.id} = $1`, [row[spec.id]]);
+  return { outcome: 'synced', version: rows[0] ? rows[0].version : null, cloud: cloudValuesOf(spec, rows[0]), stock_changed: Boolean(outcome.reserved) };
+};
+
+const pushInsert = async (pgPool, spec, row, localDb = null) => {
   if (spec.table === 'material_loss' && Number(row.cloud_stock_delta) > 0) {
     return pushMaterialLossInsert(pgPool, spec, row);
   }
+  if (spec.table === 'order_profiles' && localDb && Number(row.stock_reserved) === 1) return pushOrderInsert(pgPool, localDb, spec, row);
+  // An item created offline arrives with nothing held: its offline orders reserve when they are pushed
+  if (spec.table === 'inventory_items') row = { ...row, quantity_reserved: 0 };
 
   const cols = pushColumns(spec).filter((c) => row[c] !== undefined && row[c] !== null);
   const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
@@ -295,8 +394,14 @@ const pushInsert = async (pgPool, spec, row) => {
   return { outcome: 'synced', version: rows[0] ? rows[0].version : null, cloud: cloudValuesOf(spec, rows[0]) };
 };
 
-const pushUpdate = async (pgPool, spec, row) => {
+const pushUpdate = async (pgPool, spec, row, localDb = null) => {
   const fields = dirtyFieldsFor(spec, row);
+  if (fields.length === 0) {
+    // Nothing of its own to send (e.g. only its reservation changed here, which the order pushes)
+    const { rows } = await pgPool.query(`SELECT ${versionExpr} AS version${cloudOwnedSelect(spec)} FROM ${spec.table} WHERE ${spec.id} = $1`, [row[spec.id]]);
+    if (rows.length === 0) return pushInsert(pgPool, spec, row, localDb);
+    return { outcome: 'synced', version: rows[0].version, cloud: cloudValuesOf(spec, rows[0]) };
+  }
   const setClause = fields.map((f, i) => `${f} = $${i + 1}`).join(', ');
   const idParam = fields.length + 1;
   const baseParam = fields.length + 2;
@@ -319,7 +424,7 @@ const pushUpdate = async (pgPool, spec, row) => {
   );
   if (current.rowCount === 0) {
     // Never reached the cloud (e.g. created offline, then edited): insert it instead
-    return pushInsert(pgPool, spec, row);
+    return pushInsert(pgPool, spec, row, localDb);
   }
   return {
     outcome: 'conflict',
@@ -361,7 +466,7 @@ const keepLocalBlockedReason = (spec, row, cloud, fields) => {
   const stock = (NEVER_FORCED[spec.table] || []).filter((f) => fields.includes(f));
   if (stock.length > 0) {
     return 'Stock counts changed in both places, so this computer\u2019s count cannot replace the cloud\u2019s. '
-      + 'Keep the cloud version, then correct the stock with Add or Subtract stock.';
+      + 'Keep the cloud version, then correct the stock with a Stock count.';
   }
   if (spec.table === 'order_profiles' && cloud) {
     if (CLOSED_STATUSES.includes(cloud.production_status)) {
@@ -579,8 +684,8 @@ const runSync = async (pgPool, localDb) => {
     for (const row of pending) {
       try {
         let result = row.sync_status === 'pending_insert'
-          ? await pushInsert(pgPool, spec, row)
-          : await pushUpdate(pgPool, spec, row);
+          ? await pushInsert(pgPool, spec, row, localDb)
+          : await pushUpdate(pgPool, spec, row, localDb);
 
         // PB 5: an order changed in both places is settled by rank where the ranks differ
         if (result.outcome === 'conflict' && spec.table === 'order_profiles') {
@@ -601,7 +706,7 @@ const runSync = async (pgPool, localDb) => {
           continue;
         }
 
-        if (spec.table === 'inventory_items' || spec.table === 'material_loss') summary.inventory_changed = true;
+        if (spec.table === 'inventory_items' || spec.table === 'material_loss' || result.stock_changed) summary.inventory_changed = true;
         if ((await markAsSynced(localDb, spec, row, result.version, result.cloud)) === 1) {
           summary.synced++;
         } else {

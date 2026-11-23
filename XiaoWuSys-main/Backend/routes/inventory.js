@@ -24,9 +24,10 @@ const { loadRates } = require('../services/consumables');
 const { refreshLocalRows } = require('../services/sync');
 const { REASON_CODE_LIST, inferReasonCode, reasonLabel, replacementWarning } = require('../services/domain/wasteDiagnostics');
 const { diagnoseInCloud, escalateClusterInCloud, diagnoseLocally, shownLoss } = require('../services/waste');
+const { setMovementContext, clearMovementContext } = require('../services/stockMovements');
 
 // Who may do what (role always comes from the JWT)
-const READ_ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
+const READ_ROLES = rolesWith('view_stock');
 const EDIT_ROLES = rolesWith('edit_inventory');   // add, edit, stock changes, move to / restore from bin
 const PURGE_ROLES = rolesWith('purge_inventory'); // permanent delete / empty bin
 
@@ -82,6 +83,29 @@ const missingItem = (id) => new Rejected(404, {
   error: 'INVENTORY_ITEM_NOT_FOUND',
   message: `Inventory item ${id} does not exist (or is in the Recycle Bin).`
 });
+
+// ---------- migration 015 helpers ----------
+// A supplier profile (cloud first, this computer's copy offline) -> { supplier_id, supplier_name } | null
+const findSupplier = async (req, supplier_id) => {
+  try {
+    const { rows } = await req.pgPool.query(
+      'SELECT supplier_id, supplier_name FROM suppliers WHERE supplier_id = $1 AND archived_at IS NULL', [supplier_id]);
+    return rows[0] || null;
+  } catch (err) {
+    if (!isConnectionError(err)) throw err;
+    return (await sqliteGet(req.localDb,
+      'SELECT supplier_id, supplier_name FROM suppliers WHERE supplier_id = ? AND archived_at IS NULL', [supplier_id])) || null;
+  }
+};
+const supplierMissing = () => new Rejected(404, {
+  error: 'SUPPLIER_NOT_FOUND', message: 'We could not find this supplier (it may be archived). Choose it again.'
+});
+// The order number shown on the stock card for a loss recorded against an order
+const orderNumberOf = async (client, order_id) => {
+  if (!order_id) return null;
+  const { rows } = await client.query('SELECT tracking_no FROM order_profiles WHERE order_id = $1', [order_id]);
+  return rows[0] ? rows[0].tracking_no : null;
+};
 
 // ---------- Duplicate names ----------
 // Names are compared ignoring case and whitespace: "Deli A4" = "deli  a4" = "DeliA4".
@@ -169,27 +193,40 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
   const minimum_threshold = v.nonNegativeInt(body.minimum_threshold, 'minimum_threshold', 0);
   const unit_cost = v.nonNegativeMoney(body.unit_cost, 'unit_cost', { required: false, defaultValue: 0 });
   const unit = v.optionalString(body.unit, 'unit', 30) || 'pcs';
-  const supplier = v.optionalString(body.supplier, 'supplier', 255);
+  const typedSupplier = v.optionalString(body.supplier, 'supplier', 255);
+  const supplier_id = v.id(body.supplier_id, 'supplier_id', { required: false }); // migration 015
+  const has_sizes = v.bool(body.has_sizes, 'has_sizes');                          // migration 015: a garment
   const selling_price = v.nonNegativeMoney(body.selling_price, 'selling_price', { required: false, defaultValue: 0 }); // PB 11
   if (v.failed()) return v.send(res);
 
   const item_name = cleanName(rawName);
   const inventory_id = crypto.randomUUID();
-  const values = [inventory_id, item_name, cleanName(item_category), quantity_available, minimum_threshold, unit_cost,
-    cleanName(unit), supplier ? cleanName(supplier) : null, selling_price];
 
   try {
+    // migration 015: the usual supplier is a supplier profile; its name is kept on the item too
+    const supplierRow = supplier_id ? await findSupplier(req, supplier_id) : null;
+    if (supplier_id && !supplierRow) throw supplierMissing();
+    const supplier = supplierRow ? supplierRow.supplier_name : (typedSupplier ? cleanName(typedSupplier) : null);
+    const values = [inventory_id, item_name, cleanName(item_category), quantity_available, minimum_threshold, unit_cost,
+      cleanName(unit), supplier, selling_price, supplier_id || null, has_sizes];
+
     const result = await cloudFirst('cloud',
       () => withPgTransaction(req.pgPool, async (client) => {
         const dup = (await findDuplicateCloud(client, item_name))
           || (await findDuplicateLocal(req.localDb, item_name, { pendingOnly: true }).catch(() => null));
         if (dup) throw duplicateError(dup);
+        // The stock card starts with the opening stock typed here (migration 015)
+        await setMovementContext(client, {
+          type: 'opening', reference_type: 'inventory_item', reference_id: inventory_id,
+          note: 'Opening stock when the item was added to the catalog', actor: req.user
+        });
         const { rows } = await client.query(
           `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, unit, supplier,
-                                        selling_price)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING ${selectList('inventory_items', 'pg')}`,
+                                        selling_price, supplier_id, has_sizes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING ${selectList('inventory_items', 'pg')}`,
           values
         );
+        await clearMovementContext(client);
         const record = serialize('inventory_items', rows[0]);
         await auditCloud(client, req.user, inventory_id, 'created', item_name, { item: snapshotOf(record) });
         return { source: 'cloud', record };
@@ -199,9 +236,9 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
         if (dup) throw duplicateError(dup);
         await sqliteRun(tx,
           `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, unit, supplier,
-                                        selling_price, sync_status, last_modified)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
-          values);
+                                        selling_price, supplier_id, has_sizes, sync_status, last_modified)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+          values.map((x) => (x === true ? 1 : x === false ? 0 : x)));
         const record = await readLocal(tx, 'inventory_items', inventory_id);
         await auditLocal(tx, req.user, inventory_id, 'created', item_name, { item: snapshotOf(record) });
         return { source: 'local', record };
@@ -231,7 +268,7 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
 // -> 200 { message, source, changed, item }
 //    404 not found / in bin | 409 DUPLICATE_ITEM | 409 EDIT_CONFLICT (someone else edited it first)
 // ==========================================
-const EDITABLE_FIELDS = ['item_name', 'item_category', 'minimum_threshold', 'unit_cost', 'selling_price', 'unit', 'supplier'];
+const EDITABLE_FIELDS = ['item_name', 'item_category', 'minimum_threshold', 'unit_cost', 'selling_price', 'unit', 'supplier', 'supplier_id', 'has_sizes'];
 
 router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
   const { inventory_id } = req.params;
@@ -253,6 +290,9 @@ router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
   if (body.unit !== undefined) updates.unit = v.requiredString(body.unit, 'unit', 30);
   // supplier may be cleared with null or ''
   if (body.supplier !== undefined) updates.supplier = body.supplier === null ? null : v.optionalString(body.supplier, 'supplier', 255);
+  // migration 015: the usual supplier (null clears it) and whether the item is a garment
+  if (body.supplier_id !== undefined) updates.supplier_id = body.supplier_id === null || body.supplier_id === '' ? null : v.id(body.supplier_id, 'supplier_id');
+  if (body.has_sizes !== undefined) updates.has_sizes = v.bool(body.has_sizes, 'has_sizes');
   if (body.expected_version !== undefined && body.expected_version !== null && typeof body.expected_version !== 'string') {
     v.errors.push({ field: 'expected_version', message: 'expected_version must be the string returned as "version".' });
   }
@@ -265,6 +305,7 @@ router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
   if (updates.unit) updates.unit = cleanName(updates.unit);
   if (updates.supplier) updates.supplier = cleanName(updates.supplier);
   const expected_version = body.expected_version || null;
+  const localValue = (x) => (x === true ? 1 : x === false ? 0 : x);
 
   const diff = (current) => Object.keys(updates).filter((f) => updates[f] !== current[f]);
   const changesOf = (current, fields) => ({
@@ -275,6 +316,14 @@ router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
   try {
     const located = await locateRecord(req, 'inventory_items', inventory_id);
     if (!located.location) throw missingItem(inventory_id);
+    // migration 015: choosing a supplier profile also writes its name on the item
+    if (updates.supplier_id) {
+      const supplierRow = await findSupplier(req, updates.supplier_id);
+      if (!supplierRow) throw supplierMissing();
+      updates.supplier = supplierRow.supplier_name;
+    } else if (updates.supplier_id === null && updates.supplier === undefined) {
+      updates.supplier = null;
+    }
 
     const result = await cloudFirst(located.location,
       () => withPgTransaction(req.pgPool, async (client) => {
@@ -313,7 +362,7 @@ router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
         await sqliteRun(tx,
           `UPDATE inventory_items SET ${fields.map((f) => `${f} = ?`).join(', ')},
              ${offlineUpdateBookkeeping('inventory_items', fields)} WHERE inventory_id = ?`,
-          [...fields.map((f) => updates[f]), inventory_id]);
+          [...fields.map((f) => localValue(updates[f])), inventory_id]);
         await auditLocal(tx, req.user, inventory_id, 'edited', current.item_name, changesOf(current, fields));
         return { source: 'local', record: await readLocal(tx, 'inventory_items', inventory_id), fields };
       }),
@@ -597,6 +646,10 @@ router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => 
     if (stock.rowCount === 0) throw missingItem(inventory_id);
     if (stock.rows[0].quantity_available < quantity_lost) throw insufficient(stock.rows[0].quantity_available);
 
+    await setMovementContext(client, {
+      type: 'loss', reference_type: 'material_loss', reference_id: loss_id, reference_no: await orderNumberOf(client, order_id),
+      note: loss_reason, actor: req.user
+    });
     const item = await client.query(
       `UPDATE inventory_items SET quantity_available = quantity_available - $1, last_modified = NOW()
         WHERE inventory_id = $2 RETURNING ${selectList('inventory_items', 'pg')}, unit_cost AS raw_unit_cost`,
@@ -631,9 +684,10 @@ router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => 
     if (!stock) throw missingItem(inventory_id);
     if (stock.quantity_available < quantity_lost) throw insufficient(stock.quantity_available);
 
-    // Also bake it in when the item already has unsynced offline edits (e.g. a manual
-    // adjustment): sync pushes the item's absolute quantity, so a replayed delta would double-count.
-    const itemIsLocalOnly = stock.sync_status !== 'synced';
+    // Baked in only when the item itself was created offline (its insert carries the quantity).
+    // An item already in the cloud always gets the delta replayed there (migration 015: quantities
+    // are never pushed as absolute numbers any more, so they cannot clash with other branches).
+    const itemIsLocalOnly = stock.sync_status === 'pending_insert';
     await sqliteRun(tx,
       itemIsLocalOnly
         ? `UPDATE inventory_items SET quantity_available = quantity_available - ?,
@@ -689,96 +743,130 @@ router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => 
 });
 
 // ==========================================
-// 2b. MANUAL STOCK ADJUSTMENT (Manage Stock panel)
-// Body: { action: 'add' | 'subtract', quantity, reason? }
-// Adds delivered stock or removes stock that was taken out by hand. Lost/damaged stock
-// should go through /loss instead, so its cost is recorded.
-// -> 200 { message, source, previous_quantity, item }
-//    404 INVENTORY_ITEM_NOT_FOUND | 409 INSUFFICIENT_STOCK | 503 COMMIT_UNKNOWN
+// 2b. ADD / SUBTRACT STOCK: RETIRED (migration 015, adviser consultation November 2026)
+// Typing a new quantity by hand left no paper trail. Every change now has a record:
+//   stock that arrives            -> Stock in    POST /api/stock/documents { document_type: 'stock_in' }
+//   stock that leaves (no order)  -> Stock out   POST /api/stock/documents { document_type: 'stock_out' }
+//   the shelf count is different  -> Stock count POST /api/stock/documents { document_type: 'stock_count' }
+//   damaged / misprinted stock    -> Record loss POST /api/inventory/:inventory_id/loss (or /losses)
+// -> 410 STOCK_ADJUST_RETIRED (older screens show the message)
 // ==========================================
-router.post('/:inventory_id/adjust', requireRole(EDIT_ROLES), async (req, res) => {
-  const { inventory_id } = req.params;
+router.post('/:inventory_id/adjust', requireRole(EDIT_ROLES), (req, res) => {
+  res.status(410).json({
+    error: 'STOCK_ADJUST_RETIRED',
+    message: 'Add / Subtract stock was replaced. Use Stock in for deliveries, Stock out for stock that leaves without an order, '
+      + 'Stock count to correct the count, or Record loss for damaged stock.'
+  });
+});
+
+// ==========================================
+// 2b'. BULK WASTE (migration 015): several materials lost in one go, e.g. a misprinted batch
+// POST /api/inventory/losses
+// Body: { lines: [{ inventory_id, quantity_lost }] (1-50, one line per item), reason_code? , loss_reason?,
+//         order_id?, production_stage is taken from the order }
+// One transaction (cloud only, 503 LOSS_BATCH_REQUIRES_CLOUD): every stock row is locked in
+// inventory_id order, each loss is diagnosed like a single loss, and all of them share one
+// loss_batch_id. Nothing is saved if any line has more than is on hand (409 INSUFFICIENT_STOCK).
+// -> 201 { message, loss_batch_id, losses: [shown loss], total_cost }
+// ==========================================
+const LOSS_LINES_MAX = 50;
+router.post('/losses', requireRole(EDIT_ROLES), async (req, res) => {
   const body = req.body || {};
-
   const v = createValidator();
-  const action = v.oneOf(body.action, 'action', ['add', 'subtract']);
-  const quantity = v.positiveInt(body.quantity, 'quantity');
-  const reason = v.optionalString(body.reason, 'reason', 255);
+  const sentCode = v.oneOf(body.reason_code, 'reason_code', REASON_CODE_LIST, { required: false });
+  const typedReason = sentCode
+    ? v.optionalString(body.loss_reason, 'loss_reason', 1000)
+    : v.requiredString(body.loss_reason, 'loss_reason', 1000);
+  const order_id = v.id(body.order_id, 'order_id', { required: false });
+  const raw = body.lines;
+  if (!Array.isArray(raw) || raw.length === 0) v.errors.push({ field: 'lines', message: 'Add at least one material that was wasted.' });
+  else if (raw.length > LOSS_LINES_MAX) v.errors.push({ field: 'lines', message: `At most ${LOSS_LINES_MAX} materials at once.` });
+  const seen = new Set();
+  const lines = (Array.isArray(raw) ? raw : []).slice(0, LOSS_LINES_MAX).map((r, i) => {
+    const row = r && typeof r === 'object' ? r : {};
+    const lv = createValidator();
+    const inventory_id = lv.id(row.inventory_id, 'inventory_id');
+    const quantity_lost = lv.positiveInt(row.quantity_lost, 'quantity_lost');
+    for (const e of lv.errors) v.errors.push({ field: `lines[${i}].${e.field}`, message: `Line ${i + 1}: ${e.message}` });
+    if (inventory_id && seen.has(inventory_id)) {
+      v.errors.push({ field: `lines[${i}].inventory_id`, message: `Line ${i + 1}: this material is already on the list.` });
+    }
+    seen.add(inventory_id);
+    return { inventory_id, quantity_lost };
+  });
   if (v.failed()) return v.send(res);
-
-  const delta = action === 'add' ? quantity : -quantity;
-  const auditAction = action === 'add' ? 'stock_added' : 'stock_subtracted';
-  const insufficient = (available) => new Rejected(409, {
-    error: 'INSUFFICIENT_STOCK',
-    message: `Cannot subtract ${quantity}: only ${available} in stock.`,
-    quantity_available: available,
-    quantity_requested: quantity
-  });
-  const auditDetails = (previous, item) => ({ quantity, previous_quantity: previous, new_quantity: item.quantity_available, reason });
-
-  // ---- Online: lock the row, apply the change with a SQL guard so stock never goes negative ----
-  const adjustInCloud = () => withPgTransaction(req.pgPool, async (client) => {
-    const current = await lockCloudItem(client, inventory_id);
-    if (!current) throw missingItem(inventory_id);
-    const previous = current.quantity_available;
-    if (previous + delta < 0) throw insufficient(previous);
-
-    const item = await client.query(
-      `UPDATE inventory_items SET quantity_available = quantity_available + $1, last_modified = NOW()
-        WHERE inventory_id = $2 AND quantity_available + $1 >= 0
-        RETURNING ${selectList('inventory_items', 'pg')}`,
-      [delta, inventory_id]
-    );
-    if (item.rowCount !== 1) throw insufficient(previous);
-    const record = serialize('inventory_items', item.rows[0]);
-    await auditCloud(client, req.user, inventory_id, auditAction, current.item_name, auditDetails(previous, record));
-    return { source: 'cloud', previous, item: record };
-  });
-
-  // ---- Offline: same change on a dedicated SQLite connection ----
-  // The new absolute quantity is pushed on sync (pending_update + optimistic version check),
-  // so a concurrent cloud edit becomes a sync conflict instead of being overwritten.
-  // Any offline losses for this item are already included in that absolute value, so their
-  // cloud_stock_delta is cleared to avoid subtracting them twice in Neon.
-  const adjustLocally = () => withLocalTransaction(req.localDbPath, async (tx) => {
-    const current = await readLocalItem(tx, inventory_id);
-    if (!current) throw missingItem(inventory_id);
-    const previous = current.quantity_available;
-    if (previous + delta < 0) throw insufficient(previous);
-
-    await sqliteRun(tx,
-      `UPDATE inventory_items SET quantity_available = quantity_available + ?,
-         ${offlineUpdateBookkeeping('inventory_items', ['quantity_available'])} WHERE inventory_id = ?`,
-      [delta, inventory_id]);
-    await sqliteRun(tx,
-      `UPDATE material_loss SET cloud_stock_delta = 0
-        WHERE inventory_id = ? AND sync_status = 'pending_insert' AND cloud_stock_delta > 0`,
-      [inventory_id]);
-
-    const record = await readLocal(tx, 'inventory_items', inventory_id);
-    await auditLocal(tx, req.user, inventory_id, auditAction, current.item_name, auditDetails(previous, record));
-    return { source: 'local', previous, item: record };
-  });
+  const reason_code = sentCode || inferReasonCode(typedReason);
+  const loss_reason = typedReason || reasonLabel(sentCode);
+  const loss_batch_id = crypto.randomUUID();
+  const ids = lines.map((l) => l.inventory_id).sort();
 
   try {
-    const located = await locateRecord(req, 'inventory_items', inventory_id);
-    if (!located.location) throw missingItem(inventory_id);
-
-    const result = await cloudFirst(located.location, adjustInCloud, adjustLocally, 'saving the stock change');
-
-    console.log(`📦 Stock ${action} ${quantity} on ${inventory_id} by ${req.user.user_id} (${req.user.role})` +
-                `${reason ? `: ${reason}` : ''} [${result.source}]`);
-    pushStockChange(req, [inventory_id], `stock_${action}`);
-    res.status(200).json({
-      message: result.source === 'cloud'
-        ? `Stock ${action === 'add' ? 'added' : 'subtracted'}.`
-        : `Stock ${action === 'add' ? 'added' : 'subtracted'} locally (Offline Mode).`,
-      source: result.source,
-      previous_quantity: result.previous,
-      item: withAvailability(result.item)
+    if (order_id) {
+      const order = await locateRecord(req, 'order_profiles', order_id);
+      if (!order.location) return res.status(404).json({ error: 'ORDER_NOT_FOUND', message: 'We could not find this order.' });
+    }
+    const result = await withPgTransaction(req.pgPool, async (client) => {
+      const stock = await client.query(
+        `SELECT inventory_id, item_name, quantity_available FROM inventory_items
+          WHERE inventory_id = ANY($1::text[]) AND ${ACTIVE_ITEM_SQL} ORDER BY inventory_id FOR UPDATE`, [ids]);
+      const byId = new Map(stock.rows.map((r) => [r.inventory_id, r]));
+      const missing = ids.filter((id) => !byId.has(id));
+      if (missing.length) throw missingItem(missing[0]);
+      const short = lines.filter((l) => byId.get(l.inventory_id).quantity_available < l.quantity_lost);
+      if (short.length) {
+        throw new Rejected(409, {
+          error: 'INSUFFICIENT_STOCK',
+          message: `Not enough on hand: ${short.map((l) => `"${byId.get(l.inventory_id).item_name}" has ${byId.get(l.inventory_id).quantity_available}, not ${l.quantity_lost}`).join('; ')}. Nothing was recorded.`
+        });
+      }
+      const reference_no = await orderNumberOf(client, order_id);
+      const saved = [];
+      for (const l of lines) {
+        const loss_id = crypto.randomUUID();
+        await setMovementContext(client, {
+          type: 'loss', reference_type: 'material_loss', reference_id: loss_id, reference_no, note: loss_reason, actor: req.user
+        });
+        const item = await client.query(
+          `UPDATE inventory_items SET quantity_available = quantity_available - $1
+            WHERE inventory_id = $2 RETURNING ${selectList('inventory_items', 'pg')}, unit_cost AS raw_unit_cost`,
+          [l.quantity_lost, l.inventory_id]);
+        const facts = { inventory_id: l.inventory_id, order_id, reason_code, quantity_lost: l.quantity_lost };
+        const { production_stage, diagnosis } = await diagnoseInCloud(client, facts);
+        const loss = await client.query(
+          `INSERT INTO material_loss (loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost,
+                                      reason_code, loss_category, production_stage, is_statistical_anomaly, loss_batch_id)
+           VALUES ($1, $2, $3, $4::int, $5, ROUND($6::numeric * $4::int, 2), $7, $8, $9, $10, $11)
+           RETURNING ${selectList('material_loss', 'pg')}`,
+          [loss_id, order_id, l.inventory_id, l.quantity_lost, loss_reason, item.rows[0].raw_unit_cost,
+            reason_code, diagnosis.loss_category, production_stage, diagnosis.is_statistical_anomaly, loss_batch_id]);
+        await escalateClusterInCloud(client, diagnosis.cluster_with);
+        const record = serialize('inventory_items', item.rows[0]);
+        await auditCloud(client, req.user, l.inventory_id, 'stock_subtracted', record.item_name, {
+          kind: 'loss', loss_batch_id, quantity: l.quantity_lost, previous_quantity: byId.get(l.inventory_id).quantity_available,
+          new_quantity: record.quantity_available, reason: loss_reason, reason_code, loss_category: diagnosis.loss_category, order_id
+        });
+        saved.push(shownLoss(serialize('material_loss', loss.rows[0]), record));
+      }
+      await clearMovementContext(client);
+      return saved;
+    });
+    pushStockChange(req, ids, 'material_loss');
+    const total = Math.round(result.reduce((s, l) => s + Number(l.financial_cost || 0) * 100, 0)) / 100;
+    res.status(201).json({
+      message: `${result.length} loss${result.length === 1 ? '' : 'es'} recorded together.`,
+      source: 'cloud',
+      loss_batch_id,
+      losses: result,
+      total_cost: total
     });
   } catch (err) {
-    sendError(res, err, 'adjusting stock');
+    if (isConnectionError(err) && !err.commitUnknown) {
+      return res.status(503).json({
+        error: 'LOSS_BATCH_REQUIRES_CLOUD',
+        message: 'Recording several losses at once needs the cloud connection. Record them one by one while offline, or try again when online.'
+      });
+    }
+    sendError(res, err, 'recording losses');
   }
 });
 
