@@ -6,9 +6,10 @@
 // buttons this account may use. Saving goes to POST / PATCH /api/customers (works offline too).
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { BookUser, Mail, MapPin, MessageCircle, Pencil, Phone, Plus, PlusCircle, Search, UserRound } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowLeft, BookUser, Mail, MapPin, MessageCircle, Pencil, Phone, Plus, PlusCircle, Search, UserRound } from 'lucide-react';
 import { formatDateTime, formatMobile, peso } from '@xiaowu/client-core/format';
 import { orderNumber } from '@xiaowu/client-core/orders';
+import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { bannerText, Field, fieldErrorsMap, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { LoadProblem, PageHeader } from '@/components/layout/page-header';
@@ -22,6 +23,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SHEET_S
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
+import { Toggle } from '@/components/ui/toggle';
 import { useApi } from '@/hooks/use-api';
 import { useSession } from '@/hooks/use-session';
 import { can } from '@xiaowu/client-core/permissions';
@@ -57,7 +59,7 @@ export function ClientsScreen() {
   }, [api]);
   useEffect(() => {
     let cancelled = false;
-    api<{ customers: Customer[] }>('GET', `/customers${showArchived ? '?include_archived=true' : ''}`).then(({ ok, data }) => {
+    api<{ customers: Customer[] }>('GET', `/customers${showArchived ? '?include_archived=only' : ''}`).then(({ ok, data }) => {
       if (cancelled) return;
       if (ok) {
         setCustomers(data.customers);
@@ -99,16 +101,23 @@ export function ClientsScreen() {
             <Input id="client-search" className="pl-8" placeholder="Name, contact person, number, email" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
         </Field>
-        <label className="flex min-h-10 items-center gap-2 text-sm">
-          <input type="checkbox" className="size-4" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
-          Show archived
-        </label>
+        <Toggle variant="outline" pressed={showArchived} onPressedChange={setShowArchived} aria-label="Show archived clients">
+          <Archive aria-hidden /> Show archived
+        </Toggle>
       </div>
+      {showArchived && (
+        <div className={cn('flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.info.banner)}>
+          <span>Showing archived clients only. Open one to restore it.</span>
+          <Button size="sm" variant="outline" onClick={() => setShowArchived(false)}>
+            <ArrowLeft aria-hidden /> Back to active clients
+          </Button>
+        </div>
+      )}
       <LoadProblem message={problem} />
       {!customers && !problem ? (
         <Skeleton className="h-48 w-full" />
       ) : shown.length === 0 ? (
-        <p className="rounded-md border bg-card p-6 text-center text-sm text-muted-foreground">{search ? 'No client matches.' : 'No clients yet.'}</p>
+        <p className="rounded-md border bg-card p-6 text-center text-sm text-muted-foreground">{search ? 'No client matches.' : showArchived ? 'No archived clients.' : 'No clients yet.'}</p>
       ) : (
         <div className="max-w-full min-w-0 overflow-x-auto rounded-md border bg-card">
           <Table>
@@ -143,7 +152,16 @@ export function ClientsScreen() {
         </div>
       )}
 
-      <ClientProfileSheet customerId={openId} tick={tick} onClose={() => setOpenId(null)} onEdit={(c) => setEditing(c)} />
+      <ClientProfileSheet
+        customerId={openId}
+        tick={tick}
+        onClose={() => setOpenId(null)}
+        onEdit={(c) => setEditing(c)}
+        onChanged={(r) => {
+          setResult(r);
+          reload();
+        }}
+      />
       {editing && (
         <ClientFormDialog
           customer={editing === 'new' ? null : editing}
@@ -166,15 +184,19 @@ function ClientProfileSheet({
   tick,
   onClose,
   onEdit,
+  onChanged,
 }: {
   customerId: string | null;
   tick: number;
   onClose: () => void;
   onEdit: (c: Customer) => void;
+  onChanged: (r: ResultMessage) => void;
 }) {
   const api = useApi();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [problem, setProblem] = useState('');
+  const [confirm, setConfirm] = useState<'archive' | 'restore' | null>(null);
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (!customerId) return undefined;
     let cancelled = false;
@@ -194,13 +216,22 @@ function ClientProfileSheet({
   }, [api, customerId, tick]);
   const shown = profile && profile.customer.customer_id === customerId ? profile : null;
   const c = shown?.customer;
+  const act = async (kind: 'archive' | 'restore') => {
+    if (!c) return;
+    setBusy(true);
+    const { ok, data } = await api<{ message?: string }>('POST', `/customers/${encodeURIComponent(c.customer_id)}/${kind}`);
+    setBusy(false);
+    setConfirm(null);
+    onChanged(ok ? { type: 'success', title: kind === 'archive' ? 'Client archived' : 'Client restored', message: data.message ?? '' }
+      : { type: 'error', title: 'Nothing changed', message: errorMessage(data, 'Nothing was changed.') });
+  };
 
   return (
     <Sheet open={Boolean(customerId)} onOpenChange={(next) => !next && onClose()}>
       <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-3xl">
         <SheetHeader className="border-b pr-12">
           <SheetTitle>{c?.full_name ?? 'Client'}</SheetTitle>
-          <SheetDescription>{c ? `${c.customer_type || 'Individual'}${c.platform_source ? ` · came from ${c.platform_source}` : ''}` : 'Loading…'}</SheetDescription>
+          <SheetDescription>{c?.archived_at ? 'Archived: kept for the records. Restore to edit or order again.' : c ? `${c.customer_type || 'Individual'}${c.platform_source ? ` · came from ${c.platform_source}` : ''}` : 'Loading…'}</SheetDescription>
           {shown && (
             <div className="flex flex-wrap gap-2 pt-1">
               {shown.allowed_actions.create_order && (
@@ -213,6 +244,16 @@ function ClientProfileSheet({
               {shown.allowed_actions.edit && (
                 <Button size="sm" variant="outline" onClick={() => onEdit(shown.customer)}>
                   <Pencil aria-hidden /> Edit profile
+                </Button>
+              )}
+              {shown.allowed_actions.archive && (
+                <Button size="sm" variant="outline" onClick={() => setConfirm('archive')}>
+                  <Archive aria-hidden /> Archive
+                </Button>
+              )}
+              {shown.allowed_actions.restore && (
+                <Button size="sm" variant="outline" onClick={() => setConfirm('restore')}>
+                  <ArchiveRestore aria-hidden /> Restore
                 </Button>
               )}
             </div>
@@ -279,6 +320,17 @@ function ClientProfileSheet({
           )}
         </div>
       </SheetContent>
+      <ConfirmDialog
+        open={Boolean(confirm)}
+        title={confirm === 'restore' ? 'Restore this client?' : 'Archive this client?'}
+        message={confirm === 'restore'
+          ? 'The client comes back to the list and can get new orders again.'
+          : 'The client is hidden from the list and cannot get new orders. Their past orders and payments are kept. Clients with unfinished orders cannot be archived.'}
+        confirmLabel={confirm === 'restore' ? 'Restore' : 'Archive'}
+        busy={busy}
+        onConfirm={() => confirm && void act(confirm)}
+        onCancel={() => setConfirm(null)}
+      />
     </Sheet>
   );
 }

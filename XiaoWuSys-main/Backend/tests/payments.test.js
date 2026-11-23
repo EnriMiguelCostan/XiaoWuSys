@@ -82,8 +82,6 @@ describe('Payments: balance limit, receiver and payment status', () => {
     const noQuote = await pay(orders.noQuote, 100);
     assert.deepEqual([noQuote.status, noQuote.body.error], [422, 'QUOTE_REQUIRED']);
     assert.match(noQuote.body.message, /Ask the Owner to set the quote/);
-    const staff = await pay(orders.odd, 1, 'production');
-    assert.equal(staff.status, 403);
     for (const id of [orders.cancelled, orders.noQuote]) assert.equal(await paymentCount(id), 0);
   });
 
@@ -147,7 +145,7 @@ describe('Payments: balance limit, receiver and payment status', () => {
     const prod = await detail(fresh, 'staff');
     assert.deepEqual([prod.record_payment, prod.max_payment, prod.print_receipt, prod.payment_blocked_reason], [true, 800, true, null]);
     const staff = await detail(fresh, 'production');
-    assert.deepEqual([staff.record_payment, staff.max_payment, staff.print_receipt], [false, 0, true]);
+    assert.deepEqual([staff.record_payment, staff.max_payment, staff.print_receipt], [true, 800, true], 'Production records payments like Staff');
     const cancelled = await detail(orders.cancelled, 'owner');
     assert.deepEqual([cancelled.record_payment, cancelled.payment_blocked_reason], [false, 'This order was cancelled, so it cannot take payments.']);
     const noQuote = await detail(orders.noQuote, 'admin');

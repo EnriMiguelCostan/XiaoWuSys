@@ -89,7 +89,8 @@ describe('M6 part 2 offline: selling price, roster import, typed quote, cloud-on
     });
     assert.deepEqual([tooMany.status, tooMany.body.details[0].field], [400, 'items']);
     assert.equal((await t.request('POST', `/api/orders/${orderId}/items/bulk`, { token: production, body: { items: [] } })).status, 400);
-    assert.equal((await t.request('POST', `/api/orders/${orderId}/items/bulk`, { token: staff, body: { items: roster } })).status, 403);
+    assert.equal((await t.request('POST', `/api/orders/${orderId}/items/bulk`, { token: staff, body: { items: [] } })).status, 400,
+      'Production may import too (it works like Staff), so it reaches the same checks');
   });
 
   it('needs the cloud to import stock-linked rows into an order that holds its stock', async () => {
@@ -165,12 +166,12 @@ describe('M6 part 2 offline: selling price, roster import, typed quote, cloud-on
 
     const read = await t.request('GET', `/api/inventory/${shirt}/consumable-rates`, { token: staff });
     assert.equal(read.status, 200, read.text);
-    assert.deepEqual([read.body.source, read.body.rates, read.body.triggers, read.body.can_edit], ['local', [], ['Pressing', 'Completed'], false]);
+    assert.deepEqual([read.body.source, read.body.rates, read.body.triggers, read.body.can_edit], ['local', [], ['Pressing', 'Completed'], true]);
     assert.ok(read.body.consumable_options.some((o) => o.inventory_id === ink.inventory_id));
     assert.ok(!read.body.consumable_options.some((o) => o.inventory_id === shirt), 'a blank never uses itself up');
 
     const body = { rates: [{ consumable_inventory_id: ink.inventory_id, quantity_per_piece: 0.25 }] };
-    assert.equal((await t.request('PUT', `/api/inventory/${shirt}/consumable-rates`, { token: staff, body })).status, 403);
+    assert.equal((await t.request('PUT', `/api/inventory/${shirt}/consumable-rates`, { token: staff, body })).status, 503, 'Production passes the role check');
     const offline2 = await t.request('PUT', `/api/inventory/${shirt}/consumable-rates`, { token: production, body });
     assert.deepEqual([offline2.status, offline2.body.error], [503, 'RATES_REQUIRE_CLOUD']);
     assert.equal((await t.get('SELECT COUNT(*) AS n FROM consumable_rates')).n, 0);

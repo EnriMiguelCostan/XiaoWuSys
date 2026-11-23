@@ -56,9 +56,9 @@ describe('Inventory catalog', () => {
     assert.equal(r.body.details[0].field, 'quantity_available');
   });
 
-  it('only lets Owner / Admin / Production change the catalog', async () => {
+  it('lets every working role change the catalog (Production works like Staff)', async () => {
     const r = await t.request('POST', '/api/inventory', { token: t.tokens.production, body: { item_name: 'Ballpen', item_category: 'Office' } });
-    assert.equal(r.status, 403);
+    assert.equal(r.status, 201);
   });
 
   it('no longer lets anyone type a new quantity by hand (Add / Subtract stock is retired)', async () => {
@@ -118,7 +118,7 @@ describe('Inventory catalog', () => {
     const odd = await t.request('POST', '/api/inventory', { token: admin, body: { item_name: "Robert'); DROP TABLE inventory_items;--", item_category: 'Test' } });
     assert.equal(odd.status, 201);
     const again = await t.request('GET', '/api/inventory', { token: admin });
-    assert.equal(again.body.summary.total_items, 10, 'the table is still there, with the odd name stored as text');
+    assert.equal(again.body.summary.total_items, 11, 'the table is still there, with the odd name stored as text');
   });
 
   it('writes a hidden audit trail for every change', async () => {

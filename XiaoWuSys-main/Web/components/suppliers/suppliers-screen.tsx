@@ -6,7 +6,7 @@
 // allowed_actions). "Record stock in" opens the Stock in form with this supplier chosen.
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Archive, ArchiveRestore, ArrowDownToLine, Mail, MapPin, Pencil, Phone, Plus, Search, Truck, UserRound } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowLeft, ArrowDownToLine, Mail, MapPin, Pencil, Phone, Plus, Search, Truck, UserRound } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
@@ -19,6 +19,7 @@ import { Input } from '@/components/ui/input';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SHEET_SCROLL_BODY } from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Toggle } from '@/components/ui/toggle';
 import { useApi } from '@/hooks/use-api';
 import { errorMessage } from '@/lib/api';
 import type { InventoryItem } from '@/lib/inventory';
@@ -55,7 +56,7 @@ export function SuppliersScreen() {
     let cancelled = false;
     const q = new URLSearchParams();
     if (search.trim()) q.set('search', search.trim());
-    if (showArchived) q.set('include_archived', 'true');
+    if (showArchived) q.set('include_archived', 'only');
     api<SupplierList>('GET', `/suppliers?${q}`).then(({ ok, data }) => {
       if (cancelled) return;
       if (ok) {
@@ -89,11 +90,18 @@ export function SuppliersScreen() {
             <Input id="sup-search" className="pl-8" placeholder="Supplier or contact person" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
         </Field>
-        <label className="flex min-h-10 items-center gap-2 text-sm">
-          <input type="checkbox" className="size-4" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
-          Show archived
-        </label>
+        <Toggle variant="outline" pressed={showArchived} onPressedChange={setShowArchived} aria-label="Show archived suppliers">
+          <Archive aria-hidden /> Show archived
+        </Toggle>
       </div>
+      {showArchived && (
+        <div className={cn('flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.info.banner)}>
+          <span>Showing archived suppliers only. Open one to restore it.</span>
+          <Button size="sm" variant="outline" onClick={() => setShowArchived(false)}>
+            <ArrowLeft aria-hidden /> Back to active suppliers
+          </Button>
+        </div>
+      )}
       <LoadProblem message={problem} />
       {list?.source === 'local' && (
         <p className={cn('rounded-md border p-3 text-sm', TONE_CLASSES.info.banner)}>Offline: showing this computer’s copy. Delivery figures need the internet.</p>
@@ -101,7 +109,7 @@ export function SuppliersScreen() {
       {!list && !problem ? (
         <Skeleton className="h-48 w-full" />
       ) : list && list.suppliers.length === 0 ? (
-        <p className="rounded-md border bg-card p-6 text-center text-sm text-muted-foreground">No suppliers yet. Add the first one.</p>
+        <p className="rounded-md border bg-card p-6 text-center text-sm text-muted-foreground">{search.trim() ? 'No supplier matches.' : showArchived ? 'No archived suppliers.' : 'No suppliers yet. Add the first one.'}</p>
       ) : list ? (
         <div className="max-w-full min-w-0 overflow-x-auto rounded-md border bg-card">
           <Table>

@@ -158,7 +158,6 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
 
     const refused = await put('i-shirt-s', [{ consumable_inventory_id: 'i-gone', quantity_per_piece: 1 }]);
     assert.deepEqual([refused.status, refused.body.missing_inventory_ids], [404, ['i-gone']]);
-    assert.equal((await put('i-shirt-s', [], staff)).status, 403);
     assert.equal((await pool.query("SELECT COUNT(*)::int AS n FROM consumable_rates WHERE product_inventory_id = 'i-shirt-s'")).rows[0].n, 3,
       'a refused change keeps the list');
 
@@ -170,7 +169,7 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     assert.equal(trail[1].after.length, 3);
 
     const shown = await server.request('GET', '/api/inventory/i-shirt-s/consumable-rates', { token: staff });
-    assert.deepEqual([shown.status, shown.body.source, shown.body.rates.length, shown.body.can_edit], [200, 'cloud', 3, false]);
+    assert.deepEqual([shown.status, shown.body.source, shown.body.rates.length, shown.body.can_edit], [200, 'cloud', 3, true]);
     const local = await sqliteAll(server.localDb, "SELECT consumable_inventory_id FROM consumable_rates WHERE product_inventory_id = 'i-shirt-s' ORDER BY 1");
     assert.deepEqual(local.map((x) => x.consumable_inventory_id), ['i-ink', 'i-paper', 'i-thread'], 'this computer has the new list for offline reading');
 

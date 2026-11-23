@@ -86,10 +86,10 @@ describe('Migration 015 rules (no database)', () => {
     assert.equal(resolveAdjustment(order, { amount: 20, reason: 'Late' }).totalC, 130000);
   });
 
-  it('swapped the Staff and Production roles', () => {
+  it('gives Staff and Production the same day-to-day work', () => {
     assert.ok(can('Staff', 'create_order') && can('Staff', 'receive_stock') && !can('Staff', 'count_stock'));
-    assert.ok(!can('Production', 'create_order') && can('Production', 'view_stock'));
-    assert.ok(outranks('Staff', 'Production') && !outranks('Production', 'Staff'));
+    assert.ok(can('Production', 'create_order') && can('Production', 'receive_stock') && !can('Production', 'count_stock'));
+    assert.ok(!outranks('Staff', 'Production') && !outranks('Production', 'Staff'));
   });
 });
 
@@ -120,7 +120,7 @@ describe('Migration 015 on the offline server', () => {
       ['Cash', 'GCash', 'Maya', 'PayPal', 'Bank Transfer', 'Cheque', 'Credit/Debit Card', 'Other']);
     assert.ok(orders.body.payment_methods.find((m) => m.value === 'Cheque').fields.some((f) => f.name === 'cheque_date' && f.required && f.type === 'date'));
     const stockOptions = await t.request('GET', '/api/stock/options', { token: production });
-    assert.deepEqual([stockOptions.body.can_record.stock_in, stockOptions.body.can_void], [false, false], 'Production only looks');
+    assert.deepEqual([stockOptions.body.can_record.stock_in, stockOptions.body.can_void], [true, false], 'Production records stock like Staff');
     assert.equal((await t.request('GET', '/api/stock/options', { token: staff })).body.can_record.stock_in, true);
     assert.ok((await t.request('GET', '/api/customers/options', { token: staff })).body.customer_types.includes('School'));
   });
@@ -130,7 +130,7 @@ describe('Migration 015 on the offline server', () => {
     const r = await t.request('PATCH', `/api/customers/${customer.customer_id}`, { token: staff, body: { contact_person: 'Mrs. Lopez', address: 'Agdao' } });
     assert.deepEqual([r.status, r.body.source, r.body.customer.contact_person], [200, 'local', 'Mrs. Lopez']);
     const p = await t.request('GET', `/api/customers/${customer.customer_id}`, { token: production });
-    assert.deepEqual([p.body.totals.order_count, p.body.totals.open_orders, p.body.allowed_actions.edit], [1, 1, false]);
+    assert.deepEqual([p.body.totals.order_count, p.body.totals.open_orders, p.body.allowed_actions.edit], [1, 1, true]);
   });
 
   it('checks payment details offline the same way, and keeps a payment date in the past', async () => {

@@ -232,8 +232,8 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
     assert.deepEqual([forced.status, forced.body.error, forced.body.can_override], [409, 'EDIT_CONFLICT', false], 'override: true is ignored without the rank');
     const equal = await editDeadline('o-edit', 30, admin, { expected_version: stale, override: true });
     assert.deepEqual([equal.status, equal.body.can_override], [409, false], 'an equal rank never wins automatically');
-    const noRole = await editDeadline('o-edit', 30, staff, { expected_version: stale, override: true });
-    assert.equal(noRole.status, 403, 'Staff cannot edit orders at all');
+    const prod = await editDeadline('o-edit', 30, staff, { expected_version: stale, override: true });
+    assert.deepEqual([prod.status, prod.body.can_override], [409, false], 'Production edits orders now, but ranks below the Admin');
 
     assert.equal((await cloudOrder('o-edit')).deadline, shopDate(25), 'the Admin’s change is untouched');
     assert.deepEqual(await audits('o-edit'), []);

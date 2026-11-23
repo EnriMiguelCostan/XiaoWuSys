@@ -1,6 +1,6 @@
 // ==========================================
 // SUPPLIERS (migration 015): who the shop buys from
-// GET  /api/suppliers?include_archived=true|false&search=
+// GET  /api/suppliers?include_archived=true|false|only&search=   (only = the archived ones alone)
 //      -> { source, suppliers: [{ ...supplier, item_count, delivery_count, last_delivery_at, total_purchased }] }
 //      (offline: this computer's copy, without the delivery figures)
 // GET  /api/suppliers/:supplier_id
@@ -98,7 +98,7 @@ const duplicate = (dup) => new Rejected(409, {
 
 router.get('/', requireRole(READ_ROLES), async (req, res) => {
   const v = createValidator();
-  const includeArchived = v.oneOf(req.query.include_archived, 'include_archived', ['true', 'false'], { required: false }) === 'true';
+  const archivedMode = v.oneOf(req.query.include_archived, 'include_archived', ['true', 'false', 'only'], { required: false }) || 'false';
   const search = v.optionalString(req.query.search, 'search', 100);
   if (v.failed()) return v.send(res);
   try {
@@ -112,7 +112,7 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
                 (SELECT COALESCE(SUM(d.total_cost), 0)::text FROM stock_documents d
                   WHERE d.supplier_id = s.supplier_id AND d.document_type = 'stock_in' AND d.voided_at IS NULL) AS total_purchased
            FROM suppliers s
-          WHERE (${includeArchived ? 'TRUE' : 's.archived_at IS NULL'})
+          WHERE (${{ true: 'TRUE', only: 's.archived_at IS NOT NULL', false: 's.archived_at IS NULL' }[archivedMode]})
             AND ($1::text IS NULL OR s.supplier_name ILIKE $1 OR s.contact_person ILIKE $1)
           ORDER BY LOWER(s.supplier_name), s.supplier_id`,
         [search ? `%${search.replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null]);
@@ -130,7 +130,7 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
     }
     // Offline: this computer's copy (figures from the stock records need the cloud)
     const list = await listRecords(req, 'suppliers', {
-      where: includeArchived ? null : 'archived_at IS NULL', orderBy: 'supplier_name, supplier_id'
+      where: { true: null, only: 'archived_at IS NOT NULL', false: 'archived_at IS NULL' }[archivedMode], orderBy: 'supplier_name, supplier_id'
     });
     const term = search ? search.toLowerCase() : null;
     res.status(200).json({

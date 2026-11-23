@@ -23,7 +23,7 @@ export const ROLE_HELP = Object.freeze({
   Owner: 'Everything, including approving job orders and managing Owners',
   Admin: 'Everything except approving job orders; manages non-Owner accounts',
   Staff: 'Orders, payments, deliveries and stock in / out (no account management)',
-  Production: 'View the inventory, orders and dashboard only'
+  Production: 'Orders, payments, deliveries and stock in / out (no account management)'
 });
 
 /** Plain-words description of a role from the server, or '' for a role this version doesn't know. */
