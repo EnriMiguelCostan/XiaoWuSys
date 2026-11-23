@@ -100,7 +100,7 @@ describe('Account management (online)', () => {
     const dbPath = path.join(dir, 'cache.db');
     localDb = await prepareDatabase(dbPath, { users: [] });
     const hash = await bcrypt.hash(PASSWORD, 4);
-    for (const [user_id, username, role] of [['u-owner', 'owner', 'Owner'], ['u-admin', 'admin', 'Admin'], ['u-staff', 'staff', 'Staff']]) {
+    for (const [user_id, username, role] of [['u-owner', 'owner', 'Owner'], ['u-admin', 'admin', 'Admin'], ['u-staff', 'staff', 'Production']]) {
       users.set(user_id, { user_id, username, password_hash: hash, role, is_active: true, tokens_valid_after: null, created_at: '2026-10-01 00:00:00' });
     }
     const app = createApp({
@@ -125,10 +125,10 @@ describe('Account management (online)', () => {
   });
 
   it('creates accounts and refuses a taken username', async () => {
-    const r = await call('POST', '/api/auth/register', { username: 'rin.production', password: 'Rin12345', role: 'Production' }, tokens.admin);
+    const r = await call('POST', '/api/auth/register', { username: 'rin.production', password: 'Rin12345', role: 'Staff' }, tokens.admin);
     assert.equal(r.status, 201);
-    assert.equal(r.body.user.role, 'Production');
-    const dup = await call('POST', '/api/auth/register', { username: 'rin.production', password: 'Rin12345', role: 'Staff' }, tokens.admin);
+    assert.equal(r.body.user.role, 'Staff');
+    const dup = await call('POST', '/api/auth/register', { username: 'rin.production', password: 'Rin12345', role: 'Production' }, tokens.admin);
     assert.equal(dup.status, 409);
     assert.equal(dup.body.error, 'USERNAME_TAKEN');
   });
@@ -259,14 +259,14 @@ describe('Account management (online)', () => {
     const admin = await login('admin');
     // Added in a scrambled role order, with mixed-case names
     const extra = [
-      ['s-zed', 'Zed.staff', 'Staff', true], ['a-bea', 'bea.admin', 'Admin', true], ['p-ana', 'Ana.prod', 'Production', true],
-      ['o-carl', 'carl.owner', 'Owner', true], ['a-abe', 'Abe.admin', 'Admin', true], ['s-amy', 'amy.staff', 'Staff', false],
-      ['p-ben', 'ben.prod', 'Production', false], ['x-old', 'aaa.legacy', 'Cashier', true] // unknown role: last
+      ['s-zed', 'Zed.staff', 'Production', true], ['a-bea', 'bea.admin', 'Admin', true], ['p-ana', 'Ana.prod', 'Staff', true],
+      ['o-carl', 'carl.owner', 'Owner', true], ['a-abe', 'Abe.admin', 'Admin', true], ['s-amy', 'amy.staff', 'Production', false],
+      ['p-ben', 'ben.prod', 'Staff', false], ['x-old', 'aaa.legacy', 'Cashier', true] // unknown role: last
     ];
     for (const [user_id, username, role, is_active] of extra) {
       users.set(user_id, { user_id, username, password_hash: 'x', role, is_active, tokens_valid_after: null, created_at: '2026-11-01 00:00:00' });
     }
-    const RANK = { Owner: 4, Admin: 3, Production: 2, Staff: 1 };
+    const RANK = { Owner: 4, Admin: 3, Staff: 2, Production: 1 }; // Staff and Production swapped (migration 015)
     const inOrder = (list) => list.every((u, i) => i === 0 || (() => {
       const p = list[i - 1];
       const rp = RANK[p.role] || 0; const ru = RANK[u.role] || 0;

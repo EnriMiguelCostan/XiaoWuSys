@@ -74,12 +74,12 @@ describe('Discounts (PB 12)', () => {
 
   it('shows a breakdown that always adds up', () => {
     assert.deepEqual(quoteBreakdown({ total_quote_amount: 850, subtotal_amount: 1000, discount_amount: 150, discount_reason: 'Loyal' }),
-      { has_quote: true, subtotal_amount: 1000, discount_amount: 150, discount_reason: 'Loyal', total_quote_amount: 850 });
+      { has_quote: true, subtotal_amount: 1000, labor_amount: 0, incidental_amount: 0, gross_amount: 1000, adjustment_amount: 0, adjustment_reason: null, discount_amount: 150, discount_reason: 'Loyal', total_quote_amount: 850 });
     // Priced before migration 011 (no breakdown stored): the quote is its own subtotal
     assert.deepEqual(quoteBreakdown({ total_quote_amount: 500, subtotal_amount: 0, discount_amount: 0, discount_reason: null }),
-      { has_quote: true, subtotal_amount: 500, discount_amount: 0, discount_reason: null, total_quote_amount: 500 });
+      { has_quote: true, subtotal_amount: 500, labor_amount: 0, incidental_amount: 0, gross_amount: 500, adjustment_amount: 0, adjustment_reason: null, discount_amount: 0, discount_reason: null, total_quote_amount: 500 });
     assert.equal(quoteBreakdown({ total_quote_amount: 0 }).has_quote, false);
-    assert.deepEqual(manualQuoteColumns(720), { subtotal_amount: 720, discount_amount: 0, discount_reason: null });
+    assert.deepEqual(manualQuoteColumns(720), { subtotal_amount: 720, discount_amount: 0, discount_reason: null, labor_amount: 0, incidental_amount: 0 });
     const breakdown = quoteBreakdown({ total_quote_amount: 900, subtotal_amount: 1000, discount_amount: 100, discount_reason: 'x' });
     const items = [{ line_item_id: 'a', product_type: 'Jersey', quantity: 4, price: 150 }, { line_item_id: 'b', product_type: 'Mug', quantity: 2, price: 200 }];
     assert.deepEqual(quoteLines(items, breakdown).map((l) => l.line_total), [600, 400]);

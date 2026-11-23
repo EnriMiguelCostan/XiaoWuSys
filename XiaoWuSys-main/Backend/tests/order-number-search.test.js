@@ -10,7 +10,7 @@ describe('Order number keyword search', () => {
 
   before(async () => {
     t = await startTestServer();
-    token = await t.login('production');
+    token = await t.login('staff');
     const item = await t.request('POST', '/api/inventory', { token, body: fixtures.ITEMS[0] });
     const customer = await t.request('POST', '/api/customers', { token, body: fixtures.CUSTOMERS[0] });
     for (const number of NUMBERS) {

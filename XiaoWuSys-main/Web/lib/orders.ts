@@ -11,13 +11,23 @@ export const ORDER_STATUSES: ProductionStatus[] = ['Pending', 'Approved', 'Print
  *  (orderLifecycle.deadlineFlag, shop time). null for Completed / Cancelled orders. */
 export type DeadlineFlag = 'overdue' | 'urgent_24h' | 'warning_72h' | 'normal';
 
-export const PAYMENT_TYPES = ['Cash', 'GCash', 'Bank Transfer'] as const;
+/** Fallback list only: the payment form uses GET /api/orders/options (payment_methods), which
+ *  also says which details each method needs. */
+export const PAYMENT_TYPES = ['Cash', 'GCash', 'Maya', 'PayPal', 'Bank Transfer', 'Cheque', 'Credit/Debit Card', 'Other'] as const;
 
 export interface Customer {
   customer_id: string;
   full_name: string;
   contact_number: string | null;
   platform_source: string | null;
+  // migration 015: client profile
+  customer_type?: string | null;
+  contact_person?: string | null;
+  email?: string | null;
+  address?: string | null;
+  social_media?: string | null;
+  notes?: string | null;
+  archived_at?: string | null;
 }
 
 export interface Order {
@@ -40,6 +50,77 @@ export interface Order {
   /** PB 23 / D2: archived (hidden from the list, read-only until restored, kept forever). UTC. */
   archived_at?: string | null;
   archived_by?: string | null;
+  /** migration 015: what to do, in the customer's words */
+  order_description?: string | null;
+  labor_amount?: number;
+  incidental_amount?: number;
+  adjustment_amount?: number;
+  adjustment_reason?: string | null;
+  /** GET /api/orders (migration 015): the server's payment figures for the list */
+  total_paid?: number;
+  remaining?: number;
+  payment_status?: string;
+}
+
+/** migration 015: a size / name / number (garments) or a text (anything else) to print */
+export interface PrintDetail {
+  print_detail_id: string;
+  order_id: string;
+  line_item_id: string | null;
+  print_type: string;
+  quantity: number;
+  size: string | null;
+  custom_name: string | null;
+  custom_number: string | null;
+  notes: string | null;
+  material_name: string | null;
+  on_garment: boolean;
+  sync_status: string;
+}
+
+/** migration 015: a batch handed to the customer */
+export interface Delivery {
+  delivery_id: string;
+  batch_no: number;
+  quantity: number;
+  /** UTC */
+  delivered_at: string;
+  method: string;
+  received_by_name: string | null;
+  notes: string | null;
+  recorded_by_name: string;
+}
+
+export interface Fulfillment {
+  pieces_ordered: number;
+  pieces_delivered: number;
+  pieces_remaining: number;
+  batches: number;
+  state: 'none' | 'partial' | 'complete' | string;
+  label: string;
+}
+
+/** What the order still needs before "Completed" (the server's completionCheck) */
+export interface Completion {
+  ready: boolean;
+  missing: { code: string; message: string }[];
+  warnings: { code: string; message: string }[];
+  auto_handover: boolean;
+  balance_due: number;
+}
+
+/** GET /api/orders/options */
+export interface PaymentMethodForm {
+  value: string;
+  verify: boolean;
+  fields: { name: string; label: string; required: boolean; type: 'text' | 'date' | string; max: number | null; hint: string | null }[];
+}
+export interface OrderOptions {
+  payment_methods: PaymentMethodForm[];
+  refund_reasons: string[];
+  delivery_methods: string[];
+  garment_sizes: string[];
+  print_limits: { print_type: number; name: number; number_digits: number; quantity: number; notes: number; bulk_rows: number };
 }
 
 /** PB 14: one status change, oldest first in OrderDetail.status_history */
@@ -71,6 +152,11 @@ export interface OrderItem {
   custom_number: string | null;
   /** PB 11: unit price set when the Owner calculated the quote (0 before) */
   price?: number;
+  /** migration 015: catalog facts of the material */
+  item_category?: string | null;
+  unit?: string | null;
+  has_sizes?: boolean;
+  is_consumable?: boolean;
 }
 
 /** PB 11 / PB 12: the quote as the server shows it (GET /api/orders/:id "quote"). The three
@@ -87,7 +173,14 @@ export interface QuoteLine {
 }
 export interface QuoteBreakdown {
   has_quote: boolean;
+  /** materials */
   subtotal_amount: number;
+  /** migration 015: labor / services, incidental charges, materials + both, a price cut after approval */
+  labor_amount?: number;
+  incidental_amount?: number;
+  gross_amount?: number;
+  adjustment_amount?: number;
+  adjustment_reason?: string | null;
   discount_amount: number;
   discount_reason: string | null;
   total_quote_amount: number;
@@ -100,6 +193,10 @@ export interface QuoteCalculation {
   tier: { min_quantity: number; percent_off: number; label: string };
   lines: (QuoteLine & { selling_price: number })[];
   subtotal_amount: number;
+  labor_amount?: number;
+  incidental_amount?: number;
+  incidental_percent?: number | null;
+  gross_amount?: number;
   discount_amount: number;
   discount_percent: number | null;
   discount_reason: string | null;
@@ -139,6 +236,21 @@ export interface Payment {
   void_reason?: string | null;
   /** the Owner may still void it (also needs allowed_actions.void_payment) */
   can_void?: boolean;
+  // migration 015
+  payer_name?: string | null;
+  reference_no?: string | null;
+  bank_name?: string | null;
+  account_name?: string | null;
+  cheque_no?: string | null;
+  cheque_date?: string | null;
+  payment_notes?: string | null;
+  is_refund?: boolean;
+  refund_reason?: string | null;
+  verified_at?: string | null;
+  verified_by?: string | null;
+  /** UTC, when it was typed in (payment_date is when it was paid) */
+  recorded_at?: string | null;
+  needs_verification?: boolean;
 }
 
 /** PB 18 / PB 19: a misprint or material loss as the server shows it */
@@ -182,6 +294,10 @@ export interface OrderTotals {
   overpaid_by: number;
   payment_status: 'Unpaid' | 'Partial' | 'Fully Paid' | 'Overpaid' | string;
   downpayment?: { required: number; paid_synced: number; met: boolean };
+  /** migration 015 */
+  pieces?: number;
+  total_refunded?: number;
+  max_refund?: number;
 }
 
 export interface StockCheck {
@@ -206,6 +322,12 @@ export interface OrderDetail {
   consumables_deducted?: ConsumableUsed[];
   /** PB 18: misprints / losses recorded against this order, newest first (absent on an older server) */
   material_losses?: MaterialLoss[];
+  /** migration 015 (absent on an older server) */
+  print_details?: PrintDetail[];
+  deliveries?: Delivery[];
+  fulfillment?: Fulfillment;
+  completion?: Completion;
+  has_garments?: boolean;
 }
 
 /** GET /api/orders */

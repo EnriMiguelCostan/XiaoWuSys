@@ -126,7 +126,8 @@ describe('permissions only read what the server decided', () => {
   });
 
   it('roleHelp() is display text for server role names, empty for unknown ones', () => {
-    assert.match(roleHelp('Staff'), /View the catalog/);
+    assert.match(roleHelp('Production'), /View the inventory/); // Staff and Production swapped (migration 015)
+    assert.match(roleHelp('Staff'), /Orders, payments/);
     assert.equal(roleHelp('Cashier'), '');
     assert.equal(roleHelp(''), '');
     assert.equal(roleHelp('toString'), '');

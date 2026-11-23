@@ -6,6 +6,7 @@
 //   money      -> number (2 dp)          Postgres NUMERIC comes back as a string otherwise
 //   rate       -> number (3 dp)          usage per piece, NUMERIC(10,3) (migration 011)
 //   timestamp  -> 'YYYY-MM-DDTHH:MM:SS'  Postgres Date objects vs SQLite text otherwise
+//   date       -> 'YYYY-MM-DD'           a calendar day (migration 015: cheque date)
 //   + version      cloud last_modified (online) / last cloud version seen (offline)
 //   + sync_status  'synced' | 'pending_insert' | 'pending_update'
 //   + sync_conflict true when an offline edit is blocked by a newer cloud edit (C3)
@@ -30,7 +31,60 @@ const ENTITIES = {
       // PB 23 (migration 012): why the Owner cancelled (voided) the order
       cancellation_reason: 'text',
       // PB 23 / D2 (migration 013): archived (hidden, read-only, kept forever) and by whom
-      archived_at: 'timestamp', archived_by: 'text'
+      archived_at: 'timestamp', archived_by: 'text',
+      // migration 015: instructions for the job, and the quote's labor / incidental parts
+      order_description: 'text', labor_amount: 'money', incidental_amount: 'money',
+      adjustment_amount: 'money', adjustment_reason: 'text' // a price cut after approval, with its reason
+    }
+  },
+  // migration 015: sizes / names / numbers printed on an order (no stock of their own)
+  order_print_details: {
+    id: 'print_detail_id',
+    fields: {
+      print_detail_id: 'text', order_id: 'text', line_item_id: 'text', print_type: 'text', quantity: 'int',
+      size: 'text', custom_name: 'text', custom_number: 'text', notes: 'text', created_by: 'text', created_at: 'timestamp'
+    }
+  },
+  // migration 015: pieces handed to the customer, batch by batch
+  order_deliveries: {
+    id: 'delivery_id',
+    fields: {
+      delivery_id: 'text', order_id: 'text', batch_no: 'int', quantity: 'int', delivered_at: 'timestamp', method: 'text',
+      received_by_name: 'text', notes: 'text', recorded_by: 'text', created_at: 'timestamp'
+    }
+  },
+  // migration 015: supplier profiles
+  suppliers: {
+    id: 'supplier_id',
+    fields: {
+      supplier_id: 'text', supplier_name: 'text', contact_person: 'text', contact_number: 'text', email: 'text',
+      address: 'text', notes: 'text', archived_at: 'timestamp', archived_by: 'text', created_at: 'timestamp'
+    }
+  },
+  // migration 015: stock in (SI-), stock out (SO-), stock count (SC-). Cloud only (not mirrored)
+  stock_documents: {
+    id: 'document_id',
+    fields: {
+      document_id: 'text', document_type: 'text', document_no: 'text', reason: 'text', supplier_id: 'text', order_id: 'text',
+      reference_type: 'text', reference_no: 'text', occurred_at: 'timestamp', notes: 'text', total_cost: 'money',
+      recorded_by: 'text', recorded_role: 'text', created_at: 'timestamp', edited_at: 'timestamp', edited_by: 'text',
+      voided_at: 'timestamp', voided_by: 'text', void_reason: 'text'
+    }
+  },
+  stock_document_lines: {
+    id: 'line_id',
+    fields: {
+      line_id: 'text', document_id: 'text', line_no: 'int', inventory_id: 'text', item_name: 'text', unit: 'text',
+      quantity: 'int', system_quantity: 'int', unit_cost: 'money'
+    }
+  },
+  // migration 015: the stock card, one row per change of the quantity on hand. Cloud only
+  stock_movements: {
+    id: 'movement_id',
+    fields: {
+      movement_id: 'text', inventory_id: 'text', item_name: 'text', movement_type: 'text', quantity_change: 'int',
+      balance_after: 'int', unit_cost: 'money', reference_type: 'text', reference_id: 'text', reference_no: 'text',
+      note: 'text', performed_by: 'text', performed_role: 'text', occurred_at: 'timestamp', created_at: 'timestamp'
     }
   },
   // PB 22 (migration 012): rent, electricity, wages... for the true-cost P&L
@@ -81,7 +135,12 @@ const ENTITIES = {
       received_by: 'text', // user_id from the login token (migration 008); null for older payments
       receipt_no: 'text',  // AR-YYYY-NNNN, given by the cloud database (null until an offline payment syncs)
       // PB 23 (migration 012): a void is a negative payment pointing at the one it reverses
-      voids_payment_id: 'text', void_reason: 'text'
+      voids_payment_id: 'text', void_reason: 'text',
+      // migration 015: who paid and the details each method needs; refunds; verification.
+      // payment_date is when the customer paid (may be earlier than recorded_at)
+      payer_name: 'text', reference_no: 'text', bank_name: 'text', account_name: 'text', cheque_no: 'text',
+      cheque_date: 'date', payment_notes: 'text', is_refund: 'bool', refund_reason: 'text',
+      verified_by: 'text', verified_at: 'timestamp', recorded_at: 'timestamp'
     }
   },
   material_loss: {
@@ -90,7 +149,8 @@ const ENTITIES = {
       loss_id: 'text', order_id: 'text', inventory_id: 'text', quantity_lost: 'int', loss_reason: 'text',
       date_recorded: 'timestamp', financial_cost: 'money',
       // PB 18 / PB 19 (migration 012): standard reason, diagnosed cause, order status at the time
-      reason_code: 'text', loss_category: 'text', production_stage: 'text', is_statistical_anomaly: 'bool'
+      reason_code: 'text', loss_category: 'text', production_stage: 'text', is_statistical_anomaly: 'bool',
+      loss_batch_id: 'text' // migration 015: losses recorded together (bulk waste)
     }
   },
   inventory_items: {
@@ -99,14 +159,17 @@ const ENTITIES = {
       inventory_id: 'text', item_name: 'text', item_category: 'text', quantity_available: 'int',
       quantity_reserved: 'int', minimum_threshold: 'int', unit_cost: 'money',
       unit: 'text', supplier: 'text', deleted_at: 'timestamp', deleted_by: 'text',
-      selling_price: 'money' // PB 11 (migration 011): charged per piece before volume discounts
+      selling_price: 'money', // PB 11 (migration 011): charged per piece before volume discounts
+      supplier_id: 'text', has_sizes: 'bool' // migration 015: usual supplier; a garment (print details have sizes)
     }
   },
   customers: {
     id: 'customer_id',
     fields: {
       customer_id: 'text', full_name: 'text', contact_number: 'text', platform_source: 'text',
-      archived_at: 'timestamp', archived_by: 'text' // PB 23 / D2 (migration 013)
+      archived_at: 'timestamp', archived_by: 'text', // PB 23 / D2 (migration 013)
+      // migration 015: client profile
+      customer_type: 'text', contact_person: 'text', email: 'text', address: 'text', social_media: 'text', notes: 'text'
     }
   }
 };
@@ -122,6 +185,9 @@ const columnExpr = (dialect, alias, col, type) => {
     return dialect === 'pg'
       ? `to_char(${ref}, 'YYYY-MM-DD"T"HH24:MI:SS') AS ${col}`
       : `strftime('%Y-%m-%dT%H:%M:%S', ${ref}) AS ${col}`;
+  }
+  if (type === 'date') {
+    return dialect === 'pg' ? `to_char(${ref}, 'YYYY-MM-DD') AS ${col}` : `substr(${ref}, 1, 10) AS ${col}`;
   }
   if ((type === 'money' || type === 'rate') && dialect === 'pg') return `${ref}::text AS ${col}`;
   return `${ref} AS ${col}`;

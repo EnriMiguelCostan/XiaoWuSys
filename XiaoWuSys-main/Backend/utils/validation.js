@@ -20,7 +20,12 @@ const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Asia/Manila';
 const EARLIEST_DAY = '2018-01-01';
 const LATEST_DAY = '2034-12-31';
 
-const PAYMENT_TYPES = ['Cash', 'GCash', 'Bank Transfer'];
+// Migration 015 adds Maya, PayPal, cheque, card and "Other" (each with the details it needs:
+// services/domain/payments.js PAYMENT_METHOD_RULES)
+const PAYMENT_TYPES = ['Cash', 'GCash', 'Maya', 'PayPal', 'Bank Transfer', 'Cheque', 'Credit/Debit Card', 'Other'];
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+// Any phone a supplier may give: mobile, landline with area code, +63 ... (7 to 20 characters)
+const PHONE_PATTERN = /^\+?[0-9(][0-9 ()-]{5,18}[0-9]$/;
 // Sprint 11 / PB 13 adds 'Approved'; PB 14 (migration 010) adds the optional 'Pressing' step:
 // Pending -> Approved -> Printing -> (Pressing ->) Completed
 const PRODUCTION_STATUSES = ['Pending', 'Approved', 'Printing', 'Pressing', 'Completed', 'Delayed', 'Cancelled'];
@@ -93,10 +98,29 @@ const FIELD_LABELS = {
   expense_date: 'Date', description: 'Description', from: 'Start date', to: 'End date', payment_id: 'Payment',
   expense_id: 'Expense',
   // migration 013 (PB 23 archiving)
-  include_archived: 'Show archived', archived_at: 'Archived on', customer: 'Customer'
+  include_archived: 'Show archived', archived_at: 'Archived on', customer: 'Customer',
+  // migration 015 (inventory system, client profiles, payments, deliveries)
+  supplier_id: 'Supplier', supplier_name: 'Supplier name', contact_person: 'Contact person', email: 'Email',
+  address: 'Address', notes: 'Notes', has_sizes: 'Has sizes', document_type: 'Kind of record', reference_type: 'Kind of paper',
+  reference_no: 'Reference number', occurred_at: 'Date and time', lines: 'Items', unit_cost_line: 'Unit cost',
+  counted_quantity: 'Counted quantity', order_description: 'Order description', labor_amount: 'Labor and services',
+  incidental_amount: 'Incidental charges', incidental_percent: 'Incidental charges (%)', payer_name: 'Paid by',
+  bank_name: 'Bank', account_name: 'Sender account name', cheque_no: 'Cheque number', cheque_date: 'Cheque date',
+  payment_notes: 'Payment notes', payment_date: 'Date paid', refund_reason: 'Reason for the refund',
+  customer_type: 'Client type', social_media: 'Social media', print_type: 'What is printed', line_item_id: 'Material',
+  batch_no: 'Batch', delivered_at: 'Date delivered', method: 'How it was handed over', received_by_name: 'Received by',
+  allow_unpaid: 'Complete with a balance due', month: 'Month', movement_type: 'Movement'
 };
 const labelOf = (field) =>
   FIELD_LABELS[field] || String(field).replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+
+// A wall-clock time in the business timezone ('YYYY-MM-DDTHH:MM:SS') -> the Date it is.
+// Works for any zone: the offset is read from Intl for that moment (Manila has no DST anyway).
+const shopTimeToUtc = (local, timeZone = BUSINESS_TIMEZONE) => {
+  const asUtc = new Date(`${local}Z`);
+  const seen = new Date(`${localDateTime(asUtc, timeZone)}Z`); // the same instant on the shop clock
+  return new Date(asUtc.getTime() - (seen.getTime() - asUtc.getTime()));
+};
 
 // 'October 27, 2026' for a 'YYYY-MM-DD' string
 const friendlyDate = (ymd) => {
@@ -198,6 +222,48 @@ const createValidator = () => {
       const parsed = parseDeadline(value);
       return parsed.error ? fail(field, parsed.error) : parsed.value;
     },
+    // A date and time on the shop's clock ('YYYY-MM-DDTHH:MM' or with seconds), for something
+    // that already happened: a delivery received, a payment made, a count. Not in the future
+    // (a minute of clock drift is allowed), not before EARLIEST_DAY.
+    // -> the UTC timestamp 'YYYY-MM-DD HH:MM:SS' the TIMESTAMP columns store (like CURRENT_TIMESTAMP)
+    pastShopDateTime: (value, field, { required = true, now = new Date() } = {}) => {
+      if (isMissing(value)) return required ? fail(field, 'is required. Please pick the date and time.') : null;
+      const m = typeof value === 'string'
+        ? /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value.trim()) : null;
+      if (!m) return fail(field, 'must be a date and time. Please pick them from the calendar.');
+      const [, y, mo, d, hh, mi, ss = '00'] = m;
+      const day = new Date(Date.UTC(+y, +mo - 1, +d));
+      if (day.getUTCFullYear() !== +y || day.getUTCMonth() !== +mo - 1 || day.getUTCDate() !== +d) {
+        return fail(field, 'is not a real date. Please pick one from the calendar.');
+      }
+      if (+hh > 23 || +mi > 59 || +ss > 59) return fail(field, 'has a time that does not exist. Please check the time.');
+      const ymd = `${y}-${mo}-${d}`;
+      if (ymd < EARLIEST_DAY) return fail(field, `cannot be before ${friendlyDate(EARLIEST_DAY)}.`);
+      const utc = shopTimeToUtc(`${ymd}T${hh}:${mi}:${ss}`);
+      if (utc.getTime() > now.getTime() + 60 * 1000) {
+        return fail(field, 'cannot be in the future. Choose the date and time it really happened.');
+      }
+      return utc.toISOString().slice(0, 19).replace('T', ' ');
+    },
+    email: (value, field, { required = false } = {}) => {
+      if (isMissing(value)) return required ? fail(field, 'is required. Please fill it in.') : null;
+      if (typeof value !== 'string') return fail(field, 'must be written as text.');
+      const text = value.trim();
+      if (text.length > 255 || !EMAIL_PATTERN.test(text)) return fail(field, 'must look like name@example.com.');
+      return text;
+    },
+    phone: (value, field, { required = false } = {}) => {
+      if (isMissing(value)) return required ? fail(field, 'is required. Please fill it in.') : null;
+      if (typeof value !== 'string' || !PHONE_PATTERN.test(value.trim())) {
+        return fail(field, 'must be a phone number, like 09171234567 or (082) 123 4567.');
+      }
+      return value.trim().replace(/\s+/g, ' ');
+    },
+    bool: (value, field, { defaultValue = false } = {}) => {
+      if (value === undefined || value === null) return defaultValue;
+      if (typeof value !== 'boolean') return fail(field, 'must be yes or no (true or false).');
+      return value;
+    },
     // Philippine mobile number: exactly 11 digits starting with 0 (spaces/dashes ignored)
     mobileNumber: (value, field, { required = false } = {}) => {
       if (isMissing(value)) return required ? fail(field, 'is required. Please fill it in.') : null;
@@ -226,6 +292,7 @@ module.exports = {
   EARLIEST_DAY,
   LATEST_DAY,
   localDateTime,
+  shopTimeToUtc,
   PAYMENT_TYPES,
   PRODUCTION_STATUSES,
   ID_PATTERN,

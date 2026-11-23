@@ -23,8 +23,12 @@ const EXPECTED_TRIGGERS = [
   'trg_audit_log_append_only', // migration 009
   'trg_order_status_history_append_only', 'trg_order_profiles_notify', // migration 010
   'trg_consumable_rates_last_modified', 'trg_order_consumables_log_append_only', // migration 011
-  'trg_overhead_expenses_last_modified' // migration 012
+  'trg_overhead_expenses_last_modified', // migration 012
   // migration 013 adds columns only (archived_at / archived_by, unit_cost): checked through ENTITIES
+  // migration 015: suppliers, stock documents and their numbers, the stock card, print details, deliveries
+  'trg_suppliers_last_modified', 'trg_stock_documents_assign_no', 'trg_stock_documents_last_modified',
+  'trg_stock_movements_append_only', 'trg_inventory_items_stock_movement',
+  'trg_order_print_details_last_modified', 'trg_order_deliveries_last_modified'
 ];
 
 const checkCloudSchema = async (pgPool) => {

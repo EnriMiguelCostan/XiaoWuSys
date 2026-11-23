@@ -87,7 +87,7 @@ describe('Sync: offline payments from two branches', () => {
     cloud = createScriptedCloud();
     branchA = await startTestServer({ dbPath: await prepareBranch(dir, 'branch-a'), pgPool: cloud });
     branchB = await startTestServer({ dbPath: await prepareBranch(dir, 'branch-b'), pgPool: cloud });
-    await branchA.login('production');
+    await branchA.login('staff');
     await branchB.login('admin');
   });
   after(async () => {
@@ -97,12 +97,12 @@ describe('Sync: offline payments from two branches', () => {
   });
 
   it('lets each branch take a payment within its own copy of the balance while offline', async () => {
-    const a = await branchA.request('POST', '/api/orders/o-1/payments', { token: branchA.tokens.production, body: { amount: 800, payment_type: 'Cash' } });
+    const a = await branchA.request('POST', '/api/orders/o-1/payments', { token: branchA.tokens.staff, body: { amount: 800, payment_type: 'Cash' } });
     assert.equal(a.status, 201, a.text);
     assert.equal(a.body.source, 'local');
-    const b = await branchB.request('POST', '/api/orders/o-1/payments', { token: branchB.tokens.admin, body: { amount: 700, payment_type: 'GCash' } });
+    const b = await branchB.request('POST', '/api/orders/o-1/payments', { token: branchB.tokens.admin, body: { amount: 700, payment_type: 'GCash', reference_no: '1004 123 456789' } });
     assert.equal(b.status, 201, b.text);
-    const tooMuch = await branchA.request('POST', '/api/orders/o-1/payments', { token: branchA.tokens.production, body: { amount: 200.01, payment_type: 'Cash' } });
+    const tooMuch = await branchA.request('POST', '/api/orders/o-1/payments', { token: branchA.tokens.staff, body: { amount: 200.01, payment_type: 'Cash' } });
     assert.equal(tooMuch.status, 409, 'offline, the cap still applies to what this branch can see');
     assert.equal(tooMuch.body.remaining, 200);
   });
@@ -115,13 +115,13 @@ describe('Sync: offline payments from two branches', () => {
     assert.ok(insert, 'the payment was pushed');
     assert.ok(!/receipt_no/.test(insert.q), 'this computer never sends a receipt number');
     assert.ok(!/WHERE|SELECT/.test(insert.q), 'no balance check on sync: a payment is never dropped');
-    assert.match(insert.q, /\(payment_id, order_id, amount, payment_date, payment_type, received_by, last_modified\)/);
-    assert.ok(insert.params.includes('u-production'), 'the receiver is pushed');
+    assert.match(insert.q, /\(payment_id, order_id, amount, payment_date, payment_type, received_by, is_refund, recorded_at, last_modified\)/);
+    assert.ok(insert.params.includes('u-staff'), 'the receiver is pushed');
     assert.ok(cloud.queries.some((x) => /^SELECT 1 FROM payments WHERE payment_id = \$1$/.test(x.q)),
       'checks first, so a payment that is already in the cloud never uses up a number');
 
     const [row] = await sqliteAll(branchA.localDb, "SELECT receipt_no, sync_status, received_by FROM payments WHERE order_id = 'o-1'");
-    assert.deepEqual([row.receipt_no, row.sync_status, row.received_by], ['AR-2026-0001', 'synced', 'u-production']);
+    assert.deepEqual([row.receipt_no, row.sync_status, row.received_by], ['AR-2026-0001', 'synced', 'u-staff']);
     assert.equal(getLastSync().result, 'ok');
     assert.ok(getLastSync().at);
   });

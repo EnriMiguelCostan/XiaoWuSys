@@ -11,8 +11,8 @@ describe('Customers and orders', () => {
 
   before(async () => {
     t = await startTestServer();
-    token = await t.login('production');
-    await t.login('staff');
+    token = await t.login('staff');
+    await t.login('production');
     await t.login('owner');
     await t.login('admin');
     for (const it of fixtures.ITEMS) {
@@ -49,7 +49,7 @@ describe('Customers and orders', () => {
   let orderId;
   it('lets only the Owner put a price on a new order', async () => {
     const before = (await t.get('SELECT COUNT(*) AS n FROM order_profiles')).n;
-    for (const who of ['production', 'admin']) {
+    for (const who of ['staff', 'admin']) {
       const r = await t.request('POST', '/api/orders', {
         token: t.tokens[who],
         body: {
@@ -129,11 +129,11 @@ describe('Customers and orders', () => {
   });
 
   it('records payments and shows the balance', async () => {
-    let r = await t.request('POST', `/api/orders/${orderId}/payments`, { token, body: { amount: 26250, payment_type: 'GCash' } });
+    let r = await t.request('POST', `/api/orders/${orderId}/payments`, { token, body: { amount: 26250, payment_type: 'GCash', reference_no: '1004 123 456789' } });
     assert.equal(r.status, 201);
     r = await t.request('POST', `/api/orders/${orderId}/payments`, { token, body: { amount: 1000.5, payment_type: 'Cash' } });
     assert.equal(r.status, 201);
-    const d = await t.request('GET', `/api/orders/${orderId}`, { token: t.tokens.staff });
+    const d = await t.request('GET', `/api/orders/${orderId}`, { token: t.tokens.production });
     assert.equal(d.status, 200);
     assert.deepEqual([d.body.totals.total_paid, d.body.totals.balance], [27250.5, 25249.5]);
   });
@@ -148,29 +148,49 @@ describe('Customers and orders', () => {
     const none = await t.request('PATCH', `/api/orders/${orderId}/details`, { token: owner, body: { total_quote_amount: 53000 } });
     assert.deepEqual(none.body.changed, []);
 
-    for (const who of ['production', 'admin']) {
+    for (const who of ['staff', 'admin']) {
       const blocked = await t.request('PATCH', `/api/orders/${orderId}/details`, { token: t.tokens[who], body: { total_quote_amount: 1 } });
       assert.equal(blocked.status, 403, who);
       assert.equal(blocked.body.error, 'QUOTE_OWNER_ONLY');
     }
     const deadline = await t.request('PATCH', `/api/orders/${orderId}/details`, { token, body: { production_deadline: shopDate(15) } });
     assert.equal(deadline.status, 200, 'production staff can still move the deadline');
-    const staff = await t.request('PATCH', `/api/orders/${orderId}/details`, { token: t.tokens.staff, body: { total_quote_amount: 1 } });
+    const staff = await t.request('PATCH', `/api/orders/${orderId}/details`, { token: t.tokens.production, body: { total_quote_amount: 1 } });
     assert.equal(staff.status, 403);
     assert.equal((await t.get('SELECT total_quote_amount AS q FROM order_profiles WHERE order_id = ?', [orderId])).q, 53000, 'unchanged');
   });
 
-  it('adds print details (sizes, names, numbers) to an order', async () => {
-    const r = await t.request('POST', `/api/orders/${orderId}/items`, {
+  it('adds print details (sizes, names, numbers) to an order, apart from its materials', async () => {
+    // Migration 015: print details no longer pose as materials without stock
+    const asMaterial = await t.request('POST', `/api/orders/${orderId}/items`, {
       token, body: { product_type: 'Jersey print', quantity: 1, size: 'L', custom_name: 'DELA CRUZ', custom_number: '7' }
+    });
+    assert.deepEqual([asMaterial.status, asMaterial.body.details[0].field], [400, 'inventory_id']);
+    const r = await t.request('POST', `/api/orders/${orderId}/print-details`, {
+      token, body: { print_type: 'Jersey print', quantity: 1, size: 'L', custom_name: 'DELA CRUZ', custom_number: '7' }
     });
     assert.equal(r.status, 201, r.text);
     const d = await t.request('GET', `/api/orders/${orderId}`, { token });
-    assert.ok(d.body.items.some((i) => i.custom_name === 'DELA CRUZ' && i.size === 'L'));
+    const line = d.body.print_details.find((p) => p.custom_name === 'DELA CRUZ');
+    assert.deepEqual([line.size, line.custom_number, line.on_garment], ['L', '7', true], 'it goes on the order\u2019s only garment');
+    assert.ok(d.body.items.every((i) => i.inventory_id), 'the materials are all catalog items');
+    assert.equal(d.body.has_garments, true);
+
+    // A size belongs on a garment only
+    const mug = await t.request('POST', `/api/orders/${orderId}/print-details`, {
+      token, body: { print_type: 'Name on paper', quantity: 1, size: 'M', line_item_id: d.body.items.find((i) => !i.has_sizes).line_item_id }
+    });
+    assert.deepEqual([mug.status, mug.body.details[0].field], [400, 'size']);
+    // Never more names than shirts
+    const shirtLine = d.body.items.find((i) => i.has_sizes);
+    const tooMany = await t.request('POST', `/api/orders/${orderId}/print-details`, {
+      token, body: { print_type: 'Jersey print', quantity: shirtLine.quantity, line_item_id: shirtLine.line_item_id }
+    });
+    assert.deepEqual([tooMany.status, tooMany.body.error], [409, 'PRINT_DETAILS_EXCEED_MATERIAL']);
   });
 
   it('lists orders newest first and filters by customer', async () => {
-    const all = await t.request('GET', '/api/orders', { token: t.tokens.staff });
+    const all = await t.request('GET', '/api/orders', { token: t.tokens.production });
     assert.equal(all.body.orders.length, 2);
     const one = await t.request('GET', `/api/orders?customer_id=${customers['Juan Dela Cruz']}`, { token });
     assert.equal(one.body.orders.length, 1);
@@ -184,7 +204,7 @@ describe('Customers and orders', () => {
   });
 
   it('lets only the Owner cancel (void) an order', async () => {
-    for (const who of ['production', 'admin']) {
+    for (const who of ['staff', 'admin']) {
       const r = await t.request('PATCH', `/api/orders/${orderId}/status`, { token: t.tokens[who], body: { status: 'Cancelled' } });
       assert.equal(r.status, 403, who);
       assert.equal(r.body.error, 'VOID_OWNER_ONLY');

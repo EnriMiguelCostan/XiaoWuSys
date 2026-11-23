@@ -14,7 +14,7 @@ describe('Who may do what (rules only)', () => {
     }
     assert.ok(can('Admin', 'view_finance'));
     assert.ok(!can('Admin', 'set_quote'));
-    assert.deepEqual(capabilitiesFor('Staff'), ['view_orders']);
+    assert.deepEqual(capabilitiesFor('Production'), ['view_orders', 'view_stock']);
     assert.throws(() => can('Owner', 'fly_to_the_moon'), /Unknown capability/);
   });
 
@@ -23,22 +23,28 @@ describe('Who may do what (rules only)', () => {
     assert.deepEqual(allowedActions(pending, 'Owner'), {
       approve: true, statuses: ['Cancelled'], edit_deadline: true, edit_quote: true, generate_quote: true, apply_discount: true,
       link_design: true, add_items: true, record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true,
-      print_quote: true, void_payment: true, log_loss: true, archive_order: false, restore_order: false
+      print_quote: true, void_payment: true, log_loss: true, archive_order: false, restore_order: false,
+      // migration 015
+      edit_description: true, add_print_details: true, record_delivery: false, max_delivery: 0, complete_blocked_reason: null,
+      complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: true, edit_payment: true, adjust_price: false
     });
     assert.deepEqual(allowedActions(pending, 'Admin'), {
       approve: false, statuses: [], edit_deadline: true, edit_quote: false, generate_quote: false, apply_discount: false,
       link_design: true, add_items: true, record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true,
-      print_quote: true, void_payment: false, log_loss: true, archive_order: false, restore_order: false
+      print_quote: true, void_payment: false, log_loss: true, archive_order: false, restore_order: false,
+      // migration 015
+      edit_description: true, add_print_details: true, record_delivery: false, max_delivery: 0, complete_blocked_reason: null,
+      complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: true, edit_payment: true, adjust_price: false
     });
     assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Owner').print_quote, false, 'no quotation to print yet');
-    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Production').statuses, ['Pressing', 'Completed'], 'no Cancel for Production');
-    assert.deepEqual(allowedActions({ production_status: 'Delayed' }, 'Production').statuses, ['Pending']);
+    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Staff').statuses, ['Pressing', 'Completed'], 'no Cancel for Production');
+    assert.deepEqual(allowedActions({ production_status: 'Delayed' }, 'Staff').statuses, ['Pending']);
     const approved = allowedActions({ production_status: 'Approved' }, 'Owner');
     assert.deepEqual([approved.edit_quote, approved.generate_quote, approved.apply_discount], [false, false, false], 'the quote is frozen after approval');
     const closed = allowedActions({ production_status: 'Cancelled' }, 'Owner');
     assert.deepEqual([closed.statuses, closed.edit_deadline, closed.record_payment, closed.log_loss, closed.void_payment],
       [[], false, false, false, true], 'a cancelled order can still have its payments voided (refunds)');
-    const { print_receipt: staffPrints, print_quote: staffQuote, ...staff } = allowedActions(pending, 'Staff');
+    const { print_receipt: staffPrints, print_quote: staffQuote, ...staff } = allowedActions(pending, 'Production');
     assert.deepEqual([staffPrints, staffQuote], [true, true], 'Staff can print a payment acknowledgement and the quotation');
     assert.ok(Object.values(staff).every((v) => v === false || v === 0 || v === null || (Array.isArray(v) && v.length === 0)),
       'otherwise Staff can only look');
@@ -72,22 +78,22 @@ describe('Owner-only rules and order screens (API)', () => {
 
   before(async () => {
     t = await startTestServer();
-    await Promise.all(['owner', 'admin', 'production', 'staff'].map((u) => t.login(u)));
+    await Promise.all(['owner', 'admin', 'staff', 'production'].map((u) => t.login(u)));
     for (const it of fixtures.ITEMS) {
-      const r = await t.request('POST', '/api/inventory', { token: t.tokens.production, body: it });
+      const r = await t.request('POST', '/api/inventory', { token: t.tokens.staff, body: it });
       items[it.item_name] = r.body.item.inventory_id;
     }
     for (const c of fixtures.CUSTOMERS) {
-      const r = await t.request('POST', '/api/customers', { token: t.tokens.production, body: c });
+      const r = await t.request('POST', '/api/customers', { token: t.tokens.staff, body: c });
       customers[c.full_name] = r.body.customer.customer_id;
     }
     const pending = await t.request('POST', '/api/orders', {
-      token: t.tokens.production,
+      token: t.tokens.staff,
       body: { customer_id: customers['Maria Santos'], production_deadline: shopDate(6), required_items: [{ inventory_id: items['Custom Shirt'], quantity_needed: 20 }] }
     });
     pendingId = pending.body.order_id;
     const delayed = await t.request('POST', '/api/orders', {
-      token: t.tokens.production,
+      token: t.tokens.staff,
       body: {
         customer_id: customers['Juan Dela Cruz'], production_deadline: shopDate(30), resolution: 'Delayed',
         required_items: [{ inventory_id: items['Custom Shirt'], quantity_needed: 400 }, { inventory_id: items['Valiant Columnar Notebook'], quantity_needed: 2 }]
@@ -106,9 +112,9 @@ describe('Owner-only rules and order screens (API)', () => {
   });
 
   it('answers "who am I" from the login token', async () => {
-    const r = await t.request('GET', '/api/auth/me', { token: t.tokens.production });
+    const r = await t.request('GET', '/api/auth/me', { token: t.tokens.staff });
     assert.equal(r.status, 200);
-    assert.deepEqual(r.body.user, { user_id: 'u-production', role: 'Production' });
+    assert.deepEqual(r.body.user, { user_id: 'u-staff', role: 'Staff' });
     assert.ok(r.body.capabilities.includes('create_order'));
     assert.ok(!r.body.capabilities.includes('set_quote'));
     assert.equal((await t.request('GET', '/api/auth/me')).status, 401);
@@ -138,7 +144,7 @@ describe('Owner-only rules and order screens (API)', () => {
 
   it('still lets staff record a customer\u2019s "cancel" choice when an order is halted for stock', async () => {
     const r = await t.request('POST', '/api/orders', {
-      token: t.tokens.production,
+      token: t.tokens.staff,
       body: { customer_id: customers['Maria Santos'], production_deadline: shopDate(3), resolution: 'Cancelled', required_items: [{ inventory_id: items['Deli A4 Paper'], quantity_needed: 50 }] }
     });
     assert.equal(r.status, 201, r.text);
@@ -154,16 +160,16 @@ describe('Owner-only rules and order screens (API)', () => {
     assert.deepEqual([shirt.item_name, shirt.needed, shirt.free, shirt.shortfall], ['Custom Shirt', 400, 361, 39]);
     assert.ok(!check.shortfalls.some((s) => s.inventory_id === items['Valiant Columnar Notebook']), 'enough notebooks');
 
-    const held = await t.request('GET', `/api/orders/${pendingId}`, { token: t.tokens.staff });
+    const held = await t.request('GET', `/api/orders/${pendingId}`, { token: t.tokens.production });
     assert.deepEqual([held.body.stock_check.needs_reservation, held.body.stock_check.sufficient], [false, true]);
   });
 
   it('counts a material that was deleted as missing', async () => {
     const order = await t.request('POST', '/api/orders', {
-      token: t.tokens.production,
+      token: t.tokens.staff,
       body: { customer_id: customers['Juan Dela Cruz'], production_deadline: shopDate(9), resolution: 'Delayed', required_items: [{ inventory_id: items['B&E Oslo Drawing Paper'], quantity_needed: 2 }] }
     });
-    assert.equal((await t.request('DELETE', `/api/inventory/${items['B&E Oslo Drawing Paper']}`, { token: t.tokens.production })).status, 200);
+    assert.equal((await t.request('DELETE', `/api/inventory/${items['B&E Oslo Drawing Paper']}`, { token: t.tokens.staff })).status, 200);
     const r = await t.request('GET', `/api/orders/${order.body.order_id}`, { token: t.tokens.owner });
     assert.equal(r.body.stock_check.sufficient, false);
     assert.deepEqual(r.body.stock_check.shortfalls.map((s) => [s.missing, s.needed]), [[true, 2]]);
@@ -171,10 +177,10 @@ describe('Owner-only rules and order screens (API)', () => {
 
   it('finds an order by its number, ignoring upper/lower case', async () => {
     await t.run("UPDATE order_profiles SET tracking_no = 'XM-2026-0007' WHERE order_id = ?", [pendingId]);
-    const r = await t.request('GET', '/api/orders?tracking_no=xm-2026-0007', { token: t.tokens.staff });
+    const r = await t.request('GET', '/api/orders?tracking_no=xm-2026-0007', { token: t.tokens.production });
     assert.equal(r.status, 200, r.text);
     assert.deepEqual(r.body.orders.map((o) => [o.order_id, o.tracking_no]), [[pendingId, 'XM-2026-0007']]);
-    const bad = await t.request('GET', '/api/orders?tracking_no=2026-7', { token: t.tokens.staff });
+    const bad = await t.request('GET', '/api/orders?tracking_no=2026-7', { token: t.tokens.production });
     assert.equal(bad.status, 400);
     assert.equal(bad.body.message, 'Order number must look like XM-2026-0123.');
     assert.equal(bad.body.details[0].field, 'tracking_no');

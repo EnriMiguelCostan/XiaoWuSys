@@ -6,6 +6,10 @@ export type Capability =
   | 'set_quote' | 'apply_discount' | 'void_order' | 'approve_order'
   | 'view_finance' | 'manage_accounts'
   | 'edit_inventory' | 'purge_inventory'
+  // migration 015
+  | 'record_delivery' | 'refund_payment' | 'complete_with_balance' | 'verify_payment' | 'edit_payment'
+  | 'view_stock' | 'receive_stock' | 'issue_stock' | 'count_stock' | 'void_stock_document'
+  | 'manage_suppliers' | 'archive_supplier' | 'edit_customer'
   | (string & {});
 
 export interface SessionUser {
@@ -44,6 +48,26 @@ export interface OrderActions {
   archive_order: boolean;
   /** bring an archived order back (Owner, Admin); an archived order allows nothing else */
   restore_order: boolean;
+  // migration 015
+  /** change the order's description / instructions */
+  edit_description: boolean;
+  /** add / change / remove print details (sizes, names, numbers, texts) */
+  add_print_details: boolean;
+  /** record a batch handed to the customer; max_delivery = pieces still to hand over */
+  record_delivery: boolean;
+  max_delivery: number;
+  /** why "Mark completed" cannot be used yet (null = it can), in plain words */
+  complete_blocked_reason: string | null;
+  /** the Owner may complete it with a balance due (after confirming) */
+  complete_with_balance: boolean;
+  /** the Owner may refund up to max_refund */
+  refund_payment: boolean;
+  max_refund: number;
+  /** Owner / Admin: mark a non-cash payment as received; correct a payment's details */
+  verify_payment: boolean;
+  edit_payment: boolean;
+  /** the Owner may cut the price after approval (late delivery, production error) */
+  adjust_price: boolean;
   [key: string]: unknown;
 }
 

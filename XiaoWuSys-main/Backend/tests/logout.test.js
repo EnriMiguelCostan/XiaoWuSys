@@ -64,7 +64,7 @@ describe('Logging out one device', () => {
   });
 
   it('accepts a logout from a session that started before this update, and lets it expire', async () => {
-    const legacy = jwt.sign({ user_id: 'u-staff', role: 'Staff', ims: Date.now() }, process.env.JWT_SECRET, { expiresIn: '8h' });
+    const legacy = jwt.sign({ user_id: 'u-staff', role: 'Production', ims: Date.now() }, process.env.JWT_SECRET, { expiresIn: '8h' });
     const r = await t.request('POST', '/api/auth/logout', { token: legacy });
     assert.equal(r.status, 200);
     assert.equal(r.body.revoked, false);

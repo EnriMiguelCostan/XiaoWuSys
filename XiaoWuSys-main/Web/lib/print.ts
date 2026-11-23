@@ -6,6 +6,7 @@ import { hasOrderNumber } from '@xiaowu/client-core/orders';
 import { escapeHtml, receiptHtml } from '@xiaowu/client-core/receipt';
 import { lineText, type Customer, type OrderDetail, type Payment } from '@/lib/orders';
 import type { ProfitAndLoss } from '@/lib/reports';
+import type { StockDocumentDetail } from '@/lib/stock';
 
 // Opens a print window with the given HTML. false when the browser blocked the pop-up.
 const printHtml = (html: string, size: string) => {
@@ -26,11 +27,15 @@ export const printReceipt = (detail: OrderDetail, payment: Payment, customer: Cu
 export const printJobOrder = (detail: OrderDetail, customer: Customer | undefined) => {
   const { order, items, totals, payments } = detail;
   const label = hasOrderNumber(order) ? String(order.tracking_no) : '(number given after sync)';
+  // Materials (stock) and print details (sizes, names, numbers, texts) are separate lists (migration 015)
   const rows = items
+    .map((it) => `<tr><td>${escapeHtml(it.product_type)}</td><td>${escapeHtml(it.unit || '')}</td><td class="n">${escapeHtml(it.quantity)}</td></tr>`)
+    .join('');
+  const prints = (detail.print_details ?? [])
     .map(
-      (it) =>
-        `<tr><td>${escapeHtml(it.product_type)}</td><td>${escapeHtml(it.size || '')}</td><td>${escapeHtml(it.custom_name || '')}</td>` +
-        `<td>${escapeHtml(it.custom_number || '')}</td><td class="n">${escapeHtml(it.quantity)}</td></tr>`
+      (p) =>
+        `<tr><td>${escapeHtml(p.print_type)}${p.material_name ? ` (${escapeHtml(p.material_name)})` : ''}</td><td>${escapeHtml(p.size || '')}</td>` +
+        `<td>${escapeHtml(p.custom_name || '')}</td><td>${escapeHtml(p.custom_number || '')}</td><td>${escapeHtml(p.notes || '')}</td><td class="n">${escapeHtml(p.quantity)}</td></tr>`
     )
     .join('');
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Job Order ${escapeHtml(label)}</title>
@@ -41,9 +46,46 @@ th,td{border:1px solid #999;padding:6px;text-align:left;font-size:13px;overflow-
 <p class="meta"><b>Customer:</b> ${escapeHtml(customer?.full_name || order.customer_id)} ${customer?.contact_number ? `· ${escapeHtml(formatMobile(customer.contact_number))}` : ''}</p>
 <p class="meta"><b>Status:</b> ${escapeHtml(order.production_status)} · <b>Deadline:</b> ${escapeHtml(formatDateTime(order.production_deadline, { withTime: false }))}</p>
 ${order.design_drive_link ? `<p class="meta"><b>Design file:</b> ${escapeHtml(order.design_drive_link)}</p>` : ''}
-<table><thead><tr><th>Item / material</th><th>Size</th><th>Name</th><th>No.</th><th class="n">Qty</th></tr></thead><tbody>${rows}</tbody></table>
+${order.order_description ? `<p class="meta" style="white-space:pre-wrap"><b>Instructions:</b> ${escapeHtml(order.order_description)}</p>` : ''}
+<table><thead><tr><th>Material</th><th>Unit</th><th class="n">Qty</th></tr></thead><tbody>${rows}</tbody></table>
+${prints ? `<table><thead><tr><th>Print</th><th>Size</th><th>Name / text</th><th>No.</th><th>Notes</th><th class="n">Qty</th></tr></thead><tbody>${prints}</tbody></table>` : ''}
 <p class="meta"><b>Quote:</b> ${escapeHtml(peso(order.total_quote_amount))} · <b>Paid:</b> ${escapeHtml(peso(totals.total_paid))} (${payments.length} payment(s)) · <b>Balance:</b> ${escapeHtml(peso(totals.remaining))}${totals.payment_status ? ` · <b>Payment:</b> ${escapeHtml(totals.payment_status)}` : ''}</p>
 <div class="sign"><div>Prepared by</div><div>Printed by</div><div>Released to customer</div></div>
+<p><button onclick="window.print()">Print</button></p></body></html>`;
+  return printHtml(html, 'width=800,height=900');
+};
+
+/** Migration 015: a stock in / stock out / count record, as the server returned it. */
+export const printStockDocument = (detail: StockDocumentDetail) => {
+  const { document: d, lines } = detail;
+  const count = d.document_type === 'stock_count';
+  const body = lines
+    .map(
+      (l) =>
+        `<tr><td>${escapeHtml(l.item_name || l.inventory_id)}</td><td>${escapeHtml(l.unit || '')}</td>` +
+        (count
+          ? `<td class="n">${escapeHtml(l.system_quantity ?? '')}</td><td class="n">${escapeHtml(l.quantity)}</td><td class="n">${escapeHtml(l.difference ?? '')}</td>`
+          : `<td class="n">${escapeHtml(l.quantity)}</td><td class="n">${escapeHtml(peso(l.unit_cost))}</td><td class="n">${escapeHtml(peso(l.line_total ?? 0))}</td>`) +
+        '</tr>'
+    )
+    .join('');
+  const head = count
+    ? '<th class="n">System had</th><th class="n">Counted</th><th class="n">Difference</th>'
+    : '<th class="n">Qty</th><th class="n">Unit cost</th><th class="n">Amount</th>';
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(d.document_no || d.label)}</title>
+<style>body{font-family:Arial,sans-serif;margin:24px;color:#111}h1{font-size:20px;margin:0 0 4px}table{width:100%;border-collapse:collapse;margin:12px 0}
+th,td{border:1px solid #999;padding:6px;text-align:left;font-size:13px;overflow-wrap:anywhere}td.n,th.n{text-align:right}.meta{font-size:13px;margin:2px 0}
+.sign{margin-top:40px;display:flex;gap:40px}.sign div{flex:1;border-top:1px solid #333;padding-top:4px;font-size:12px}@media print{button{display:none}}</style></head><body>
+<h1>XiaoMei Printshop — ${escapeHtml(d.label)} ${escapeHtml(d.document_no || '')}</h1>
+<p class="meta"><b>Date:</b> ${escapeHtml(formatDateTime(d.occurred_at, { utc: true }))} · <b>Status:</b> ${escapeHtml(d.status)}</p>
+${d.supplier_name ? `<p class="meta"><b>Supplier:</b> ${escapeHtml(d.supplier_name)}</p>` : ''}
+${d.reference_no ? `<p class="meta"><b>${escapeHtml(d.reference_type || 'Reference')}:</b> ${escapeHtml(d.reference_no)}</p>` : ''}
+${d.reason && !count ? `<p class="meta"><b>Reason:</b> ${escapeHtml(d.reason)}</p>` : ''}
+${d.notes ? `<p class="meta"><b>Notes:</b> ${escapeHtml(d.notes)}</p>` : ''}
+<table><thead><tr><th>Item</th><th>Unit</th>${head}</tr></thead><tbody>${body}</tbody></table>
+${count ? '' : `<p class="meta"><b>Total:</b> ${escapeHtml(peso(d.total_cost))}</p>`}
+${d.voided_at ? `<p class="meta"><b>VOIDED:</b> ${escapeHtml(d.void_reason || '')}</p>` : ''}
+<div class="sign"><div>Recorded by: ${escapeHtml(d.recorded_by_name || '')}</div><div>Checked by</div><div>Received / released by</div></div>
 <p><button onclick="window.print()">Print</button></p></body></html>`;
   return printHtml(html, 'width=800,height=900');
 };

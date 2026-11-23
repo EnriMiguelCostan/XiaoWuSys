@@ -8,21 +8,22 @@
 // has decided this account may replace the other person's change: the form asks first, then
 // sends the same body again with override: true.
 import { useEffect, useState } from 'react';
-import { History, Link2, ListPlus, Pencil, Shirt, ShieldCheck } from 'lucide-react';
+import { FileText, History, Link2, ListPlus, Pencil, Shirt, ShieldCheck } from 'lucide-react';
 import { formatDateTime, formatMobile, peso, todayInManila } from '@xiaowu/client-core/format';
 import { hasOrderNumber, NUMBER_AFTER_SYNC, shortfallLines } from '@xiaowu/client-core/orders';
 import type { OrderActions } from '@xiaowu/client-core/permissions';
 import { DateInput } from '@/components/forms/date-input';
-import { Field, FormProblem, RequiredNote } from '@/components/forms/form-bits';
+import { Field, FormProblem } from '@/components/forms/form-bits';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { JumpToSection, ORDER_SECTION, type OrderSectionKey } from '@/components/orders/jump-to-section';
-import { RosterImportDialog } from '@/components/orders/roster-import-dialog';
 import { DeadlineBadge, OrderStatusBadge } from '@/components/orders/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
+import { useInventorySnapshot } from '@/hooks/use-inventory-snapshot';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useApi } from '@/hooks/use-api';
 import { errorMessage } from '@/lib/api';
@@ -30,7 +31,7 @@ import { toNumberInput } from '@/lib/inventory';
 import type { Customer, OrderDetail } from '@/lib/orders';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
-import { GARMENT_SIZES, MONEY_INPUT_MAX, NAME_CHARS, PRINT_LINE_LIMITS, TEXT_MAX } from '@/lib/input-limits';
+import { MONEY_INPUT_MAX, TEXT_MAX } from '@/lib/input-limits';
 
 type OnResult = (result: ResultMessage, reload: boolean) => void;
 /** Tells the sheet whether this section's edit form is open (it holds the edit lock meanwhile). */
@@ -158,6 +159,14 @@ export function OrderInfo({ detail, customer }: { detail: OrderDetail; customer:
         />
         {order.approved_at && <Info label="Approved" value={formatDateTime(order.approved_at, { utc: true })} sub="by the Owner" />}
       </dl>
+      {order.order_description && (
+        <div className="rounded-md border bg-card p-3">
+          <p className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+            <FileText className="size-3.5" aria-hidden /> Description / instructions
+          </p>
+          <p className="mt-1 text-sm whitespace-pre-wrap wrap-anywhere">{order.order_description}</p>
+        </div>
+      )}
       <p className="text-xs text-muted-foreground wrap-anywhere">
         {hasOrderNumber(order) ? (
           <>
@@ -185,13 +194,13 @@ export function DetailsEditor({
   onResult: OnResult;
   onEditing?: OnEditing;
 }) {
-  const [form, setForm] = useState<{ deadline: string; quote: string } | null>(null);
+  const [form, setForm] = useState<{ deadline: string; quote: string; description: string } | null>(null);
   const { busy, problem, setProblem, send, confirm } = useOverridableSave(orderPath(detail, 'details'), 'The order details were not saved.', (data) => {
     setForm(null);
     onResult({ type: 'success', title: 'Order updated', message: data.message ?? 'The order was updated.' }, true);
   });
   useReportEditing(form !== null, onEditing);
-  if (!actions.edit_deadline && !actions.edit_quote) return null;
+  if (!actions.edit_deadline && !actions.edit_quote && !actions.edit_description) return null;
 
   const { order } = detail;
   const today = todayInManila();
@@ -204,10 +213,10 @@ export function DetailsEditor({
         onClick={() => {
           setProblem('');
           const current = dateOnly(order.production_deadline);
-          setForm({ deadline: current < today ? today : current, quote: String(order.total_quote_amount ?? 0) });
+          setForm({ deadline: current < today ? today : current, quote: String(order.total_quote_amount ?? 0), description: order.order_description ?? '' });
         }}
       >
-        <Pencil aria-hidden /> {actions.edit_quote ? 'Edit deadline or quote' : 'Edit deadline'}
+        <Pencil aria-hidden /> {actions.edit_quote ? 'Edit deadline, description or quote' : 'Edit deadline or description'}
       </Button>
     );
   }
@@ -224,6 +233,9 @@ export function DetailsEditor({
         return;
       }
       body.total_quote_amount = quote;
+    }
+    if (actions.edit_description && form.description.trim() !== (order.order_description ?? '')) {
+      body.order_description = form.description.trim() || null;
     }
     if (Object.keys(body).length === 0) {
       setForm(null);
@@ -249,6 +261,11 @@ export function DetailsEditor({
           </Field>
         )}
       </div>
+      {actions.edit_description && (
+        <Field id="edit-description" label="Description / instructions" hint="What to make, colours, placement, anything the team must know">
+          <Textarea id="edit-description" rows={4} maxLength={2000} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+        </Field>
+      )}
       {!actions.edit_quote && <p className="text-xs text-muted-foreground">Only the Owner can change the quote, and only before approval.</p>}
       <div className="flex justify-end gap-2">
         <Button type="button" variant="outline" size="sm" onClick={() => setForm(null)} disabled={busy}>
@@ -341,49 +358,10 @@ export function DesignLink({
 }
 
 // ---------------------------------------------------------------------------------------------
-// Materials and print details (add_items: size / name / number lines, no stock used)
-const EMPTY_PRINT_LINE = { product_type: 'Jersey print', quantity: '1', size: '', custom_name: '', custom_number: '' };
-type PrintLine = typeof EMPTY_PRINT_LINE;
-type PrintLineProblems = Partial<Record<keyof PrintLine, string>>;
-const NO_SIZE = '__none__'; // the dropdown's "No size" choice (Radix Select cannot use '')
-
-/** Every problem with a print line, per field (empty object = OK to send). */
-function printLineProblems(line: PrintLine): PrintLineProblems {
-  const L = PRINT_LINE_LIMITS;
-  const p: PrintLineProblems = {};
-
-  const what = line.product_type.trim();
-  if (!what) p.product_type = 'Write what is printed, like “Jersey print”.';
-  else if (what.length > L.productType) p.product_type = `Keep it to ${L.productType} characters or fewer.`;
-  else if (!/[A-Za-z0-9]/.test(what)) p.product_type = 'Use words, not only symbols.';
-
-  const qty = line.quantity.trim();
-  if (!qty) p.quantity = 'Enter how many.';
-  else if (!/^\d+$/.test(qty)) p.quantity = 'Whole numbers only.';
-  else if (Number(qty) < 1) p.quantity = 'At least 1.';
-  else if (Number(qty) > L.quantity) p.quantity = `At most ${L.quantity.toLocaleString()}.`;
-
-  if (line.size && !(GARMENT_SIZES as readonly string[]).includes(line.size)) p.size = 'Choose a size from the list.';
-
-  const no = line.custom_number.trim();
-  if (no && !new RegExp(`^\\d{1,${L.numberDigits}}$`).test(no)) p.custom_number = 'Numbers 0–999 only.';
-
-  const name = line.custom_name.trim();
-  if (name.length > L.name) p.custom_name = `Keep the name to ${L.name} characters or fewer.`;
-  else if (!NAME_CHARS.test(name)) p.custom_name = 'Letters, spaces, periods (.), hyphens (-) and apostrophes (’) only.';
-
-  return p;
-}
-
-function FieldError({ id, message }: { id: string; message?: string }) {
-  if (!message) return null;
-  return (
-    <p id={id} className="text-xs text-danger">
-      {message}
-    </p>
-  );
-}
-
+// Materials (migration 015): the stock this order uses, catalog items only. Sizes, names and
+// numbers are print details (print-details-section.tsx), so they never block the quote or the
+// approval. Adding a material to an order that already holds its stock reserves it too (the
+// server checks the free stock and answers 409 when short).
 export function MaterialsSection({
   detail,
   actions,
@@ -397,69 +375,59 @@ export function MaterialsSection({
 }) {
   const api = useApi();
   const { items, totals } = detail;
-  const [line, setLine] = useState<PrintLine | null>(null);
-  const [importing, setImporting] = useState(false);
-  useReportEditing(line !== null || importing, onEditing);
+  const [adding, setAdding] = useState(false);
+  useReportEditing(adding, onEditing);
+  const { snapshot } = useInventorySnapshot();
+  const [itemId, setItemId] = useState('');
+  const [qty, setQty] = useState('');
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
-  // A field's problem shows once it was changed, or for every field after pressing Add
-  const [touched, setTouched] = useState<Partial<Record<keyof PrintLine, boolean>>>({});
-  const [tried, setTried] = useState(false);
-  const problems = line ? printLineProblems(line) : {};
-  const shown = (key: keyof PrintLine) => (tried || touched[key] ? problems[key] : undefined);
-
-  const startLine = (next: PrintLine) => {
-    setLine(next);
-    setTouched({});
-    setTried(false);
-    setProblem('');
-  };
 
   const add = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!line || busy) return;
     setProblem('');
-    setTried(true);
-    if (Object.keys(problems).length > 0) {
-      setProblem('Please fix the highlighted fields first.');
+    const item = snapshot?.items.find((i) => i.inventory_id === itemId);
+    const quantity = Number(qty.trim());
+    if (!item) {
+      setProblem('Choose the material from the catalog.');
+      return;
+    }
+    if (!qty.trim() || Number.isNaN(quantity)) {
+      setProblem('Enter the quantity, as a number.');
       return;
     }
     setBusy(true);
-    const { ok, data } = await api('POST', orderPath(detail, 'items'), {
-      product_type: line.product_type.trim(),
-      quantity: Number(line.quantity.trim()),
-      size: line.size || undefined,
-      custom_name: line.custom_name.trim().replace(/\s+/g, ' ') || undefined,
-      custom_number: line.custom_number.trim() || undefined,
+    const { ok, data } = await api<{ message?: string }>('POST', orderPath(detail, 'items'), {
+      inventory_id: item.inventory_id,
+      product_type: item.item_name.slice(0, 100),
+      quantity,
     });
     setBusy(false);
     if (!ok) {
-      setProblem(errorMessage(data, 'The print detail was not added.'));
+      setProblem(errorMessage(data, 'The material was not added.'));
       return;
     }
-    startLine({ ...EMPTY_PRINT_LINE, product_type: line.product_type.trim(), size: line.size }); // ready for the next piece
-    onResult({ type: 'success', title: 'Print detail added', message: 'The line was added to this order.' }, true);
+    setAdding(false);
+    setItemId('');
+    setQty('');
+    onResult({ type: 'success', title: 'Material added', message: data.message ?? 'The material was added to this order.' }, true);
   };
-
-  const set = (key: keyof PrintLine, value: string) => {
-    setLine((l) => (l ? { ...l, [key]: value } : l));
-    setTouched((t) => ({ ...t, [key]: true }));
-  };
-  const bind = (key: keyof PrintLine) => ({
-    value: line?.[key] ?? '',
-    onChange: (e: React.ChangeEvent<HTMLInputElement>) => set(key, e.target.value),
-    'aria-invalid': Boolean(shown(key)) || undefined,
-    'aria-describedby': shown(key) ? `line-${key}-error` : undefined,
-  });
 
   return (
     <section id={ORDER_SECTION.materials} className="scroll-mt-4 space-y-3" aria-labelledby="materials-title">
-      <h3 id="materials-title" className="font-semibold">
-        Materials{' '}
-        <span className="font-normal text-muted-foreground">
-          ({totals.item_count} line{totals.item_count === 1 ? '' : 's'}, {totals.total_quantity.toLocaleString()} total)
-        </span>
-      </h3>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 id="materials-title" className="font-semibold">
+          Materials{' '}
+          <span className="font-normal text-muted-foreground">
+            ({totals.item_count} line{totals.item_count === 1 ? '' : 's'}, {totals.total_quantity.toLocaleString()} total)
+          </span>
+        </h3>
+        {actions.add_items && !adding && (
+          <Button variant="outline" size="sm" onClick={() => setAdding(true)}>
+            <ListPlus aria-hidden /> Add material
+          </Button>
+        )}
+      </div>
       {items.length === 0 ? (
         <p className="text-sm text-muted-foreground">No materials on this order.</p>
       ) : (
@@ -468,7 +436,7 @@ export function MaterialsSection({
             <TableHeader className="bg-muted/50">
               <TableRow>
                 <TableHead>Material</TableHead>
-                <TableHead>Details</TableHead>
+                <TableHead className="hidden sm:table-cell">Category</TableHead>
                 <TableHead className="text-right">Qty</TableHead>
               </TableRow>
             </TableHeader>
@@ -476,125 +444,64 @@ export function MaterialsSection({
               {items.map((it) => (
                 <TableRow key={it.line_item_id}>
                   <TableCell className="min-w-32 whitespace-normal wrap-anywhere">
-                    {it.product_type}
-                    {!it.inventory_id && (
-                      <Badge variant="outline" className={cn('ml-1', TONE_CLASSES.muted.badge)}>
-                        not linked to stock
-                      </Badge>
-                    )}
+                    <span className="flex flex-wrap items-center gap-1">
+                      {it.product_type}
+                      {it.has_sizes && (
+                        <Badge variant="outline" className={TONE_CLASSES.info.badge}>
+                          <Shirt className="size-3" aria-hidden /> garment
+                        </Badge>
+                      )}
+                      {it.is_consumable && (
+                        <Badge variant="outline" className={TONE_CLASSES.muted.badge}>
+                          consumable
+                        </Badge>
+                      )}
+                    </span>
                   </TableCell>
-                  <TableCell className="min-w-24 whitespace-normal wrap-anywhere">
-                    {[it.size, it.custom_name, it.custom_number].filter(Boolean).join(' · ') || '—'}
+                  <TableCell className="hidden sm:table-cell">{it.item_category ?? '—'}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {it.quantity.toLocaleString()} <span className="text-xs text-muted-foreground">{it.unit ?? ''}</span>
                   </TableCell>
-                  <TableCell className="text-right tabular-nums">{it.quantity.toLocaleString()}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
         </div>
       )}
-
-      {actions.add_items &&
-        (line ? (
-          <form onSubmit={add} noValidate className="space-y-4 rounded-md border bg-muted/30 p-3">
-            <FormProblem message={problem} />
-            <RequiredNote />
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-6">
-              <Field id="line-product_type" label="What *" className="col-span-2 sm:col-span-3">
-                <Input id="line-product_type" maxLength={PRINT_LINE_LIMITS.productType} autoComplete="off" {...bind('product_type')} />
-                <FieldError id="line-product_type-error" message={shown('product_type')} />
-              </Field>
-              <Field id="line-quantity" label="Qty *">
-                <Input
-                  id="line-quantity"
-                  type="number"
-                  min={1}
-                  max={PRINT_LINE_LIMITS.quantity}
-                  step={1}
-                  inputMode="numeric"
-                  {...bind('quantity')}
-                />
-                <FieldError id="line-quantity-error" message={shown('quantity')} />
-              </Field>
-              <Field id="line-size" label="Size">
-                <Select value={line.size || NO_SIZE} onValueChange={(v) => set('size', v === NO_SIZE ? '' : v)} disabled={busy}>
-                  <SelectTrigger
-                    id="line-size"
-                    className="w-full min-w-0"
-                    aria-invalid={Boolean(shown('size')) || undefined}
-                    aria-describedby={shown('size') ? 'line-size-error' : undefined}
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={NO_SIZE}>No size</SelectItem>
-                    {GARMENT_SIZES.map((s) => (
-                      <SelectItem key={s} value={s}>
-                        {s}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <FieldError id="line-size-error" message={shown('size')} />
-              </Field>
-              <Field id="line-custom_number" label="No.">
-                <Input
-                  id="line-custom_number"
-                  inputMode="numeric"
-                  maxLength={PRINT_LINE_LIMITS.numberDigits}
-                  autoComplete="off"
-                  placeholder="7"
-                  {...bind('custom_number')}
-                />
-                <FieldError id="line-custom_number-error" message={shown('custom_number')} />
-              </Field>
-              <Field
-                id="line-custom_name"
-                label="Name"
-                className="col-span-2 sm:col-span-6"
-                hint={`${line.custom_name.length}/${PRINT_LINE_LIMITS.name} characters`}
-              >
-                <Input
-                  id="line-custom_name"
-                  maxLength={PRINT_LINE_LIMITS.name}
-                  autoComplete="off"
-                  placeholder="DELA CRUZ"
-                  {...bind('custom_name')}
-                />
-                <FieldError id="line-custom_name-error" message={shown('custom_name')} />
-              </Field>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Print details (sizes, names, numbers) do not use stock. Add one line per piece, or one line per size with its quantity.
-            </p>
-            <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" size="sm" onClick={() => setLine(null)} disabled={busy}>
-                Done
-              </Button>
-              <Button busy={busy} type="submit" size="sm" disabled={busy}>
-                {busy ? 'Adding…' : 'Add'}
-              </Button>
-            </div>
-          </form>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={() => startLine(EMPTY_PRINT_LINE)}>
-              <Shirt aria-hidden /> Add print details (size / name / number)
+      {adding && (
+        <form onSubmit={add} className="space-y-3 rounded-md border bg-muted/30 p-3">
+          <FormProblem message={problem} />
+          <div className="flex flex-wrap items-end gap-2">
+            <Field id="add-material" label="Material *" className="min-w-0 flex-[3_1_14rem]">
+              <Select value={itemId} onValueChange={setItemId}>
+                <SelectTrigger id="add-material" className="w-full">
+                  <SelectValue placeholder="Choose from the catalog…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(snapshot?.items ?? []).map((i) => (
+                    <SelectItem key={i.inventory_id} value={i.inventory_id}>
+                      {i.item_name} ({i.quantity_available_net.toLocaleString()} free)
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field id="add-material-qty" label="Qty *" className="w-28">
+              <Input id="add-material-qty" type="number" min={1} step={1} inputMode="numeric" value={qty} onChange={(e) => setQty(e.target.value)} />
+            </Field>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {detail.order.stock_reserved ? 'This order holds its stock, so the new material is reserved now.' : 'It is reserved when the order is approved.'}
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => setAdding(false)} disabled={busy}>
+              Cancel
             </Button>
-            <Button variant="outline" size="sm" onClick={() => setImporting(true)}>
-              <ListPlus aria-hidden /> Bulk import roster (CSV / Excel)
+            <Button type="submit" size="sm" busy={busy} disabled={busy}>
+              {busy ? 'Adding…' : 'Add material'}
             </Button>
           </div>
-        ))}
-      {actions.add_items && importing && (
-        <RosterImportDialog
-          orderId={detail.order.order_id}
-          onClose={() => setImporting(false)}
-          onDone={(r) => {
-            setImporting(false);
-            onResult(r, true);
-          }}
-        />
+        </form>
       )}
     </section>
   );

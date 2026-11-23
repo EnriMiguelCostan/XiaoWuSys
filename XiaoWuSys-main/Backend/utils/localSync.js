@@ -33,18 +33,28 @@ const LOCAL_SYNC_COLUMNS = ['dirty_fields', 'cloud_last_modified', 'sync_conflic
 //   order_profiles.cancellation_reason, payments.voids_payment_id / void_reason   voids (migration 012)
 //   order_profiles / customers .archived_at / archived_by   archiving (migration 013)
 //   order_items / order_consumables_log .unit_cost   unit cost at the time, for the P&L (migration 013)
+//   migration 015: inventory_items.supplier_id / has_sizes; order_profiles.order_description /
+//     labor_amount / incidental_amount; payments: payer and method details, refunds, verification,
+//     recorded_at; customers: client profile; material_loss.loss_batch_id (bulk waste)
 const TABLE_EXTRA_COLUMNS = {
-  payments: [['received_by', 'TEXT'], ['receipt_no', 'TEXT'], ['voids_payment_id', 'TEXT'], ['void_reason', 'TEXT']],
+  payments: [['received_by', 'TEXT'], ['receipt_no', 'TEXT'], ['voids_payment_id', 'TEXT'], ['void_reason', 'TEXT'],
+             ['payer_name', 'TEXT'], ['reference_no', 'TEXT'], ['bank_name', 'TEXT'], ['account_name', 'TEXT'], ['cheque_no', 'TEXT'],
+             ['cheque_date', 'TEXT'], ['payment_notes', 'TEXT'], ['is_refund', 'INTEGER DEFAULT 0'], ['refund_reason', 'TEXT'],
+             ['verified_by', 'TEXT'], ['verified_at', 'TEXT'], ['recorded_at', 'TEXT']],
   material_loss: [['cloud_stock_delta', 'INTEGER'], ['reason_code', 'TEXT'], ['loss_category', 'TEXT'], ['production_stage', 'TEXT'],
-                  ['is_statistical_anomaly', 'INTEGER DEFAULT 0']],
+                  ['is_statistical_anomaly', 'INTEGER DEFAULT 0'], ['loss_batch_id', 'TEXT']],
   inventory_items: [['deleted_at', 'TEXT'], ['deleted_by', 'TEXT'], ['purged_at', 'TEXT'],
-                    ['unit', "TEXT NOT NULL DEFAULT 'pcs'"], ['supplier', 'TEXT'], ['selling_price', 'REAL NOT NULL DEFAULT 0']],
+                    ['unit', "TEXT NOT NULL DEFAULT 'pcs'"], ['supplier', 'TEXT'], ['selling_price', 'REAL NOT NULL DEFAULT 0'],
+                    ['supplier_id', 'TEXT'], ['has_sizes', 'INTEGER DEFAULT 0']],
   users: [['is_active', 'INTEGER NOT NULL DEFAULT 1'], ['tokens_valid_after', 'TEXT'], ['removed_at', 'TEXT'], ['removed_by', 'TEXT']],
   order_profiles: [['stock_reserved', 'INTEGER NOT NULL DEFAULT 0'], ['approved_by', 'TEXT'], ['approved_at', 'TEXT'],
                    ['tracking_no', 'TEXT'], ['last_edited_by', 'TEXT'], ['last_edited_role', 'TEXT'],
                    ['subtotal_amount', 'REAL NOT NULL DEFAULT 0'], ['discount_amount', 'REAL NOT NULL DEFAULT 0'],
-                   ['discount_reason', 'TEXT'], ['cancellation_reason', 'TEXT'], ['archived_at', 'TEXT'], ['archived_by', 'TEXT']],
-  customers: [['archived_at', 'TEXT'], ['archived_by', 'TEXT']],
+                   ['discount_reason', 'TEXT'], ['cancellation_reason', 'TEXT'], ['archived_at', 'TEXT'], ['archived_by', 'TEXT'],
+                   ['order_description', 'TEXT'], ['labor_amount', 'REAL DEFAULT 0'], ['incidental_amount', 'REAL DEFAULT 0'],
+                   ['adjustment_amount', 'REAL DEFAULT 0'], ['adjustment_reason', 'TEXT']],
+  customers: [['archived_at', 'TEXT'], ['archived_by', 'TEXT'], ['customer_type', "TEXT DEFAULT 'Individual'"],
+              ['contact_person', 'TEXT'], ['email', 'TEXT'], ['address', 'TEXT'], ['social_media', 'TEXT'], ['notes', 'TEXT']],
   order_items: [['unit_cost', 'REAL']],
   order_consumables_log: [['unit_cost', 'REAL']]
 };

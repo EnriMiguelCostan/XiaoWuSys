@@ -8,6 +8,7 @@ const { isConnectionError } = require('../utils/dbErrors');
 const { selectList, serialize, sqliteAll } = require('./records');
 const { plannedDeductions, clampDeduction, triggersFor, CONSUMABLE_TRIGGERS } = require('./domain/consumables');
 const { auditCloud } = require('./inventoryAudit');
+const { setMovementContext } = require('./stockMovements');
 
 const REMOVED_ITEM = 'Removed item';
 const TRIGGER_ORDER_SQL = `CASE r.trigger_status ${CONSUMABLE_TRIGGERS.map((t, i) => `WHEN '${t}' THEN ${i}`).join(' ')} ELSE 9 END`;
@@ -103,7 +104,7 @@ const planConsumables = async (client, { order_id, from, to, lines }) => {
 // deleted are skipped and not recorded, so nothing is marked as taken that was not.
 //   rowsById: the locked inventory rows (materials and consumables)
 // -> [{ log_id, trigger_status, consumable_inventory_id, item_name, unit, needed, quantity_deducted, shortfall }]
-const applyConsumables = async (client, req, { order_id, planned, rowsById }) => {
+const applyConsumables = async (client, req, { order_id, planned, rowsById, order_no = null }) => {
   const done = [];
   for (const p of planned) {
     const locked = rowsById.get(p.consumable_inventory_id);
@@ -115,6 +116,11 @@ const applyConsumables = async (client, req, { order_id, planned, rowsById }) =>
     const before = Number(row.quantity_available);
     const { quantity_deducted, shortfall } = clampDeduction(p.needed, before);
     if (quantity_deducted > 0) {
+      // Migration 015: the stock card says which order (and which step) used it
+      await setMovementContext(client, {
+        type: 'consumables_used', reference_type: 'order', reference_id: order_id, reference_no: order_no,
+        note: `${p.trigger_status} step${shortfall > 0 ? `, short by ${shortfall}` : ''}`, actor: req.user
+      });
       // Guarded in SQL as well: stock never goes below 0
       const taken = await client.query(
         `UPDATE inventory_items SET quantity_available = quantity_available - $1

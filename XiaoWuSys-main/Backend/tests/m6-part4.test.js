@@ -22,8 +22,8 @@ describe('M6 part 4 offline: archived orders and customers', () => {
     t = await startTestServer();
     owner = await t.login('owner');
     admin = await t.login('admin');
-    production = await t.login('production');
-    staff = await t.login('staff');
+    production = await t.login('staff');
+    staff = await t.login('production');
     customer = (await t.request('POST', '/api/customers', { token: production, body: { full_name: 'Agdao NHS' } })).body.customer.customer_id;
     quiet = (await t.request('POST', '/api/customers', { token: production, body: { full_name: 'Old Client' } })).body.customer.customer_id;
     const make = async (who) => (await t.request('POST', '/api/orders', {

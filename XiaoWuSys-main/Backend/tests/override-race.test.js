@@ -17,7 +17,7 @@ const createRacingCloud = () => {
     order_id: 'o-race', customer_id: 'c-1', date_created: '2026-11-01T00:00:00', production_deadline: '2026-12-20T00:00:00',
     production_status: 'Pending', design_drive_link: null, total_quote_amount: '1000.00', stock_reserved: false,
     approved_by: null, approved_at: null, tracking_no: 'XM-2026-0042',
-    last_edited_by: 'u-production', last_edited_role: 'Production',
+    last_edited_by: 'u-production', last_edited_role: 'Staff',
     version: '2026-11-14T08:00:00.000002', sync_status: 'synced', sync_conflict: null
   };
   const log = [];

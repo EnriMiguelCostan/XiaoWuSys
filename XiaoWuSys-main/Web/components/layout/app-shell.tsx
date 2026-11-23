@@ -10,6 +10,7 @@ import { LogoSpinner } from '@/components/brand/brand-logo';
 import { ConnectionBar } from '@/components/connection/connection-bar';
 import { ConnectionProvider } from '@/components/connection/connection-provider';
 import { AppHeader } from '@/components/layout/app-header';
+import { SideNav } from '@/components/layout/side-nav';
 import { OrderLocksProvider } from '@/components/providers/order-locks-provider';
 import { SocketProvider } from '@/components/providers/socket-provider';
 import { useSession } from '@/hooks/use-session';
@@ -69,8 +70,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <AppHeader />
             <ConnectionBar />
           </div>
-          {/* min-w-0: wide content (tables) scrolls inside its own box, never widens the page */}
-          <main className="mx-auto w-full max-w-6xl min-w-0 flex-1 px-4 py-6">{children}</main>
+          {/* Sections at the left on wide screens (the phone menu shows the same list).
+              min-w-0: wide content (tables) scrolls inside its own box, never widens the page */}
+          <div className="flex min-h-0 flex-1">
+            <SideNav />
+            <main className="mx-auto w-full max-w-7xl min-w-0 flex-1 px-4 py-6">{children}</main>
+          </div>
         </div>
         </OrderLocksProvider>
       </ConnectionProvider>

@@ -9,7 +9,7 @@ describe('Archived orders (PB 23, D2)', () => {
   it('offers Archive for closed orders to the Owner and Admin only', () => {
     for (const status of ['Completed', 'Cancelled']) {
       const order = { production_status: status, total_quote_amount: 1000 };
-      assert.deepEqual(['Owner', 'Admin', 'Production', 'Staff'].map((r) => allowedActions(order, r).archive_order), [true, true, false, false], status);
+      assert.deepEqual(['Owner', 'Admin', 'Staff', 'Production'].map((r) => allowedActions(order, r).archive_order), [true, true, false, false], status);
       assert.equal(allowedActions(order, 'Owner').restore_order, false, 'not archived yet');
     }
     for (const status of ['Pending', 'Approved', 'Printing', 'Pressing', 'Delayed']) {
@@ -25,8 +25,8 @@ describe('Archived orders (PB 23, D2)', () => {
       [false, 0, false, [], false, false, false, true]);
     assert.equal(owner.payment_blocked_reason, ARCHIVED_REASON);
     assert.deepEqual([owner.print_receipt, owner.print_quote], [true, true]);
-    assert.equal(allowedActions(archived, 'Production').restore_order, false);
-    assert.equal(allowedActions(archived, 'Staff').payment_blocked_reason, null, 'Staff cannot pay anyway');
+    assert.equal(allowedActions(archived, 'Staff').restore_order, false);
+    assert.equal(allowedActions(archived, 'Production').payment_blocked_reason, null, 'Staff cannot pay anyway');
   });
 });
 

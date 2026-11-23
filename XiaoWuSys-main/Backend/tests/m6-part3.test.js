@@ -25,8 +25,8 @@ describe('M6 part 3 offline: misprints, waste, overheads, P&L, voids', () => {
     t = await startTestServer();
     owner = await t.login('owner');
     admin = await t.login('admin');
-    production = await t.login('production');
-    staff = await t.login('staff');
+    production = await t.login('staff');
+    staff = await t.login('production');
     customer = (await t.request('POST', '/api/customers', { token: production, body: { full_name: 'Agdao NHS' } })).body.customer.customer_id;
     const item = async (item_name, quantity_available, unit_cost) =>
       (await t.request('POST', '/api/inventory', { token: production, body: { item_name, item_category: 'Apparel', quantity_available, unit_cost } })).body.item.inventory_id;

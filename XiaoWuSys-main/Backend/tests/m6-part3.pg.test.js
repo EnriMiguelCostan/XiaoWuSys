@@ -61,7 +61,7 @@ describe('M6 part 3 on real PostgreSQL: waste diagnostics, voids, overheads, P&L
     await resetDatabase(pool, { before: '012' });
     await pool.query(`INSERT INTO users (user_id, username, password_hash, role) VALUES
       ('u-owner', 'owner', 'x', 'Owner'), ('u-admin', 'admin', 'x', 'Admin'),
-      ('u-production', 'production', 'x', 'Production'), ('u-staff', 'staff', 'x', 'Staff')`);
+      ('u-production', 'staff', 'x', 'Staff'), ('u-staff', 'production', 'x', 'Production')`);
     await pool.query("INSERT INTO customers (customer_id, full_name) VALUES ('c-1', 'Agdao NHS')");
     for (const [id, name, qty, cost] of ITEMS) {
       await pool.query(`INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, unit_cost)
@@ -130,7 +130,7 @@ describe('M6 part 3 on real PostgreSQL: waste diagnostics, voids, overheads, P&L
     server = await startPgTestServer(pool);
     owner = server.tokenFor('u-owner', 'Owner');
     admin = server.tokenFor('u-admin', 'Admin');
-    production = server.tokenFor('u-production', 'Production');
+    production = server.tokenFor('u-production', 'Staff');
     await insertOrder('o-print', 'Printing', { quote: 3000, reserved: true, lines: [['i-shirt', 8]] });
 
     const r = await loss('i-shirt', { quantity_lost: 2, reason_code: 'misprint_alignment', order_id: 'o-print' });
@@ -220,7 +220,7 @@ describe('M6 part 3 on real PostgreSQL: waste diagnostics, voids, overheads, P&L
 
   it('voids a payment with a negative reversing entry, once, guarding the downpayment', async () => {
     await insertOrder('o-pay', 'Approved', { quote: 1000 });
-    const pay = async (amount) => (await server.request('POST', '/api/orders/o-pay/payments', { token: production, body: { amount, payment_type: 'GCash' } })).body.payment;
+    const pay = async (amount) => (await server.request('POST', '/api/orders/o-pay/payments', { token: production, body: { amount, payment_type: 'GCash', reference_no: '1004 123 456789' } })).body.payment;
     const first = await pay(600);
     const second = await pay(100);
 

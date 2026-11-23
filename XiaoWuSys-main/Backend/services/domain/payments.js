@@ -34,15 +34,18 @@ const paymentSummary = ({ quote, payments = [] }) => {
   const quoteC = Math.max(0, toCentavos(quote));
   let paidC = 0;
   let syncedC = 0;
+  let refundedC = 0;
   for (const p of payments) {
     const c = toCentavos(p.amount);
     paidC += c;
     if (!p.sync_status || p.sync_status === 'synced') syncedC += c;
+    if (p.is_refund) refundedC -= c; // migration 015: refunds are negative entries
   }
   const requiredC = Math.ceil(quoteC / 2);
   return {
     quote: toPesos(quoteC),
     total_paid: toPesos(paidC),
+    total_refunded: toPesos(refundedC),
     remaining: toPesos(Math.max(0, quoteC - paidC)),
     overpaid_by: toPesos(Math.max(0, paidC - quoteC)),
     payment_status: statusFor(quoteC, paidC),
@@ -197,6 +200,147 @@ const paymentBlockedReason = (order, summary) => {
   return null;
 };
 
+// ---------- Migration 015: what each payment method needs ----------
+// Each method lists the details a person can use to find and check the money later ("how do
+// you know they paid, and who paid?"). Fields a method does not use are not saved for it.
+//   required  must be filled in
+//   optional  may be filled in
+const PAYMENT_DETAIL_FIELDS = {
+  payer_name: { label: 'Paid by (name)', max: 255, hint: 'Who handed over or sent the money, if not the customer.' },
+  reference_no: { label: 'Reference / transaction number', max: 100 },
+  bank_name: { label: 'Bank', max: 100 },
+  account_name: { label: 'Sender account name or number', max: 255 },
+  cheque_no: { label: 'Cheque number', max: 50 },
+  cheque_date: { label: 'Date on the cheque', type: 'date' },
+  payment_notes: { label: 'Notes', max: 500 }
+};
+const PAYMENT_METHOD_RULES = {
+  Cash: { required: [], optional: ['payer_name', 'payment_notes'], verify: false },
+  GCash: {
+    required: ['reference_no'], optional: ['account_name', 'payer_name', 'payment_notes'], verify: true,
+    labels: { reference_no: 'GCash reference number (13 digits)', account_name: 'Sender GCash name or number' }
+  },
+  Maya: {
+    required: ['reference_no'], optional: ['account_name', 'payer_name', 'payment_notes'], verify: true,
+    labels: { reference_no: 'Maya reference number', account_name: 'Sender Maya name or number' }
+  },
+  PayPal: {
+    required: ['reference_no'], optional: ['account_name', 'payer_name', 'payment_notes'], verify: true,
+    labels: { reference_no: 'PayPal transaction ID', account_name: 'Sender PayPal email or name' }
+  },
+  'Bank Transfer': {
+    required: ['bank_name', 'reference_no'], optional: ['account_name', 'payer_name', 'payment_notes'], verify: true,
+    labels: { bank_name: 'Bank the money came from', reference_no: 'Transfer reference number', account_name: 'Sender account name' }
+  },
+  Cheque: {
+    required: ['bank_name', 'cheque_no', 'cheque_date'], optional: ['account_name', 'payer_name', 'payment_notes'], verify: true,
+    labels: { bank_name: 'Bank on the cheque', account_name: 'Account name on the cheque' }
+  },
+  'Credit/Debit Card': {
+    required: ['reference_no'], optional: ['bank_name', 'account_name', 'payer_name', 'payment_notes'], verify: true,
+    labels: { reference_no: 'Approval code', bank_name: 'Card issuer (bank)', account_name: 'Cardholder name' }
+  },
+  Other: { required: ['payment_notes'], optional: ['reference_no', 'payer_name'], verify: true, labels: { payment_notes: 'How it was paid' } }
+};
+const PAYMENT_DETAIL_NAMES = Object.keys(PAYMENT_DETAIL_FIELDS);
+
+// The form each method shows -> [{ value, verify, fields: [{ name, label, required, type, max, hint }] }]
+const paymentMethodForms = (types) => types.map((value) => {
+  const rule = PAYMENT_METHOD_RULES[value] || PAYMENT_METHOD_RULES.Other;
+  return {
+    value,
+    verify: rule.verify,
+    fields: [...rule.required, ...rule.optional].map((name) => ({
+      name,
+      label: (rule.labels && rule.labels[name]) || PAYMENT_DETAIL_FIELDS[name].label,
+      required: rule.required.includes(name),
+      type: PAYMENT_DETAIL_FIELDS[name].type || 'text',
+      max: PAYMENT_DETAIL_FIELDS[name].max || null,
+      hint: PAYMENT_DETAIL_FIELDS[name].hint || null
+    }))
+  };
+});
+
+// The details sent with a payment, checked for its method.
+//   body: the request body; type: the payment method
+// -> { errors: [{ field, message }], details: { payer_name, reference_no, ... } (null where unused) }
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+//   allOptional: a refund names how the money went back, but none of the method's fields are forced
+const checkPaymentDetails = (type, body = {}, { allOptional = false } = {}) => {
+  const base = PAYMENT_METHOD_RULES[type] || PAYMENT_METHOD_RULES.Other;
+  const rule = allOptional ? { ...base, required: [], optional: [...base.required, ...base.optional] } : base;
+  const allowed = new Set([...rule.required, ...rule.optional]);
+  const errors = [];
+  const details = Object.fromEntries(PAYMENT_DETAIL_NAMES.map((n) => [n, null]));
+  for (const name of PAYMENT_DETAIL_NAMES) {
+    const raw = body[name];
+    const spec = PAYMENT_DETAIL_FIELDS[name];
+    const label = (rule.labels && rule.labels[name]) || spec.label;
+    const empty = raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '');
+    if (!allowed.has(name)) continue; // not used by this method: ignored, never saved
+    if (empty) {
+      if (rule.required.includes(name)) errors.push({ field: name, message: `${label} is required for ${type}.` });
+      continue;
+    }
+    if (typeof raw !== 'string') { errors.push({ field: name, message: `${label} must be written as text.` }); continue; }
+    const text = raw.trim().replace(/\s+/g, ' ');
+    if (spec.type === 'date') {
+      const m = DATE_ONLY.exec(text);
+      const d = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+      if (!m || d.getUTCMonth() !== +m[2] - 1 || d.getUTCDate() !== +m[3] || text < '2018-01-01' || text > '2034-12-31') {
+        errors.push({ field: name, message: `${label} must be a real date. Pick it from the calendar.` });
+        continue;
+      }
+    } else if (text.length > spec.max) {
+      errors.push({ field: name, message: `${label} is too long. Keep it to ${spec.max} characters or fewer.` });
+      continue;
+    }
+    details[name] = text;
+  }
+  return { errors, details };
+};
+
+// Does this payment still need someone to confirm the money arrived? (non-cash, not verified)
+const needsVerification = (p) => Boolean(p) && toCentavos(p.amount) > 0 && !p.voids_payment_id && !p.is_refund
+  && Boolean((PAYMENT_METHOD_RULES[p.payment_type] || PAYMENT_METHOD_RULES.Other).verify) && !p.verified_at;
+
+// ---------- Migration 015: refunds (money given back) ----------
+// A refund is a NEGATIVE payment with a reason, like a void, but for money that really went
+// back to the customer (a void corrects a payment recorded by mistake).
+//   Cancelled order: up to what was paid (net of earlier voids and refunds).
+//   Any other order: only what was paid ABOVE the bill (overpaid). To give money back for a late
+//   delivery or a mistake, the Owner first lowers the bill (price cut); the difference becomes
+//   "overpaid" and is refunded.
+const REFUND_REASONS = ['Order cancelled', 'Paid more than the bill', 'Late delivery (price cut)', 'Production error (price cut)', 'Other'];
+const maxRefund = ({ status, quote, paidNet }) => {
+  const paidC = Math.max(0, toCentavos(paidNet));
+  if (status === 'Cancelled') return toPesos(paidC);
+  return toPesos(Math.max(0, paidC - Math.max(0, toCentavos(quote))));
+};
+const checkRefund = ({ status, quote, paidNet, amount }) => {
+  const maxC = toCentavos(maxRefund({ status, quote, paidNet }));
+  if (toCentavos(paidNet) <= 0) {
+    return { status: 409, body: { error: 'NOTHING_TO_REFUND', message: 'Nothing has been paid on this order, so there is nothing to refund.' } };
+  }
+  if (maxC <= 0) {
+    return {
+      status: 409,
+      body: {
+        error: 'REFUND_NOT_ALLOWED',
+        message: 'Refunds are for cancelled orders, or for money paid above the bill. To give money back for a late delivery or a mistake, '
+          + 'first lower the bill with a price cut, then refund what was paid above it.'
+      }
+    };
+  }
+  if (toCentavos(amount) > maxC) {
+    return {
+      status: 409,
+      body: { error: 'REFUND_EXCEEDS_PAID', message: `The most that can be refunded now is ${pesoText(toPesos(maxC))}.`, max_refund: toPesos(maxC) }
+    };
+  }
+  return null;
+};
+
 module.exports = {
   DOWNPAYMENT_STATUSES,
   toCentavos,
@@ -209,5 +353,14 @@ module.exports = {
   paymentBlockedReason,
   DOWNPAYMENT_LOCKED_STATUSES,
   checkPaymentVoid,
-  voidStatusOf
+  voidStatusOf,
+  PAYMENT_DETAIL_FIELDS,
+  PAYMENT_DETAIL_NAMES,
+  PAYMENT_METHOD_RULES,
+  paymentMethodForms,
+  checkPaymentDetails,
+  needsVerification,
+  REFUND_REASONS,
+  maxRefund,
+  checkRefund
 };

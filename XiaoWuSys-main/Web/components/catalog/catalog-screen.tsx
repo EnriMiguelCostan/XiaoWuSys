@@ -4,11 +4,15 @@
 //
 // Who sees what (capabilities from the server, never role names; see lib/inventory.ts):
 //   everyone          table, search, filters, export, refresh
-//   canEditInventory  add, edit, adjust stock / record loss, import, move to Recycle Bin, restore
+//   canEditInventory  add, edit, record loss, import, move to Recycle Bin, restore
+//   migration 015: stock comes in and goes out through Stock in / Stock out (their own pages,
+//   linked from here); typing a new quantity by hand ("Adjust Stock") is gone.
 //   canPurgeInventory delete forever, empty the Recycle Bin
 // Search, filters, sorting and "Show more" work on the loaded snapshot, as in the MVP.
 import { useMemo, useState } from 'react';
-import { CloudOff, Download, FileUp, PackagePlus, RefreshCw, Search, SlidersHorizontal, Trash2, X } from 'lucide-react';
+import Link from 'next/link';
+import { ArrowDownToLine, ArrowUpFromLine, CloudOff, Download, FileUp, Minus, PackagePlus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { can } from '@xiaowu/client-core/permissions';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { LogoSpinner } from '@/components/brand/brand-logo';
 import { ConsumableRatesDialog } from '@/components/catalog/consumable-rates-dialog';
@@ -16,7 +20,7 @@ import { ImportDialog } from '@/components/catalog/import-dialog';
 import { InventoryTable, nextSort, sortItems, type SortKey, type SortState } from '@/components/catalog/inventory-table';
 import { ItemFormDialog } from '@/components/catalog/item-form-dialog';
 import { RecycleBinSheet } from '@/components/catalog/recycle-bin-sheet';
-import { StockDialog, type StockAction } from '@/components/catalog/stock-dialog';
+import { LossDialog } from '@/components/catalog/stock-dialog';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { Badge } from '@/components/ui/badge';
@@ -43,7 +47,7 @@ const SUMMARY_NUMBER =
   'w-full text-xl leading-tight font-semibold tabular-nums wrap-anywhere sm:text-2xl lg:text-xl xl:text-2xl';
 type DialogState =
   | { kind: 'item'; item: InventoryItem | null }
-  | { kind: 'stock'; itemId: string | null; action: StockAction }
+  | { kind: 'loss'; itemId: string | null }
   | { kind: 'import' }
   | { kind: 'rates'; item: InventoryItem }
   | null;
@@ -168,8 +172,22 @@ export function CatalogScreen() {
               <Button onClick={() => setDialog({ kind: 'item', item: null })}>
                 <PackagePlus aria-hidden /> Add Item
               </Button>
-              <Button variant="outline" onClick={() => setDialog({ kind: 'stock', itemId: null, action: 'add' })} disabled={items.length === 0}>
-                <SlidersHorizontal aria-hidden /> Adjust Stock
+              {can(user, 'receive_stock') && (
+                <Button variant="outline" asChild>
+                  <Link href="/inventory/stock-in?new=1">
+                    <ArrowDownToLine aria-hidden /> Stock in
+                  </Link>
+                </Button>
+              )}
+              {can(user, 'issue_stock') && (
+                <Button variant="outline" asChild>
+                  <Link href="/inventory/stock-out?new=1">
+                    <ArrowUpFromLine aria-hidden /> Stock out
+                  </Link>
+                </Button>
+              )}
+              <Button variant="outline" onClick={() => setDialog({ kind: 'loss', itemId: null })} disabled={items.length === 0}>
+                <Minus aria-hidden /> Record loss
               </Button>
               <Button variant="outline" onClick={() => setDialog({ kind: 'import' })}>
                 <FileUp aria-hidden /> Import
@@ -326,7 +344,9 @@ export function CatalogScreen() {
               canEdit={canEdit}
               recentlyChanged={recentlyChanged}
               onEdit={(item) => setDialog({ kind: 'item', item })}
-              onAdjust={(item) => setDialog({ kind: 'stock', itemId: item.inventory_id, action: 'add' })}
+              onLoss={(item) => setDialog({ kind: 'loss', itemId: item.inventory_id })}
+              canReceive={can(user, 'receive_stock')}
+              canIssue={can(user, 'issue_stock')}
               onDelete={setToDelete}
               onRates={(item) => setDialog({ kind: 'rates', item })}
             />
@@ -348,14 +368,8 @@ export function CatalogScreen() {
       {canEdit && dialog?.kind === 'item' && (
         <ItemFormDialog item={dialog.item} categories={categories} units={units} onClose={() => setDialog(null)} onDone={finish} />
       )}
-      {canEdit && dialog?.kind === 'stock' && (
-        <StockDialog
-          items={items}
-          initialItemId={dialog.itemId}
-          initialAction={dialog.action}
-          onClose={() => setDialog(null)}
-          onDone={finish}
-        />
+      {canEdit && dialog?.kind === 'loss' && (
+        <LossDialog items={items} initialItemId={dialog.itemId} onClose={() => setDialog(null)} onDone={finish} />
       )}
       {canEdit && dialog?.kind === 'import' && <ImportDialog onClose={() => setDialog(null)} onDone={finish} />}
       {canEdit && dialog?.kind === 'rates' && <ConsumableRatesDialog item={dialog.item} onClose={() => setDialog(null)} onDone={finish} />}

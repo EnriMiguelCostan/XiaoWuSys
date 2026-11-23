@@ -55,7 +55,72 @@ const canTransition = (from, to) => (STATUS_TRANSITIONS[from] || []).includes(to
 const ARCHIVED_REASON = 'This order is archived. Restore it first if you need to change it.';
 const isArchived = (record) => Boolean(record && record.archived_at);
 
-const allowedActions = (order, role, summary = null) => {
+// ---------- Migration 015: deliveries and what "Completed" means ----------
+// Pieces can be handed over (in batches) once the job order is approved, while it is open.
+const DELIVERY_STATUSES = ['Approved', 'Printing', 'Pressing'];
+const DELIVERY_METHODS = ['Pick-up', 'Delivery', 'Courier'];
+
+// pieces_ordered: the order's pieces (its materials, consumables left out); deliveries: its batches
+// -> { pieces_ordered, pieces_delivered, pieces_remaining, batches, state: 'none' | 'partial' | 'complete', label }
+const fulfillmentSummary = ({ pieces_ordered = 0, deliveries = [] }) => {
+  const delivered = deliveries.reduce((s, d) => s + Number(d.quantity || 0), 0);
+  const remaining = Math.max(0, pieces_ordered - delivered);
+  const state = delivered === 0 ? 'none' : remaining === 0 ? 'complete' : 'partial';
+  return {
+    pieces_ordered,
+    pieces_delivered: delivered,
+    pieces_remaining: remaining,
+    batches: deliveries.length,
+    state,
+    label: state === 'none' ? 'Not handed over yet' : state === 'complete' ? 'All pieces handed over' : `${delivered} of ${pieces_ordered} pieces handed over`
+  };
+};
+
+// What an order still needs before it may be marked Completed:
+//   1. production is done (it is Printing or Pressing; the status rules allow the move);
+//   2. nothing is left to pay (the Owner may complete with a balance due, and must confirm it);
+//   3. when it is delivered in batches, every piece has been handed over. With no batch recorded
+//      the whole order is handed over at once, and that hand-over is recorded on completion.
+// -> { ready, missing: [{ code, message }], warnings: [{ code, message }], auto_handover, balance_due }
+const completionCheck = ({ order, summary, fulfillment, unverified = 0 }) => {
+  const missing = [];
+  const warnings = [];
+  const status = order && order.production_status;
+  if (!['Printing', 'Pressing'].includes(status)) {
+    missing.push({ code: 'NOT_IN_PRODUCTION', message: 'Printing must have started before the order can be completed.' });
+  }
+  const remaining = summary ? Number(summary.remaining) : 0;
+  if (summary && summary.quote > 0 && remaining > 0) {
+    missing.push({
+      code: 'BALANCE_DUE',
+      message: `₱${remaining.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} is still unpaid. Record the final payment first.`
+    });
+  }
+  const f = fulfillment || fulfillmentSummary({});
+  if (f.batches > 0 && f.pieces_remaining > 0) {
+    missing.push({
+      code: 'PIECES_NOT_DELIVERED',
+      message: `${f.pieces_remaining} of ${f.pieces_ordered} pieces are not handed over yet. Record the last batch first.`
+    });
+  }
+  if (unverified > 0) {
+    warnings.push({ code: 'UNVERIFIED_PAYMENTS', message: `${unverified} non-cash payment(s) are not verified yet.` });
+  }
+  return {
+    ready: missing.length === 0,
+    missing,
+    warnings,
+    auto_handover: f.batches === 0 && f.pieces_ordered > 0,
+    balance_due: summary && summary.quote > 0 ? Math.max(0, remaining) : 0
+  };
+};
+
+// context (migration 015, all optional so older callers keep working):
+//   has_garments  the order has a garment: only then is the Pressing step offered
+//   fulfillment   fulfillmentSummary() of the order
+//   completion    completionCheck() of the order
+//   max_refund    services/domain/payments.js maxRefund() of the order
+const allowedActions = (order, role, summary = null, context = {}) => {
   if (isArchived(order)) {
     // Read-only: printing stays, every change waits for a restore
     return {
@@ -63,7 +128,9 @@ const allowedActions = (order, role, summary = null) => {
       link_design: false, add_items: false, record_payment: false, max_payment: 0,
       payment_blocked_reason: can(role, 'record_payment') ? ARCHIVED_REASON : null,
       print_receipt: can(role, 'view_orders'), print_quote: can(role, 'view_orders') && Number(order.total_quote_amount) > 0,
-      void_payment: false, log_loss: false, archive_order: false, restore_order: can(role, 'manage_accounts')
+      void_payment: false, log_loss: false, archive_order: false, restore_order: can(role, 'manage_accounts'),
+      edit_description: false, add_print_details: false, record_delivery: false, max_delivery: 0, complete_blocked_reason: null,
+      complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: false, edit_payment: false, adjust_price: false
     };
   }
   const status = order && order.production_status;
@@ -72,9 +139,19 @@ const allowedActions = (order, role, summary = null) => {
   const blocked = paymentBlockedReason(order, totals);
   const mayPay = Boolean(status) && can(role, 'record_payment');
   const quoteOpen = QUOTE_EDITABLE_STATUSES.includes(status);
+  const statuses = (STATUS_TRANSITIONS[status] || [])
+    .filter((to) => can(role, capabilityForTransition(to)))
+    // Pressing is the heat press for garments: tarpaulins, mugs and stickers go straight to Completed
+    .filter((to) => to !== 'Pressing' || context.has_garments !== false);
+  const completion = context.completion || null;
+  const fulfillment = context.fulfillment || null;
+  const completeBlocked = statuses.includes('Completed') && completion && !completion.ready
+    ? completion.missing.map((m) => m.message).join(' ')
+    : null;
+  const onlyBalanceMissing = Boolean(completion) && completion.missing.length > 0 && completion.missing.every((m) => m.code === 'BALANCE_DUE');
   return {
     approve: can(role, 'approve_order') && APPROVABLE_STATUSES.includes(status),
-    statuses: (STATUS_TRANSITIONS[status] || []).filter((to) => can(role, capabilityForTransition(to))),
+    statuses,
     edit_deadline: editable && can(role, 'edit_order'),
     edit_quote: quoteOpen && can(role, 'set_quote'),
     generate_quote: quoteOpen && can(role, 'set_quote'),
@@ -89,7 +166,20 @@ const allowedActions = (order, role, summary = null) => {
     void_payment: Boolean(status) && can(role, 'void_order'),
     log_loss: editable && can(role, 'edit_inventory'),
     archive_order: CLOSED_STATUSES.includes(status) && can(role, 'manage_accounts'),
-    restore_order: false
+    restore_order: false,
+    // migration 015
+    edit_description: editable && can(role, 'edit_order'),
+    add_print_details: editable && can(role, 'edit_order'),
+    record_delivery: DELIVERY_STATUSES.includes(status) && can(role, 'record_delivery') && Boolean(fulfillment) && fulfillment.pieces_remaining > 0,
+    max_delivery: DELIVERY_STATUSES.includes(status) && fulfillment ? fulfillment.pieces_remaining : 0,
+    complete_blocked_reason: completeBlocked,
+    complete_with_balance: statuses.includes('Completed') && onlyBalanceMissing && can(role, 'complete_with_balance'),
+    refund_payment: can(role, 'refund_payment') && Number(context.max_refund || 0) > 0,
+    max_refund: can(role, 'refund_payment') ? Number(context.max_refund || 0) : 0,
+    verify_payment: can(role, 'verify_payment'),
+    edit_payment: can(role, 'edit_payment'),
+    adjust_price: can(role, 'set_quote') && ['Approved', 'Printing', 'Pressing', 'Completed'].includes(status)
+      && (Number(totals.quote) > 0 || Number(order && order.adjustment_amount) > 0)
   };
 };
 
@@ -145,5 +235,9 @@ module.exports = {
   canTransition,
   allowedActions,
   isArchived,
-  ARCHIVED_REASON
+  ARCHIVED_REASON,
+  DELIVERY_STATUSES,
+  DELIVERY_METHODS,
+  fulfillmentSummary,
+  completionCheck
 };

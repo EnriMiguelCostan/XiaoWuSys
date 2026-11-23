@@ -102,10 +102,14 @@ const createApp = ({
   });
 
   app.use('/api/auth', require('./routes/auth'));
+  // migration 015: print details, deliveries, refunds... (first, so /api/orders/options is not an order id)
+  app.use('/api/orders', require('./routes/orderExtras'));
   app.use('/api/orders', require('./routes/orders'));
   app.use('/api/inventory', require('./routes/inventory'));
   app.use('/api/customers', require('./routes/customers'));
   app.use('/api/reports', require('./routes/reports'));
+  app.use('/api/stock', require('./routes/stock'));         // migration 015: stock in / out / count, stock card
+  app.use('/api/suppliers', require('./routes/suppliers')); // migration 015: supplier profiles
 
   // Health check (no login needed; reveals nothing sensitive: no URLs, no counts)
   app.get('/api/status', (req, res) => {

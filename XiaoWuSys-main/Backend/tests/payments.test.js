@@ -11,7 +11,7 @@ describe('Payments: balance limit, receiver and payment status', () => {
   let customer;
   const orders = {};
 
-  const pay = (orderId, amount, who = 'production', extra = {}) =>
+  const pay = (orderId, amount, who = 'staff', extra = {}) =>
     t.request('POST', `/api/orders/${orderId}/payments`, { token: t.tokens[who], body: { amount, payment_type: 'Cash', ...extra } });
   const paymentCount = async (orderId) => (await t.get('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?', [orderId])).n;
   const newOrder = async (quote, body = {}) => {
@@ -26,7 +26,7 @@ describe('Payments: balance limit, receiver and payment status', () => {
 
   before(async () => {
     t = await startTestServer();
-    for (const who of ['owner', 'admin', 'production', 'staff']) await t.login(who);
+    for (const who of ['owner', 'admin', 'staff', 'production']) await t.login(who);
     shirt = (await t.request('POST', '/api/inventory', { token: t.tokens.owner, body: fixtures.ITEMS[0] })).body.item.inventory_id;
     customer = (await t.request('POST', '/api/customers', { token: t.tokens.owner, body: fixtures.CUSTOMERS[0] })).body.customer.customer_id;
     orders.main = await newOrder(1000);
@@ -82,7 +82,7 @@ describe('Payments: balance limit, receiver and payment status', () => {
     const noQuote = await pay(orders.noQuote, 100);
     assert.deepEqual([noQuote.status, noQuote.body.error], [422, 'QUOTE_REQUIRED']);
     assert.match(noQuote.body.message, /Ask the Owner to set the quote/);
-    const staff = await pay(orders.odd, 1, 'staff');
+    const staff = await pay(orders.odd, 1, 'production');
     assert.equal(staff.status, 403);
     for (const id of [orders.cancelled, orders.noQuote]) assert.equal(await paymentCount(id), 0);
   });
@@ -90,7 +90,7 @@ describe('Payments: balance limit, receiver and payment status', () => {
   it('records who received the payment from the login, never from the request', async () => {
     const forOrder = await newOrder(2000);
     for (const extra of [{ received_by: 'u-owner' }, { receipt_no: 'AR-2026-9999' }]) {
-      const r = await pay(forOrder, 100, 'production', extra);
+      const r = await pay(forOrder, 100, 'staff', extra);
       assert.equal(r.status, 400, JSON.stringify(extra));
       assert.equal(r.body.error, 'VALIDATION_FAILED');
       assert.match(r.body.message, /filled in by the system/);
@@ -111,7 +111,7 @@ describe('Payments: balance limit, receiver and payment status', () => {
     assert.equal(r.body.source, 'local');
     assert.match(r.body.message, /saved on this computer/);
     assert.deepEqual([r.body.payment.sync_status, r.body.payment.receipt_no, r.body.payment.received_by, r.body.payment.received_by_name],
-      ['pending_insert', null, 'u-production', 'production']);
+      ['pending_insert', null, 'u-staff', 'staff']);
     assert.ok(t.localWrites.length > 0, 'the screens are told that a change is waiting to sync');
   });
 
@@ -132,21 +132,21 @@ describe('Payments: balance limit, receiver and payment status', () => {
     const r = await t.request('GET', `/api/orders/${orders.main}/payments`, { token: t.tokens.owner });
     assert.equal(r.status, 200, r.text);
     assert.deepEqual(r.body.payments.map((p) => [p.amount, p.paid_to_date, p.remaining_after, p.status_after, p.received_by_name]), [
-      [300, 300, 700, 'Partial', 'production'],
-      [700, 1000, 0, 'Fully Paid', 'production']
+      [300, 300, 700, 'Partial', 'staff'],
+      [700, 1000, 0, 'Fully Paid', 'staff']
     ]);
     assert.equal(r.body.totals.payment_status, 'Fully Paid');
     await t.run("INSERT INTO payments (payment_id, order_id, amount, payment_type, sync_status) VALUES ('old-pay', ?, 0, 'Cash', 'synced')", [orders.noQuote]);
-    const legacy = await t.request('GET', `/api/orders/${orders.noQuote}`, { token: t.tokens.staff });
+    const legacy = await t.request('GET', `/api/orders/${orders.noQuote}`, { token: t.tokens.production });
     assert.equal(legacy.body.payments[0].received_by_name, 'Not recorded', 'payments from before this update');
   });
 
   it('tells each role which payment buttons to show', async () => {
     const fresh = await newOrder(800);
     const detail = async (id, who) => (await t.request('GET', `/api/orders/${id}`, { token: t.tokens[who] })).body.allowed_actions;
-    const prod = await detail(fresh, 'production');
+    const prod = await detail(fresh, 'staff');
     assert.deepEqual([prod.record_payment, prod.max_payment, prod.print_receipt, prod.payment_blocked_reason], [true, 800, true, null]);
-    const staff = await detail(fresh, 'staff');
+    const staff = await detail(fresh, 'production');
     assert.deepEqual([staff.record_payment, staff.max_payment, staff.print_receipt], [false, 0, true]);
     const cancelled = await detail(orders.cancelled, 'owner');
     assert.deepEqual([cancelled.record_payment, cancelled.payment_blocked_reason], [false, 'This order was cancelled, so it cannot take payments.']);
@@ -162,7 +162,7 @@ describe('Payments: balance limit, receiver and payment status', () => {
     assert.deepEqual([over.payment_status, over.overpaid_by], ['Overpaid', 250]);
     assert.equal(owner.body.orders.overpaid_total, 250);
     assert.ok(owner.body.orders.due_this_week.every((o) => typeof o.payment_status === 'string'));
-    const staff = await t.request('GET', '/api/reports/dashboard', { token: t.tokens.staff });
+    const staff = await t.request('GET', '/api/reports/dashboard', { token: t.tokens.production });
     assert.deepEqual(staff.body.orders.overpaid, [], 'money figures stay with Owner and Admin');
     const detail = await t.request('GET', `/api/orders/${orders.main}`, { token: t.tokens.owner });
     assert.deepEqual([detail.body.totals.payment_status, detail.body.totals.overpaid_by, detail.body.totals.remaining], ['Overpaid', 250, 0]);
@@ -170,7 +170,7 @@ describe('Payments: balance limit, receiver and payment status', () => {
     const payments = await t.request('GET', '/api/reports/export/payments.csv', { token: t.tokens.owner });
     const lines = payments.text.slice(1).trim().split('\r\n');
     assert.equal(lines[0], 'Date,Receipt no.,Order,Customer,Payment type,Amount (PHP),Received by');
-    assert.ok(lines.some((l) => /,Given after sync,New order,Juan Dela Cruz,Cash,300,production$/.test(l)), lines.join('\n'));
+    assert.ok(lines.some((l) => /,Given after sync,New order,Juan Dela Cruz,Cash,300,staff$/.test(l)), lines.join('\n'));
     assert.ok(lines.some((l) => /,Cash,0,Not recorded$/.test(l)), 'a payment from before this update');
     const ordersCsv = await t.request('GET', '/api/reports/export/orders.csv', { token: t.tokens.owner });
     assert.match(ordersCsv.text, /Balance \(PHP\),Payment status,Materials/);
@@ -182,14 +182,14 @@ describe('Sync status (changes waiting to sync)', () => {
   let t;
   before(async () => {
     t = await startTestServer();
-    await t.login('staff');
+    await t.login('production');
     await t.login('owner');
   });
   after(async () => { await t.close(); });
 
   it('reports the offline-only mode and counts the changes waiting, per table', async () => {
     assert.equal((await t.request('GET', '/api/sync/status')).status, 401, 'needs a login');
-    const empty = await t.request('GET', '/api/sync/status', { token: t.tokens.staff });
+    const empty = await t.request('GET', '/api/sync/status', { token: t.tokens.production });
     assert.equal(empty.status, 200, empty.text);
     assert.deepEqual([empty.body.cloud, empty.body.pending, empty.body.pending_total, empty.body.conflicts], ['disabled', {}, 0, 0]);
 
@@ -200,10 +200,10 @@ describe('Sync status (changes waiting to sync)', () => {
       body: { customer_id: cust.body.customer.customer_id, production_deadline: shopDate(3), total_quote_amount: 600,
         required_items: [{ inventory_id: item.body.item.inventory_id, quantity_needed: 2 }] }
     });
-    await t.request('POST', `/api/orders/${order.body.order_id}/payments`, { token: t.tokens.owner, body: { amount: 300, payment_type: 'GCash' } });
+    await t.request('POST', `/api/orders/${order.body.order_id}/payments`, { token: t.tokens.owner, body: { amount: 300, payment_type: 'GCash', reference_no: '1004 123 456789' } });
     await t.run("UPDATE customers SET sync_conflict = 'changed online' WHERE customer_id = ?", [cust.body.customer.customer_id]);
 
-    const s = await t.request('GET', '/api/sync/status', { token: t.tokens.staff });
+    const s = await t.request('GET', '/api/sync/status', { token: t.tokens.production });
     assert.deepEqual(s.body.pending, { inventory_items: 1, order_profiles: 1, order_items: 1, payments: 1, inventory_audit_log: 1 });
     assert.equal(s.body.pending_total, 5);
     assert.equal(s.body.conflicts, 1, 'a record held back by a conflict is counted there, not as waiting');

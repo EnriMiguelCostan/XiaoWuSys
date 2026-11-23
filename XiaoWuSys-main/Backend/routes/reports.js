@@ -21,7 +21,7 @@ const { LOCAL_NOW } = require('../utils/localSync');
 const {
   listRecords, userNames, locateRecord, readLocal, serialize, selectList, withPgTransaction, withLocalTransaction, sqliteRun
 } = require('../services/records');
-const { paymentSummary, toCentavos, toPesos } = require('../services/domain/payments');
+const { paymentSummary, toCentavos, toPesos, needsVerification } = require('../services/domain/payments');
 const { can, rolesWith } = require('../services/domain/permissions');
 const { deadlineFlag } = require('../services/domain/orderLifecycle');
 const { buildInventorySnapshot } = require('../services/inventorySnapshot');
@@ -30,7 +30,7 @@ const { wasteSummary } = require('../services/domain/wasteReport');
 const { computePnl, defaultPeriod, shopDayOf, OVERHEAD_CATEGORIES } = require('../services/domain/pnl');
 const { writeAudit, writeAuditLocal } = require('../services/auditLog');
 
-const READ_ROLES = ['Owner', 'Admin', 'Production', 'Staff'];
+const READ_ROLES = rolesWith('view_orders');
 const FINANCE_ROLES = ['Owner', 'Admin'];
 const PNL_ROLES = rolesWith('set_quote');            // PB 22: the P&L is the Owner's (SIA 1 "Generate P&L Report")
 const OVERHEAD_DELETE_ROLES = rolesWith('void_order'); // removing a recorded expense is a void (Owner)
@@ -566,6 +566,244 @@ router.get('/export/pnl.csv', requireRole(PNL_ROLES), async (req, res) => {
     sendCsv(res, `pnl-${p.period.from}-to-${p.period.to}`, ['Section', 'Line', 'Amount (PHP)'], rows, p.source);
   } catch (err) {
     sendDbError(res, err, 'exporting the profit and loss report');
+  }
+});
+
+// ==========================================
+// MIGRATION 015 REPORTS (Finance and Waste pages)
+// GET /api/reports/payments?month=YYYY-MM          Owner, Admin
+//   ?until=YYYY-MM (default this month): the last month of the 12-month list
+//   -> { source, month, until, current_month, months: [{ month, received, refunded, voided, net, count }] (12 ending at until),
+//        detail: { month, payments: [{ ...payment, order_label, customer_name, received_by_name, kind, needs_verification }],
+//                  by_method: [{ payment_type, count, amount }], received, refunded, net, unverified,
+//                  billed: orders created this month (not cancelled), collected_on_those, progress_percent } }
+// GET /api/reports/waste?from=&to=   (default this month)   every account; costs for Owner / Admin
+//   -> { source, period, totals: { count, quantity, cost }, by_category, by_item, by_order, by_day, losses }
+// GET /api/reports/transactions?month=YYYY-MM     Owner, Admin
+//   -> { source, month, entries: [{ date, kind, label, reference, amount, direction: 'in' | 'out' }],
+//        totals: { money_in, refunds, expenses, purchases, net } }   (purchases = stock in, needs the cloud)
+// ==========================================
+const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+const readMonth = (req, res, name = 'month') => {
+  const m = req.query[name];
+  if (m === undefined || m === '') return localDateTime(new Date()).slice(0, 7);
+  if (typeof m !== 'string' || !MONTH_PATTERN.test(m) || m < '2018-01' || m > '2034-12') {
+    res.status(400).json({ error: 'VALIDATION_FAILED', message: 'Month must look like 2026-11.', details: [{ field: name, message: 'Month must look like 2026-11.' }] });
+    return null;
+  }
+  return m;
+};
+const lastMonths = (month, n) => {
+  const out = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(`${month}-01T00:00:00Z`);
+    d.setUTCMonth(d.getUTCMonth() - i);
+    out.push(d.toISOString().slice(0, 7));
+  }
+  return out;
+};
+const kindOf = (p) => (p.is_refund ? 'Refund' : p.voids_payment_id ? 'Void' : 'Payment');
+
+router.get('/payments', requireRole(FINANCE_ROLES), async (req, res) => {
+  const month = readMonth(req, res);
+  if (!month) return;
+  // The 12-month list ends at ?until= (default: this month), NOT at the month opened, so opening an
+  // old month no longer pushes the list back a year with no way to return
+  const until = readMonth(req, res, 'until');
+  if (!until) return;
+  try {
+    const data = await loadAll(req);
+    const months = lastMonths(until, 12);
+    const per = Object.fromEntries(months.map((m) => [m, { receivedC: 0, refundedC: 0, voidedC: 0, count: 0 }]));
+    const monthOf = (p) => (shopDayOf(p.payment_date) || '').slice(0, 7);
+    for (const p of data.payments) {
+      const m = monthOf(p);
+      if (!per[m]) continue;
+      const c = toCentavos(p.amount);
+      if (p.is_refund) per[m].refundedC += -c;
+      else if (p.voids_payment_id) per[m].voidedC += -c;
+      else { per[m].receivedC += c; per[m].count += 1; }
+    }
+    const ordersById = new Map(data.orders.map((o) => [o.order_id, o]));
+    const inMonth = data.payments.filter((p) => monthOf(p) === month)
+      .sort((a, b) => String(b.payment_date).localeCompare(String(a.payment_date)));
+    const names = await userNames(req, inMonth.map((p) => p.received_by));
+    const byMethod = new Map();
+    let unverified = 0;
+    for (const p of inMonth) {
+      if (kindOf(p) !== 'Payment') continue;
+      const g = byMethod.get(p.payment_type) || { payment_type: p.payment_type, count: 0, amountC: 0 };
+      g.count += 1;
+      g.amountC += toCentavos(p.amount);
+      byMethod.set(p.payment_type, g);
+      if (needsVerification(p)) unverified += 1;
+    }
+    // Collection progress: what orders created this month were billed, and how much of it is in
+    const created = data.orders.filter((o) => (shopDayOf(o.date_created) || '').slice(0, 7) === month && o.production_status !== 'Cancelled');
+    const billedC = created.reduce((s, o) => s + toCentavos(o.total_quote_amount), 0);
+    const collectedC = created.reduce((s, o) => s + Math.max(0, toCentavos(data.summaryOf(o).total_paid)), 0);
+    // The opened month's totals from its own payments (it may be outside the 12-month list)
+    const p0 = { receivedC: 0, refundedC: 0, voidedC: 0 };
+    for (const p of inMonth) {
+      const c = toCentavos(p.amount);
+      if (p.is_refund) p0.refundedC += -c;
+      else if (p.voids_payment_id) p0.voidedC += -c;
+      else p0.receivedC += c;
+    }
+    res.status(200).json({
+      source: data.source,
+      month,
+      until,
+      current_month: localDateTime(new Date()).slice(0, 7),
+      months: months.map((m) => ({
+        month: m, received: toPesos(per[m].receivedC), refunded: toPesos(per[m].refundedC), voided: toPesos(per[m].voidedC),
+        net: toPesos(per[m].receivedC - per[m].refundedC - per[m].voidedC), count: per[m].count
+      })),
+      detail: {
+        month,
+        payments: inMonth.map((p) => {
+          const o = ordersById.get(p.order_id);
+          return {
+            ...p,
+            kind: kindOf(p),
+            order_label: orderLabel(o || { order_id: p.order_id }),
+            customer_name: o ? (data.customers.get(o.customer_id)?.full_name || 'Unknown customer') : 'Unknown customer',
+            received_by_name: (p.received_by && names.get(p.received_by)) || 'Not recorded',
+            needs_verification: needsVerification(p)
+          };
+        }),
+        by_method: [...byMethod.values()].sort((a, b) => b.amountC - a.amountC).map((g) => ({ payment_type: g.payment_type, count: g.count, amount: toPesos(g.amountC) })),
+        received: toPesos(p0.receivedC),
+        refunded: toPesos(p0.refundedC),
+        voided: toPesos(p0.voidedC),
+        net: toPesos(p0.receivedC - p0.refundedC - p0.voidedC),
+        unverified,
+        billed: toPesos(billedC),
+        collected_on_those: toPesos(collectedC),
+        progress_percent: billedC > 0 ? Math.min(100, Math.round((collectedC / billedC) * 100)) : null,
+        orders_created: created.length
+      }
+    });
+  } catch (err) {
+    sendDbError(res, err, 'building the payments report');
+  }
+});
+
+router.get('/waste', requireRole(READ_ROLES), async (req, res) => {
+  const period = readPeriod(req, res);
+  if (!period) return;
+  try {
+    const [wasteData, orders] = await Promise.all([
+      loadAllLosses(req),
+      listRecords(req, 'order_profiles', { orderBy: 'order_id', limit: MAX_ROWS })
+    ]);
+    const showCosts = can(req.user.role, 'view_finance');
+    const money = (c) => (showCosts ? toPesos(c) : null);
+    const byId = new Map(orders.records.map((o) => [o.order_id, o]));
+    const rows = wasteData.losses.filter((l) => {
+      const day = shopDayOf(l.date_recorded);
+      return day && day >= period.from && day <= period.to;
+    });
+    const group = (keyOf, labelOf) => {
+      const m = new Map();
+      for (const l of rows) {
+        const key = keyOf(l);
+        if (key === null) continue;
+        const g = m.get(key) || { key, label: labelOf(l), count: 0, quantity: 0, costC: 0 };
+        g.count += 1;
+        g.quantity += Number(l.quantity_lost) || 0;
+        g.costC += toCentavos(l.financial_cost);
+        m.set(key, g);
+      }
+      return [...m.values()].sort((a, b) => b.costC - a.costC || b.quantity - a.quantity)
+        .map((g) => ({ key: g.key, label: g.label, count: g.count, quantity: g.quantity, cost: money(g.costC) }));
+    };
+    const totalC = rows.reduce((s, l) => s + toCentavos(l.financial_cost), 0);
+    res.status(200).json({
+      source: [wasteData.source, orders.source].includes('local') ? 'local' : 'cloud',
+      period,
+      costs_visible: showCosts,
+      totals: { count: rows.length, quantity: rows.reduce((s, l) => s + (Number(l.quantity_lost) || 0), 0), cost: money(totalC) },
+      by_category: group((l) => l.category_label || 'Not classified', (l) => l.category_label || 'Not classified'),
+      by_item: group((l) => l.inventory_id, (l) => l.item_name),
+      by_order: group((l) => l.order_id || null, (l) => orderLabel(byId.get(l.order_id) || { order_id: l.order_id })),
+      by_day: group((l) => shopDayOf(l.date_recorded), (l) => shopDayOf(l.date_recorded)).sort((a, b) => a.key.localeCompare(b.key)),
+      losses: rows.map((l) => ({
+        ...l,
+        order_label: l.order_id ? orderLabel(byId.get(l.order_id) || { order_id: l.order_id }) : null,
+        financial_cost: money(toCentavos(l.financial_cost))
+      }))
+    });
+  } catch (err) {
+    sendDbError(res, err, 'building the waste report');
+  }
+});
+
+router.get('/transactions', requireRole(FINANCE_ROLES), async (req, res) => {
+  const month = readMonth(req, res);
+  if (!month) return;
+  try {
+    const data = await loadAll(req);
+    const overheads = await listRecords(req, 'overhead_expenses', { orderBy: 'expense_date, expense_id', limit: MAX_ROWS });
+    const ordersById = new Map(data.orders.map((o) => [o.order_id, o]));
+    const entries = [];
+    for (const p of data.payments) {
+      if ((shopDayOf(p.payment_date) || '').slice(0, 7) !== month) continue;
+      const o = ordersById.get(p.order_id);
+      const kind = kindOf(p);
+      entries.push({
+        date: toShopTime(p.payment_date),
+        kind,
+        label: `${kind === 'Payment' ? 'Payment' : kind === 'Refund' ? 'Refund' : 'Voided payment'}: ${o ? (data.customers.get(o.customer_id)?.full_name || '') : ''}`.trim(),
+        reference: [p.receipt_no, orderLabel(o || { order_id: p.order_id })].filter(Boolean).join(' · '),
+        method: p.payment_type,
+        amount: Math.abs(p.amount),
+        direction: p.amount >= 0 ? 'in' : 'out'
+      });
+    }
+    for (const e of overheads.records) {
+      if (String(e.expense_date).slice(0, 7) !== month) continue;
+      entries.push({ date: e.expense_date, kind: 'Expense', label: `${e.category}: ${e.description}`, reference: null, method: null, amount: e.amount, direction: 'out' });
+    }
+    let purchasesAvailable = true;
+    try {
+      const from = `${month}-01`;
+      // A day either side of the month (UTC vs shop time), then filtered by the shop day below
+      const { rows } = await req.pgPool.query(
+        `SELECT d.document_no, d.total_cost::text AS total_cost, to_char(d.occurred_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS occurred_at, s.supplier_name
+           FROM stock_documents d LEFT JOIN suppliers s ON s.supplier_id = d.supplier_id
+          WHERE d.document_type = 'stock_in' AND d.voided_at IS NULL
+            AND d.occurred_at >= ($1::date - INTERVAL '1 day') AND d.occurred_at < ($1::date + INTERVAL '32 days')`, [from]);
+      for (const r of rows) {
+        const day = shopDayOf(r.occurred_at) || '';
+        if (day.slice(0, 7) !== month) continue;
+        entries.push({
+          date: toShopTime(r.occurred_at), kind: 'Purchase', label: `Stock in from ${r.supplier_name || 'a supplier'}`,
+          reference: r.document_no, method: null, amount: Math.round(Number(r.total_cost) * 100) / 100, direction: 'out'
+        });
+      }
+    } catch (err) {
+      if (!isConnectionError(err)) throw err;
+      purchasesAvailable = false;
+    }
+    entries.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    const sum = (pred) => toPesos(entries.filter(pred).reduce((s, e) => s + toCentavos(e.amount), 0));
+    const moneyIn = sum((e) => e.kind === 'Payment');
+    const refunds = sum((e) => e.kind === 'Refund' || e.kind === 'Void');
+    const expenses = sum((e) => e.kind === 'Expense');
+    const purchases = sum((e) => e.kind === 'Purchase');
+    res.status(200).json({
+      source: purchasesAvailable ? data.source : 'local',
+      month,
+      purchases_available: purchasesAvailable,
+      entries,
+      totals: {
+        money_in: moneyIn, refunds, expenses, purchases,
+        net: toPesos(toCentavos(moneyIn) - toCentavos(refunds) - toCentavos(expenses) - toCentavos(purchases))
+      }
+    });
+  } catch (err) {
+    sendDbError(res, err, 'building the monthly transactions');
   }
 });
 
