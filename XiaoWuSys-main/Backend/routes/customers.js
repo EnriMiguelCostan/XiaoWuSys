@@ -17,6 +17,16 @@
 //         allowed_actions }
 //   PATCH /api/customers/:customer_id             any profile field (works offline too; synced later)
 //         409 DUPLICATE_CUSTOMER when the new name + number belong to another customer
+// Migration 016 (adviser consultation):
+//   the contact person's own details: contact_person_number, contact_person_email, contact_person_social
+//   social_media may list several accounts (one per line)
+//   GET /api/customers/:customer_id also sends branches, and each order its group
+//     ('pending' = waiting for approval, 'current' = approved and in production, 'past' = completed or
+//     cancelled) and the branch it is for (null = the main branch, the client's own address)
+//   POST   /api/customers/:customer_id/branches             { branch_name, address?, contact_person?, contact_number?, email?, notes? }
+//   PATCH  /api/customers/:customer_id/branches/:branch_id  (any of those)
+//   POST   /api/customers/:customer_id/branches/:branch_id/archive | restore
+//   Branches are changed online only (copied down so an order can name its branch offline).
 // ==========================================
 const express = require('express');
 const crypto = require('crypto');
@@ -60,17 +70,27 @@ const nameKey = (s) => s.toLowerCase().replace(/\s+/g, ' ').trim();
 
 // ---------- migration 015: the client profile ----------
 const CUSTOMER_TYPES = ['Individual', 'School', 'Company', 'Organization', 'Government', 'Reseller'];
-const PROFILE_FIELDS = ['customer_type', 'contact_person', 'email', 'address', 'social_media', 'notes'];
+const PROFILE_FIELDS = ['customer_type', 'contact_person', 'email', 'address', 'social_media', 'notes',
+  'contact_person_number', 'contact_person_email', 'contact_person_social'];
+const SOCIAL_MAX = 1000; // several accounts, one per line
 const readProfile = (v, body) => {
   const out = {};
   if (body.customer_type !== undefined) out.customer_type = v.oneOf(body.customer_type, 'customer_type', CUSTOMER_TYPES, { required: false }) || 'Individual';
   if (body.contact_person !== undefined) out.contact_person = v.optionalString(body.contact_person, 'contact_person', 255);
   if (body.email !== undefined) out.email = v.email(body.email, 'email');
   if (body.address !== undefined) out.address = v.optionalString(body.address, 'address', 1000);
-  if (body.social_media !== undefined) out.social_media = v.optionalString(body.social_media, 'social_media', 255);
+  if (body.social_media !== undefined) out.social_media = v.optionalString(body.social_media, 'social_media', SOCIAL_MAX);
   if (body.notes !== undefined) out.notes = v.optionalString(body.notes, 'notes', 1000);
+  // migration 016: the contact person's own phone (mobile or landline), email and social media
+  if (body.contact_person_number !== undefined) out.contact_person_number = v.phone(body.contact_person_number, 'contact_person_number');
+  if (body.contact_person_email !== undefined) out.contact_person_email = v.email(body.contact_person_email, 'contact_person_email');
+  if (body.contact_person_social !== undefined) out.contact_person_social = v.optionalString(body.contact_person_social, 'contact_person_social', SOCIAL_MAX);
   return out;
 };
+
+// migration 016: which part of the client's history an order belongs to
+const ORDER_GROUPS = { Pending: 'pending', Delayed: 'pending', Completed: 'past', Cancelled: 'past' };
+const groupOf = (status) => ORDER_GROUPS[status] || 'current';
 
 router.get('/options', requireRole(READ_ROLES), (req, res) => {
   res.status(200).json({ customer_types: CUSTOMER_TYPES });
@@ -214,6 +234,11 @@ router.get('/:customer_id', requireRole(READ_ROLES), async (req, res) => {
     const orders = await listRecords(req, 'order_profiles', {
       filters: [['customer_id', customer_id]], orderBy: 'order_profiles.date_created DESC, order_profiles.order_id', limit: 500
     });
+    // migration 016: the client's other branches (archived ones too, so old orders still name theirs)
+    const branches = await listRecords(req, 'customer_branches', {
+      filters: [['customer_id', customer_id]], orderBy: 'customer_branches.branch_name, customer_branches.branch_id', limit: 200
+    });
+    const branchById = new Map(branches.records.map((b) => [b.branch_id, b]));
     // Payments of these orders (one query per order would be slow for a school with 100 orders)
     const ids = orders.records.map((o) => o.order_id);
     const paymentsByOrder = new Map(ids.map((id) => [id, []]));
@@ -232,15 +257,26 @@ router.get('/:customer_id', requireRole(READ_ROLES), async (req, res) => {
       }
       paidC += Math.round(s.total_paid * 100);
       if (!['Completed', 'Cancelled'].includes(o.production_status)) open += 1;
-      return { ...withDeadlineFlag(o), total_paid: s.total_paid, remaining: s.remaining, payment_status: s.payment_status };
+      const branch = o.branch_id ? branchById.get(o.branch_id) : null;
+      return {
+        ...withDeadlineFlag(o), total_paid: s.total_paid, remaining: s.remaining, payment_status: s.payment_status,
+        group: groupOf(o.production_status),
+        branch_name: branch ? branch.branch_name : null,
+        branch_address: branch ? branch.address : customer.address
+      };
     });
+    const count = (g) => shown.filter((o) => o.group === g).length;
     res.status(200).json({
-      source: [source, orders.source].includes('local') ? 'local' : 'cloud',
+      source: [source, orders.source, branches.source].includes('local') ? 'local' : 'cloud',
       customer,
       orders: shown,
+      branches: branches.records,
       totals: {
         order_count: shown.length,
         open_orders: open,
+        pending_orders: count('pending'),
+        current_orders: count('current'),
+        past_orders: count('past'),
         total_billed: billedC / 100,
         total_paid: paidC / 100,
         balance_due: dueC / 100,
@@ -250,7 +286,8 @@ router.get('/:customer_id', requireRole(READ_ROLES), async (req, res) => {
         edit: can(req.user.role, 'edit_customer') && !customer.archived_at,
         create_order: can(req.user.role, 'create_order') && !customer.archived_at,
         archive: can(req.user.role, 'manage_accounts') && !customer.archived_at,
-        restore: can(req.user.role, 'manage_accounts') && Boolean(customer.archived_at)
+        restore: can(req.user.role, 'manage_accounts') && Boolean(customer.archived_at),
+        manage_branches: can(req.user.role, 'edit_customer') && !customer.archived_at
       }
     });
   } catch (err) {
@@ -323,6 +360,114 @@ router.patch('/:customer_id', requireRole(EDIT_ROLES), async (req, res) => {
     sendDbError(res, err, 'editing a customer');
   }
 });
+
+// ---------- migration 016: a client's branches (online only) ----------
+const BRANCH_FIELDS = ['branch_name', 'address', 'contact_person', 'contact_number', 'email', 'notes'];
+const readBranch = (body, { partial }) => {
+  const v = createValidator();
+  const out = {};
+  const given = (f) => body[f] !== undefined;
+  if (!partial || given('branch_name')) out.branch_name = v.requiredString(body.branch_name, 'branch_name', 255);
+  if (given('address')) out.address = v.optionalString(body.address, 'address', 1000);
+  if (given('contact_person')) out.contact_person = v.optionalString(body.contact_person, 'contact_person', 255);
+  if (given('contact_number')) out.contact_number = v.phone(body.contact_number, 'contact_number');
+  if (given('email')) out.email = v.email(body.email, 'email');
+  if (given('notes')) out.notes = v.optionalString(body.notes, 'notes', 1000);
+  if (partial && Object.keys(out).length === 0 && !v.failed()) v.errors.push({ field: 'body', message: 'Nothing to change.' });
+  return { v, fields: out };
+};
+const BRANCH_NEEDS_CLOUD = {
+  error: 'BRANCH_REQUIRES_CLOUD',
+  message: 'Branches are saved in the cloud so every computer sees the same list. Nothing was saved. Try again when online.'
+};
+const branchNotFound = () => new Rejected(404, { error: 'BRANCH_NOT_FOUND', message: 'We could not find this branch.' });
+router.param('branch_id', (req, res, next, value) => {
+  const v = createValidator();
+  v.id(value, 'branch_id');
+  if (v.failed()) return v.send(res);
+  next();
+});
+
+const branchRoute = (handler) => async (req, res) => {
+  try {
+    const located = await locateRecord(req, 'customers', req.params.customer_id);
+    if (!located.location) return res.status(404).json({ error: 'CUSTOMER_NOT_FOUND', message: 'We could not find this customer.' });
+    if (!located.cloudReachable) return res.status(503).json(BRANCH_NEEDS_CLOUD);
+    if (located.location === 'local') {
+      return res.status(409).json({ error: 'CUSTOMER_NOT_SYNCED', message: 'This client was saved offline and is not in the cloud yet. Sync first.' });
+    }
+    const out = await withPgTransaction(req.pgPool, async (client) => {
+      const owner = await client.query('SELECT archived_at FROM customers WHERE customer_id = $1 FOR UPDATE', [req.params.customer_id]);
+      if (owner.rowCount === 0) throw new Rejected(404, { error: 'CUSTOMER_NOT_FOUND', message: 'We could not find this customer.' });
+      if (owner.rows[0].archived_at) throw new Rejected(409, { error: 'RECORD_ARCHIVED', message: 'This client is archived. Restore them first.' });
+      return handler(req, client);
+    });
+    await refreshLocalRows(req.pgPool, req.localDb, 'customer_branches', [out.branch.branch_id]).catch(() => {});
+    res.status(out.status || 200).json({ message: out.message, source: 'cloud', branch: out.branch });
+  } catch (err) {
+    if (err instanceof Rejected) return res.status(err.status).json(err.body);
+    if (isConnectionError(err)) return res.status(503).json(BRANCH_NEEDS_CLOUD);
+    sendDbError(res, err, 'saving a branch');
+  }
+};
+
+router.post('/:customer_id/branches', requireRole(EDIT_ROLES), branchRoute(async (req, client) => {
+  const { customer_id } = req.params;
+  const { v, fields } = readBranch(req.body || {}, { partial: false });
+  if (v.failed()) throw new Rejected(400, { error: 'VALIDATION_FAILED', message: v.errors[0].message, details: v.errors });
+  const name = fields.branch_name.replace(/\s+/g, ' ');
+  const dup = await client.query(
+    `SELECT branch_id FROM customer_branches WHERE customer_id = $1 AND LOWER(REGEXP_REPLACE(TRIM(branch_name), '\\s+', ' ', 'g')) = $2`,
+    [customer_id, nameKey(name)]);
+  if (dup.rowCount > 0) throw new Rejected(409, { error: 'DUPLICATE_BRANCH', message: `This client already has a branch called ${name}.` });
+  const branch_id = `BR-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+  const { rows } = await client.query(
+    `INSERT INTO customer_branches (branch_id, customer_id, branch_name, address, contact_person, contact_number, email, notes, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING ${selectList('customer_branches', 'pg')}`,
+    [branch_id, customer_id, name, fields.address || null, fields.contact_person || null, fields.contact_number || null,
+      fields.email || null, fields.notes || null, req.user.user_id]);
+  await writeAudit(client, { entity: 'customer_branches', entity_id: branch_id, action: 'branch_added', actor: req.user, details: { customer_id, branch_name: name } });
+  return { status: 201, branch: serialize('customer_branches', rows[0]), message: `Branch ${name} added.` };
+}));
+
+router.patch('/:customer_id/branches/:branch_id', requireRole(EDIT_ROLES), branchRoute(async (req, client) => {
+  const { customer_id, branch_id } = req.params;
+  const { v, fields } = readBranch(req.body || {}, { partial: true });
+  if (v.failed()) throw new Rejected(400, { error: 'VALIDATION_FAILED', message: v.errors[0].message, details: v.errors });
+  const cur = await client.query(
+    `SELECT ${selectList('customer_branches', 'pg')} FROM customer_branches WHERE branch_id = $1 AND customer_id = $2 FOR UPDATE`, [branch_id, customer_id]);
+  if (cur.rowCount === 0) throw branchNotFound();
+  const current = serialize('customer_branches', cur.rows[0]);
+  if (fields.branch_name) fields.branch_name = fields.branch_name.replace(/\s+/g, ' ');
+  const cols = BRANCH_FIELDS.filter((f) => fields[f] !== undefined && (fields[f] ?? null) !== (current[f] ?? null));
+  if (cols.length === 0) return { branch: current, message: 'Nothing changed.' };
+  const { rows } = await client.query(
+    `UPDATE customer_branches SET ${cols.map((c, i) => `${c} = $${i + 2}`).join(', ')} WHERE branch_id = $1 RETURNING ${selectList('customer_branches', 'pg')}`,
+    [branch_id, ...cols.map((c) => fields[c] || null)]);
+  await writeAudit(client, {
+    entity: 'customer_branches', entity_id: branch_id, action: 'branch_edited', actor: req.user,
+    details: { customer_id, before: Object.fromEntries(cols.map((c) => [c, current[c]])), after: Object.fromEntries(cols.map((c) => [c, fields[c]])) }
+  });
+  return { branch: serialize('customer_branches', rows[0]), message: `Branch ${rows[0].branch_name} updated.` };
+}));
+
+const branchArchiveRoute = (archive) => branchRoute(async (req, client) => {
+  const { customer_id, branch_id } = req.params;
+  const { rows } = await client.query(
+    `UPDATE customer_branches SET archived_at = ${archive ? 'NOW()' : 'NULL'}, archived_by = $3
+      WHERE branch_id = $1 AND customer_id = $2 RETURNING ${selectList('customer_branches', 'pg')}`,
+    [branch_id, customer_id, archive ? req.user.user_id : null]);
+  if (rows.length === 0) throw branchNotFound();
+  await writeAudit(client, {
+    entity: 'customer_branches', entity_id: branch_id, action: archive ? 'branch_archived' : 'branch_restored', actor: req.user, details: { customer_id }
+  });
+  return {
+    branch: serialize('customer_branches', rows[0]),
+    message: archive ? `Branch ${rows[0].branch_name} archived. Its past orders keep it; new orders cannot choose it.` : `Branch ${rows[0].branch_name} restored.`
+  };
+});
+router.post('/:customer_id/branches/:branch_id/archive', requireRole(EDIT_ROLES), branchArchiveRoute(true));
+router.post('/:customer_id/branches/:branch_id/restore', requireRole(EDIT_ROLES), branchArchiveRoute(false));
 
 router.post('/:customer_id/archive', requireRole(ARCHIVE_ROLES), archiveRoute(true));
 router.post('/:customer_id/restore', requireRole(ARCHIVE_ROLES), archiveRoute(false));

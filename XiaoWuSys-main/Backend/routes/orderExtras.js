@@ -16,9 +16,19 @@
 //        for a material can never be more than the order has of it (409 PRINT_DETAILS_EXCEED_MATERIAL).
 //
 // Deliveries / pick-ups in batches (online only, 503 DELIVERY_REQUIRES_CLOUD):
-// POST   /api/orders/:order_id/deliveries              { quantity, delivered_at?, method?, received_by_name?, notes? }
+// POST   /api/orders/:order_id/deliveries              { quantity, delivered_at?, method?, received_by_name?, notes?, plan_id? }
 // PATCH  /api/orders/:order_id/deliveries/:delivery_id (any of those)
 // DELETE /api/orders/:order_id/deliveries/:delivery_id
+// Migration 016 (adviser consultation): batches planned ahead, and design files from the computer
+// POST   /api/orders/:order_id/delivery-plans           { planned_quantity, planned_date?, notes? }
+// PATCH  /api/orders/:order_id/delivery-plans/:plan_id  { planned_quantity?, planned_date?, notes?, ready? }
+// DELETE /api/orders/:order_id/delivery-plans/:plan_id  (only while nothing of it was handed over)
+//   When batches are planned, every hand-over names its batch (plan_id), a batch is handed over
+//   only once it is marked ready, and the order is Completed only when every batch is delivered.
+// GET    /api/orders/:order_id/design-files             -> { files, available }
+// POST   /api/orders/:order_id/design-files?name=&notes=   body: the file itself (any content type), 20 MB max
+// GET    /api/orders/:order_id/design-files/:file_id    the file (download, or ?inline=1 for an image preview)
+// DELETE /api/orders/:order_id/design-files/:file_id
 //        From Approved until the order is closed; never more pieces than are left to hand over.
 //
 // Money (online only):
@@ -36,10 +46,13 @@ const { isConnectionError, sendDbError } = require('../utils/dbErrors');
 const { createValidator, PAYMENT_TYPES } = require('../utils/validation');
 const { LOCAL_NOW } = require('../utils/localSync');
 const {
-  selectList, serialize, listRecords, getRecord, locateRecord, withPgTransaction, withLocalTransaction, sqliteRun, sqliteAll, readLocal
+  selectList, serialize, listRecords, getRecord, locateRecord, withPgTransaction, withLocalTransaction, sqliteRun, sqliteAll, readLocal,
+  userNames
 } = require('../services/records');
 const { rolesWith, can } = require('../services/domain/permissions');
-const { EDITABLE_STATUSES, CLOSED_STATUSES, DELIVERY_STATUSES, DELIVERY_METHODS, fulfillmentSummary, withDeadlineFlag } = require('../services/domain/orderLifecycle');
+const {
+  EDITABLE_STATUSES, CLOSED_STATUSES, DELIVERY_STATUSES, DELIVERY_METHODS, fulfillmentSummary, planSummary, withDeadlineFlag
+} = require('../services/domain/orderLifecycle');
 const {
   paymentMethodForms, checkPaymentDetails, PAYMENT_DETAIL_NAMES, REFUND_REASONS, checkRefund, toCentavos, toPesos, pesoText
 } = require('../services/domain/payments');
@@ -48,6 +61,10 @@ const { normalizeRequiredItems } = require('../services/capacity');
 const { GARMENT_SIZES, PRINT_LIMITS, checkPrintLine, overListed, defaultMaterialFor } = require('../services/domain/printDetails');
 const { catalogFacts, describeMaterials, piecesOf } = require('../services/orderContext');
 const { writeAudit } = require('../services/auditLog');
+const {
+  MAX_FILE_BYTES, MAX_FILES_PER_ORDER, FILE_NOTES_MAX, FILE_COLUMNS, checkUpload, contentDisposition, shownFile, listDesignFiles,
+  isPreviewable
+} = require('../services/designFiles');
 const { refreshLocalRows } = require('../services/sync');
 const { helpers } = require('./orders');
 
@@ -64,7 +81,9 @@ const needsCloud = (what) => ({
     print_detail: 'Changing or removing a print detail needs the cloud connection. Adding new ones works offline.',
     refund: 'A refund needs the cloud connection, so every branch sees the same totals. Nothing was saved. Try again when online.',
     payment_check: 'Checking or correcting a payment needs the cloud connection. Try again when online.',
-    price_adjustment: 'A price cut needs the cloud connection, so every branch sees the same bill. Try again when online.'
+    price_adjustment: 'A price cut needs the cloud connection, so every branch sees the same bill. Try again when online.',
+    delivery_plan: 'Planning delivery batches needs the cloud connection, so every branch sees the same plan. Nothing was saved. Try again when online.',
+    design_file: 'Design files are kept in the cloud, so attaching, opening or removing one needs the internet connection. Try again when online.'
   }[what]
 });
 const sendError = (res, err, context, cloudBody) => {
@@ -75,7 +94,7 @@ const sendError = (res, err, context, cloudBody) => {
 const orderNotFound = () => new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
 
 router.use(verifyToken);
-for (const name of ['order_id', 'print_detail_id', 'delivery_id', 'payment_id']) {
+for (const name of ['order_id', 'print_detail_id', 'delivery_id', 'payment_id', 'plan_id', 'file_id']) {
   router.param(name, (req, res, next, value) => {
     const v = createValidator();
     v.id(value, name);
@@ -388,6 +407,7 @@ const readDelivery = (body, { partial }) => {
   if (!partial || given('method')) out.method = v.oneOf(body.method, 'method', DELIVERY_METHODS, { required: false }) || 'Pick-up';
   if (given('received_by_name')) out.received_by_name = v.optionalString(body.received_by_name, 'received_by_name', 255);
   if (given('notes')) out.notes = v.optionalString(body.notes, 'notes', 500);
+  if (given('plan_id')) out.plan_id = body.plan_id === null ? null : v.id(body.plan_id, 'plan_id'); // migration 016
   if (partial && Object.keys(out).length === 0 && !v.failed()) v.errors.push({ field: 'body', message: 'Nothing to change.' });
   return { v, fields: out };
 };
@@ -404,7 +424,51 @@ const lockForDelivery = async (client, req, order_id) => {
        FROM order_items oi LEFT JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id WHERE oi.order_id = $1`, [order_id]);
   const batches = await client.query(
     `SELECT ${selectList('order_deliveries', 'pg')} FROM order_deliveries WHERE order_id = $1 ORDER BY batch_no FOR UPDATE`, [order_id]);
-  return { order, pieces: facts.rows[0].pieces, deliveries: batches.rows.map((r) => serialize('order_deliveries', r)) };
+  // migration 016: the batches planned ahead
+  const plans = await client.query(
+    `SELECT ${selectList('order_delivery_plans', 'pg')} FROM order_delivery_plans WHERE order_id = $1 ORDER BY batch_no FOR UPDATE`, [order_id]);
+  return {
+    order,
+    pieces: facts.rows[0].pieces,
+    deliveries: batches.rows.map((r) => serialize('order_deliveries', r)),
+    plans: plans.rows.map((r) => serialize('order_delivery_plans', r))
+  };
+};
+
+// migration 016: the planned batch a hand-over is for. With batches planned, every hand-over must
+// name a batch that is ready, and may not hand over more than is left of it.
+//   quantity: the pieces of this hand-over; others: the other hand-overs of the order
+const checkPlannedBatch = ({ plans, others, plan_id, quantity }) => {
+  if (plans.length === 0) {
+    if (plan_id) throw new Rejected(400, { error: 'VALIDATION_FAILED', message: 'This order has no planned batches.', details: [{ field: 'plan_id', message: 'No planned batch to choose.' }] });
+    return null;
+  }
+  if (!plan_id) {
+    throw new Rejected(400, {
+      error: 'VALIDATION_FAILED',
+      message: 'This order is delivered in planned batches. Choose which batch these pieces belong to.',
+      details: [{ field: 'plan_id', message: 'Choose the planned batch.' }]
+    });
+  }
+  const plan = plans.find((p) => p.plan_id === plan_id);
+  if (!plan) throw new Rejected(404, { error: 'DELIVERY_PLAN_NOT_FOUND', message: 'We could not find this planned batch.' });
+  const summary = planSummary(plan, others);
+  if (!plan.ready_at) {
+    throw new Rejected(409, {
+      error: 'BATCH_NOT_READY',
+      message: `Planned batch #${plan.batch_no} is not marked ready yet. Mark it ready when its pieces are done, then record the hand-over.`
+    });
+  }
+  if (quantity > summary.remaining) {
+    throw new Rejected(409, {
+      error: 'DELIVERY_EXCEEDS_BATCH',
+      message: summary.remaining > 0
+        ? `Planned batch #${plan.batch_no} has only ${summary.remaining} piece${summary.remaining === 1 ? '' : 's'} left to hand over.`
+        : `Planned batch #${plan.batch_no} was already handed over in full.`,
+      remaining: summary.remaining
+    });
+  }
+  return plan;
 };
 
 const tooMany = (remaining) => new Rejected(409, {
@@ -438,7 +502,7 @@ router.post('/:order_id/deliveries', requireRole(rolesWith('record_delivery')), 
   if (v.failed()) throw new Rejected(400, { error: 'VALIDATION_FAILED', message: v.errors[0].message, details: v.errors });
   const delivery_id = crypto.randomUUID();
   return withPgTransaction(req.pgPool, async (client) => {
-    const { order, pieces, deliveries } = await lockForDelivery(client, req, order_id);
+    const { order, pieces, deliveries, plans } = await lockForDelivery(client, req, order_id);
     if (!DELIVERY_STATUSES.includes(order.production_status)) {
       throw new Rejected(409, {
         error: 'DELIVERY_NOT_ALLOWED',
@@ -449,18 +513,20 @@ router.post('/:order_id/deliveries', requireRole(rolesWith('record_delivery')), 
     }
     const f = fulfillmentSummary({ pieces_ordered: pieces, deliveries });
     if (fields.quantity > f.pieces_remaining) throw tooMany(f.pieces_remaining);
+    const plan = checkPlannedBatch({ plans, others: deliveries, plan_id: fields.plan_id, quantity: fields.quantity });
     const batch_no = deliveries.reduce((m, d) => Math.max(m, d.batch_no), 0) + 1;
     const { rows } = await client.query(
-      `INSERT INTO order_deliveries (delivery_id, order_id, batch_no, quantity, delivered_at, method, received_by_name, notes, recorded_by)
-       VALUES ($1, $2, $3, $4, COALESCE($5::timestamp, NOW() AT TIME ZONE 'UTC'), $6, $7, $8, $9)
+      `INSERT INTO order_deliveries (delivery_id, order_id, batch_no, quantity, delivered_at, method, received_by_name, notes, recorded_by, plan_id)
+       VALUES ($1, $2, $3, $4, COALESCE($5::timestamp, NOW() AT TIME ZONE 'UTC'), $6, $7, $8, $9, $10)
        RETURNING ${selectList('order_deliveries', 'pg')}`,
-      [delivery_id, order_id, batch_no, fields.quantity, fields.delivered_at, fields.method, fields.received_by_name || null, fields.notes || null, req.user.user_id]);
+      [delivery_id, order_id, batch_no, fields.quantity, fields.delivered_at, fields.method, fields.received_by_name || null, fields.notes || null,
+        req.user.user_id, plan ? plan.plan_id : null]);
     const left = f.pieces_remaining - fields.quantity;
     return {
       status: 201,
       ids: [delivery_id],
       delivery: serialize('order_deliveries', rows[0]),
-      message: `Batch ${batch_no} recorded: ${fields.quantity} piece${fields.quantity === 1 ? '' : 's'} handed over.`
+      message: `${plan ? `Planned batch #${plan.batch_no}: ` : `Batch ${batch_no} recorded: `}${fields.quantity} piece${fields.quantity === 1 ? '' : 's'} handed over.`
         + (left > 0 ? ` ${left} left.` : ' Every piece is now handed over.')
     };
   });
@@ -471,15 +537,21 @@ router.patch('/:order_id/deliveries/:delivery_id', requireRole(rolesWith('record
   const { v, fields } = readDelivery(req.body || {}, { partial: true });
   if (v.failed()) throw new Rejected(400, { error: 'VALIDATION_FAILED', message: v.errors[0].message, details: v.errors });
   return withPgTransaction(req.pgPool, async (client) => {
-    const { order, pieces, deliveries } = await lockForDelivery(client, req, order_id);
+    const { order, pieces, deliveries, plans } = await lockForDelivery(client, req, order_id);
     if (CLOSED_STATUSES.includes(order.production_status)) {
       throw new Rejected(409, { error: 'ORDER_CLOSED', message: `This order is ${order.production_status}, so its deliveries can no longer change.` });
     }
     const current = deliveries.find((d) => d.delivery_id === delivery_id);
     if (!current) throw new Rejected(404, { error: 'DELIVERY_NOT_FOUND', message: 'We could not find this batch.' });
+    const otherRows = deliveries.filter((d) => d.delivery_id !== delivery_id);
     if (fields.quantity !== undefined) {
-      const others = fulfillmentSummary({ pieces_ordered: pieces, deliveries: deliveries.filter((d) => d.delivery_id !== delivery_id) });
+      const others = fulfillmentSummary({ pieces_ordered: pieces, deliveries: otherRows });
       if (fields.quantity > others.pieces_remaining) throw tooMany(others.pieces_remaining);
+    }
+    // migration 016: a hand-over of a planned batch stays within what is left of that batch
+    if (plans.length > 0 && (fields.quantity !== undefined || fields.plan_id !== undefined)) {
+      const planId = fields.plan_id !== undefined ? fields.plan_id : current.plan_id;
+      checkPlannedBatch({ plans, others: otherRows, plan_id: planId, quantity: fields.quantity !== undefined ? fields.quantity : current.quantity });
     }
     const changed = Object.keys(fields).filter((k) => fields[k] !== undefined && (fields[k] ?? null) !== (current[k] ?? null));
     if (changed.length === 0) return { ids: [delivery_id], delivery: current, message: 'Nothing changed.' };
@@ -512,6 +584,276 @@ router.delete('/:order_id/deliveries/:delivery_id', requireRole(rolesWith('recor
     return { ids: [], removed: delivery_id, message: `Batch ${current.batch_no} removed.` };
   });
 }));
+
+// =====================================================================
+// MIGRATION 016: DELIVERY BATCHES PLANNED AHEAD (online only, like deliveries)
+// =====================================================================
+const PLAN_NOTES_MAX = 500;
+const readPlan = (body, { partial }) => {
+  const v = createValidator();
+  const out = {};
+  const given = (f) => body[f] !== undefined;
+  if (!partial || given('planned_quantity')) out.planned_quantity = v.positiveInt(body.planned_quantity, 'planned_quantity');
+  if (given('planned_date')) out.planned_date = body.planned_date === null || body.planned_date === '' ? null : v.shopDay(body.planned_date, 'planned_date');
+  if (given('notes')) out.notes = v.optionalString(body.notes, 'notes', PLAN_NOTES_MAX);
+  if (partial && given('ready')) out.ready = v.bool(body.ready, 'ready');
+  if (partial && Object.keys(out).length === 0 && !v.failed()) v.errors.push({ field: 'body', message: 'Nothing to change.' });
+  return { v, fields: out };
+};
+const planOpenOrClosed = (order) => {
+  if (!EDITABLE_STATUSES.includes(order.production_status)) {
+    throw new Rejected(409, { error: 'ORDER_CLOSED', message: `This order is ${order.production_status}, so its delivery plan can no longer change.` });
+  }
+};
+// Planned pieces may not add up to more than the order's pieces
+const tooManyPlanned = (pieces, plannedElsewhere) => new Rejected(409, {
+  error: 'PLAN_EXCEEDS_ORDER',
+  message: `The batches would add up to more than the order's ${pieces} piece${pieces === 1 ? '' : 's'}. `
+    + `${Math.max(0, pieces - plannedElsewhere)} piece${pieces - plannedElsewhere === 1 ? ' is' : 's are'} left to plan.`,
+  left_to_plan: Math.max(0, pieces - plannedElsewhere)
+});
+
+const planRoute = (handler) => async (req, res) => {
+  try {
+    const located = await locateRecord(req, 'order_profiles', req.params.order_id);
+    if (!located.location) throw orderNotFound();
+    if (!located.cloudReachable) return res.status(503).json(needsCloud('delivery_plan'));
+    if (located.location === 'local') {
+      return res.status(409).json({ error: 'ORDER_NOT_SYNCED', message: 'This order was saved offline and is not in the cloud yet. Sync first.' });
+    }
+    const out = await handler(req);
+    await refreshLocalRows(req.pgPool, req.localDb, 'order_delivery_plans', out.ids).catch(() => {});
+    if (out.removed) await sqliteRun(req.localDb, 'DELETE FROM order_delivery_plans WHERE plan_id = ?', [out.removed]).catch(() => {});
+    const view = await freshOrderView(req, req.params.order_id);
+    pushOrderChange(req, view.order);
+    res.status(out.status || 200).json({ message: out.message, source: 'cloud', plan: out.plan || null, ...view });
+  } catch (err) {
+    sendError(res, err, 'planning a delivery batch', needsCloud('delivery_plan'));
+  }
+};
+
+router.post('/:order_id/delivery-plans', requireRole(rolesWith('record_delivery')), requireOrderEditAccess, planRoute(async (req) => {
+  const { order_id } = req.params;
+  const { v, fields } = readPlan(req.body || {}, { partial: false });
+  if (v.failed()) throw new Rejected(400, { error: 'VALIDATION_FAILED', message: v.errors[0].message, details: v.errors });
+  const plan_id = crypto.randomUUID();
+  return withPgTransaction(req.pgPool, async (client) => {
+    const { order, pieces, plans } = await lockForDelivery(client, req, order_id);
+    planOpenOrClosed(order);
+    if (pieces <= 0) throw new Rejected(409, { error: 'NO_PIECES', message: 'Add the order’s materials first: there are no pieces to deliver yet.' });
+    const planned = plans.reduce((s, p) => s + p.planned_quantity, 0);
+    if (planned + fields.planned_quantity > pieces) throw tooManyPlanned(pieces, planned);
+    const batch_no = plans.reduce((m, p) => Math.max(m, p.batch_no), 0) + 1;
+    const { rows } = await client.query(
+      `INSERT INTO order_delivery_plans (plan_id, order_id, batch_no, planned_quantity, planned_date, notes, created_by)
+       VALUES ($1, $2, $3, $4, $5::date, $6, $7) RETURNING ${selectList('order_delivery_plans', 'pg')}`,
+      [plan_id, order_id, batch_no, fields.planned_quantity, fields.planned_date || null, fields.notes || null, req.user.user_id]);
+    await writeAudit(client, {
+      entity: 'order_delivery_plans', entity_id: plan_id, action: 'delivery_batch_planned', actor: req.user,
+      details: { order_id, batch_no, planned_quantity: fields.planned_quantity, planned_date: fields.planned_date || null }
+    });
+    const left = pieces - planned - fields.planned_quantity;
+    return {
+      status: 201,
+      ids: [plan_id],
+      plan: serialize('order_delivery_plans', rows[0]),
+      message: `Batch #${batch_no} planned: ${fields.planned_quantity} piece${fields.planned_quantity === 1 ? '' : 's'}.`
+        + (left > 0 ? ` ${left} piece${left === 1 ? ' is' : 's are'} not in a batch yet.` : ' Every piece is now in a batch.')
+    };
+  });
+}));
+
+router.patch('/:order_id/delivery-plans/:plan_id', requireRole(rolesWith('record_delivery')), requireOrderEditAccess, planRoute(async (req) => {
+  const { order_id, plan_id } = req.params;
+  const { v, fields } = readPlan(req.body || {}, { partial: true });
+  if (v.failed()) throw new Rejected(400, { error: 'VALIDATION_FAILED', message: v.errors[0].message, details: v.errors });
+  return withPgTransaction(req.pgPool, async (client) => {
+    const { order, pieces, plans, deliveries } = await lockForDelivery(client, req, order_id);
+    planOpenOrClosed(order);
+    const current = plans.find((p) => p.plan_id === plan_id);
+    if (!current) throw new Rejected(404, { error: 'DELIVERY_PLAN_NOT_FOUND', message: 'We could not find this planned batch.' });
+    const summary = planSummary(current, deliveries);
+    if (fields.planned_quantity !== undefined) {
+      if (fields.planned_quantity < summary.delivered) {
+        throw new Rejected(409, {
+          error: 'PLAN_BELOW_DELIVERED',
+          message: `${summary.delivered} piece${summary.delivered === 1 ? ' of this batch was' : 's of this batch were'} already handed over, so it cannot be smaller than that.`
+        });
+      }
+      const elsewhere = plans.filter((p) => p.plan_id !== plan_id).reduce((s, p) => s + p.planned_quantity, 0);
+      if (elsewhere + fields.planned_quantity > pieces) throw tooManyPlanned(pieces, elsewhere);
+    }
+    const sets = [];
+    const params = [plan_id];
+    const put = (col, value, cast = '') => { params.push(value); sets.push(`${col} = $${params.length}${cast}`); };
+    if (fields.planned_quantity !== undefined) put('planned_quantity', fields.planned_quantity);
+    if (fields.planned_date !== undefined) put('planned_date', fields.planned_date, '::date');
+    if (fields.notes !== undefined) put('notes', fields.notes || null);
+    let readyNote = '';
+    if (fields.ready === true && !current.ready_at) {
+      if (!DELIVERY_STATUSES.includes(order.production_status)) {
+        throw new Rejected(409, { error: 'NOT_APPROVED_YET', message: 'A batch can be marked ready once the job order is approved and in production.' });
+      }
+      sets.push("ready_at = NOW() AT TIME ZONE 'UTC'");
+      put('ready_by', req.user.user_id);
+      readyNote = ' It is ready to be picked up or delivered.';
+    } else if (fields.ready === false && current.ready_at) {
+      if (summary.delivered > 0) {
+        throw new Rejected(409, { error: 'BATCH_ALREADY_HANDED_OVER', message: 'Pieces of this batch were already handed over, so it stays marked ready.' });
+      }
+      sets.push('ready_at = NULL', 'ready_by = NULL');
+      readyNote = ' It is back in production.';
+    }
+    if (sets.length === 0) return { ids: [plan_id], plan: current, message: 'Nothing changed.' };
+    const { rows } = await client.query(
+      `UPDATE order_delivery_plans SET ${sets.join(', ')} WHERE plan_id = $1 RETURNING ${selectList('order_delivery_plans', 'pg')}`, params);
+    const updated = serialize('order_delivery_plans', rows[0]);
+    await writeAudit(client, {
+      entity: 'order_delivery_plans', entity_id: plan_id, action: fields.ready === true ? 'delivery_batch_ready' : 'delivery_batch_changed', actor: req.user,
+      details: {
+        order_id, batch_no: current.batch_no,
+        before: { planned_quantity: current.planned_quantity, planned_date: current.planned_date, ready_at: current.ready_at, notes: current.notes },
+        after: { planned_quantity: updated.planned_quantity, planned_date: updated.planned_date, ready_at: updated.ready_at, notes: updated.notes }
+      }
+    });
+    return { ids: [plan_id], plan: updated, message: `Batch #${current.batch_no} updated.${readyNote}` };
+  });
+}));
+
+router.delete('/:order_id/delivery-plans/:plan_id', requireRole(rolesWith('record_delivery')), requireOrderEditAccess, planRoute(async (req) => {
+  const { order_id, plan_id } = req.params;
+  return withPgTransaction(req.pgPool, async (client) => {
+    const { order, plans, deliveries } = await lockForDelivery(client, req, order_id);
+    planOpenOrClosed(order);
+    const current = plans.find((p) => p.plan_id === plan_id);
+    if (!current) throw new Rejected(404, { error: 'DELIVERY_PLAN_NOT_FOUND', message: 'We could not find this planned batch.' });
+    if (deliveries.some((d) => d.plan_id === plan_id)) {
+      throw new Rejected(409, {
+        error: 'BATCH_ALREADY_HANDED_OVER',
+        message: 'Pieces of this batch were already handed over. Remove those hand-overs first, or keep the batch.'
+      });
+    }
+    await client.query('DELETE FROM order_delivery_plans WHERE plan_id = $1', [plan_id]);
+    await writeAudit(client, {
+      entity: 'order_delivery_plans', entity_id: plan_id, action: 'delivery_batch_removed', actor: req.user,
+      details: { order_id, batch_no: current.batch_no, planned_quantity: current.planned_quantity, planned_date: current.planned_date }
+    });
+    return { ids: [], removed: plan_id, message: `Planned batch #${current.batch_no} removed.` };
+  });
+}));
+
+// =====================================================================
+// MIGRATION 016: DESIGN FILES FROM THE COMPUTER (cloud only)
+// =====================================================================
+const designFileOrder = async (req, res) => {
+  const located = await locateRecord(req, 'order_profiles', req.params.order_id);
+  if (!located.location) throw orderNotFound();
+  if (!located.cloudReachable) { res.status(503).json(needsCloud('design_file')); return null; }
+  if (located.location === 'local') {
+    res.status(409).json({ error: 'ORDER_NOT_SYNCED', message: 'This order was saved offline and is not in the cloud yet. Attach design files after it syncs.' });
+    return null;
+  }
+  return located;
+};
+
+router.get('/:order_id/design-files', requireRole(rolesWith('view_orders')), async (req, res) => {
+  try {
+    const out = await listDesignFiles(req, req.params.order_id);
+    res.status(200).json({ source: out.available ? 'cloud' : 'local', ...out });
+  } catch (err) {
+    sendError(res, err, 'listing design files', needsCloud('design_file'));
+  }
+});
+
+// The file itself comes as the request body (no multipart): the browser sends the File as it is
+router.post('/:order_id/design-files', requireRole(EDIT_ROLES), requireOrderEditAccess, refuseArchivedOrder,
+  express.raw({ type: () => true, limit: MAX_FILE_BYTES + 1024 }), async (req, res) => {
+    const { order_id } = req.params;
+    const v = createValidator();
+    const notes = v.optionalString(req.query.notes, 'notes', FILE_NOTES_MAX);
+    if (v.failed()) return v.send(res);
+    const checked = checkUpload({ name: req.query.name, buffer: Buffer.isBuffer(req.body) ? req.body : null });
+    if (checked.error) {
+      return res.status(400).json({ error: 'INVALID_DESIGN_FILE', message: checked.error, details: [{ field: 'file', message: checked.error }] });
+    }
+    try {
+      if (!(await designFileOrder(req, res))) return;
+      const file_id = crypto.randomUUID();
+      const row = await withPgTransaction(req.pgPool, async (client) => {
+        const ord = await client.query(
+          `SELECT ${selectList('order_profiles', 'pg')} FROM order_profiles WHERE order_id = $1 FOR UPDATE`, [order_id]);
+        if (ord.rowCount === 0) throw orderNotFound();
+        const order = serialize('order_profiles', ord.rows[0]);
+        if (order.archived_at) throw new Rejected(409, RECORD_ARCHIVED);
+        if (!EDITABLE_STATUSES.includes(order.production_status)) {
+          throw new Rejected(409, { error: 'ORDER_CLOSED', message: `This order is ${order.production_status}, so no more design files can be attached.` });
+        }
+        const count = await client.query('SELECT COUNT(*)::int AS n FROM order_design_files WHERE order_id = $1', [order_id]);
+        if (count.rows[0].n >= MAX_FILES_PER_ORDER) {
+          throw new Rejected(409, { error: 'TOO_MANY_DESIGN_FILES', message: `An order can have up to ${MAX_FILES_PER_ORDER} design files. Remove one first.` });
+        }
+        const { rows } = await client.query(
+          `INSERT INTO order_design_files (file_id, order_id, file_name, mime_type, size_bytes, content, notes, uploaded_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING ${FILE_COLUMNS}`,
+          [file_id, order_id, checked.file_name, checked.mime_type, checked.size_bytes, req.body, notes || null, req.user.user_id]);
+        await writeAudit(client, {
+          entity: 'order_design_files', entity_id: file_id, action: 'design_file_added', actor: req.user,
+          details: { order_id, tracking_no: order.tracking_no, file_name: checked.file_name, size_bytes: checked.size_bytes }
+        });
+        return rows[0];
+      });
+      res.status(201).json({
+        message: `${checked.file_name} attached to the order.`,
+        source: 'cloud',
+        file: shownFile(row, await userNames(req, [req.user.user_id]))
+      });
+    } catch (err) {
+      sendError(res, err, 'attaching a design file', needsCloud('design_file'));
+    }
+  });
+
+router.get('/:order_id/design-files/:file_id', requireRole(rolesWith('view_orders')), async (req, res) => {
+  const { order_id, file_id } = req.params;
+  try {
+    const { rows } = await req.pgPool.query(
+      'SELECT file_name, mime_type, content FROM order_design_files WHERE order_id = $1 AND file_id = $2', [order_id, file_id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'DESIGN_FILE_NOT_FOUND', message: 'We could not find this design file.' });
+    const file = rows[0];
+    // Only real PNG / JPEG / GIF / WebP images are shown in the page; everything else downloads
+    const inline = req.query.inline === '1' && isPreviewable(file.mime_type, file.content);
+    res.set('Content-Type', inline ? file.mime_type : 'application/octet-stream');
+    res.set('Content-Disposition', contentDisposition(inline ? 'inline' : 'attachment', file.file_name));
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.status(200).send(file.content);
+  } catch (err) {
+    sendError(res, err, 'opening a design file', needsCloud('design_file'));
+  }
+});
+
+router.delete('/:order_id/design-files/:file_id', requireRole(EDIT_ROLES), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
+  const { order_id, file_id } = req.params;
+  try {
+    if (!(await designFileOrder(req, res))) return;
+    const removed = await withPgTransaction(req.pgPool, async (client) => {
+      const ord = await client.query('SELECT production_status, tracking_no FROM order_profiles WHERE order_id = $1 FOR UPDATE', [order_id]);
+      if (ord.rowCount === 0) throw orderNotFound();
+      if (!EDITABLE_STATUSES.includes(ord.rows[0].production_status)) {
+        throw new Rejected(409, { error: 'ORDER_CLOSED', message: `This order is ${ord.rows[0].production_status}, so its design files are kept as they are.` });
+      }
+      const { rows } = await client.query(
+        'DELETE FROM order_design_files WHERE order_id = $1 AND file_id = $2 RETURNING file_name, size_bytes', [order_id, file_id]);
+      if (rows.length === 0) throw new Rejected(404, { error: 'DESIGN_FILE_NOT_FOUND', message: 'We could not find this design file.' });
+      await writeAudit(client, {
+        entity: 'order_design_files', entity_id: file_id, action: 'design_file_removed', actor: req.user,
+        details: { order_id, tracking_no: ord.rows[0].tracking_no, file_name: rows[0].file_name, size_bytes: rows[0].size_bytes }
+      });
+      return rows[0];
+    });
+    res.status(200).json({ message: `${removed.file_name} removed from the order.`, source: 'cloud' });
+  } catch (err) {
+    sendError(res, err, 'removing a design file', needsCloud('design_file'));
+  }
+});
 
 // =====================================================================
 // MONEY: refunds, verification, corrections, price cuts (online only)
@@ -684,7 +1026,7 @@ router.post('/:order_id/price-adjustment', requireRole(rolesWith('set_quote')), 
       const { rows } = await client.query(`SELECT ${selectList('order_profiles', 'pg')} FROM order_profiles WHERE order_id = $1 FOR UPDATE`, [order_id]);
       if (rows.length === 0) throw orderNotFound();
       const order = serialize('order_profiles', rows[0]);
-      if (!['Approved', 'Printing', 'Pressing', 'Completed'].includes(order.production_status)) {
+      if (!['Approved', 'Printing', 'Pressing', 'Ready', 'Completed'].includes(order.production_status)) {
         throw new Rejected(409, {
           error: 'ADJUSTMENT_NOT_ALLOWED',
           message: order.production_status === 'Cancelled'

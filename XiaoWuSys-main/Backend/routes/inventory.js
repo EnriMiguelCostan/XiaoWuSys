@@ -196,6 +196,7 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
   const typedSupplier = v.optionalString(body.supplier, 'supplier', 255);
   const supplier_id = v.id(body.supplier_id, 'supplier_id', { required: false }); // migration 015
   const has_sizes = v.bool(body.has_sizes, 'has_sizes');                          // migration 015: a garment
+  const requires_pressing = v.bool(body.requires_pressing, 'requires_pressing');  // migration 016: a T-shirt (heat press)
   const selling_price = v.nonNegativeMoney(body.selling_price, 'selling_price', { required: false, defaultValue: 0 }); // PB 11
   if (v.failed()) return v.send(res);
 
@@ -208,7 +209,7 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
     if (supplier_id && !supplierRow) throw supplierMissing();
     const supplier = supplierRow ? supplierRow.supplier_name : (typedSupplier ? cleanName(typedSupplier) : null);
     const values = [inventory_id, item_name, cleanName(item_category), quantity_available, minimum_threshold, unit_cost,
-      cleanName(unit), supplier, selling_price, supplier_id || null, has_sizes];
+      cleanName(unit), supplier, selling_price, supplier_id || null, has_sizes, requires_pressing];
 
     const result = await cloudFirst('cloud',
       () => withPgTransaction(req.pgPool, async (client) => {
@@ -222,8 +223,8 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
         });
         const { rows } = await client.query(
           `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, unit, supplier,
-                                        selling_price, supplier_id, has_sizes)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING ${selectList('inventory_items', 'pg')}`,
+                                        selling_price, supplier_id, has_sizes, requires_pressing)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING ${selectList('inventory_items', 'pg')}`,
           values
         );
         await clearMovementContext(client);
@@ -236,8 +237,8 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
         if (dup) throw duplicateError(dup);
         await sqliteRun(tx,
           `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, unit, supplier,
-                                        selling_price, supplier_id, has_sizes, sync_status, last_modified)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+                                        selling_price, supplier_id, has_sizes, requires_pressing, sync_status, last_modified)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
           values.map((x) => (x === true ? 1 : x === false ? 0 : x)));
         const record = await readLocal(tx, 'inventory_items', inventory_id);
         await auditLocal(tx, req.user, inventory_id, 'created', item_name, { item: snapshotOf(record) });
@@ -268,7 +269,8 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
 // -> 200 { message, source, changed, item }
 //    404 not found / in bin | 409 DUPLICATE_ITEM | 409 EDIT_CONFLICT (someone else edited it first)
 // ==========================================
-const EDITABLE_FIELDS = ['item_name', 'item_category', 'minimum_threshold', 'unit_cost', 'selling_price', 'unit', 'supplier', 'supplier_id', 'has_sizes'];
+const EDITABLE_FIELDS = ['item_name', 'item_category', 'minimum_threshold', 'unit_cost', 'selling_price', 'unit', 'supplier', 'supplier_id', 'has_sizes',
+  'requires_pressing'];
 
 router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
   const { inventory_id } = req.params;
@@ -293,6 +295,8 @@ router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
   // migration 015: the usual supplier (null clears it) and whether the item is a garment
   if (body.supplier_id !== undefined) updates.supplier_id = body.supplier_id === null || body.supplier_id === '' ? null : v.id(body.supplier_id, 'supplier_id');
   if (body.has_sizes !== undefined) updates.has_sizes = v.bool(body.has_sizes, 'has_sizes');
+  // migration 016: a T-shirt, so its orders go through the heat press (Pressing)
+  if (body.requires_pressing !== undefined) updates.requires_pressing = v.bool(body.requires_pressing, 'requires_pressing');
   if (body.expected_version !== undefined && body.expected_version !== null && typeof body.expected_version !== 'string') {
     v.errors.push({ field: 'expected_version', message: 'expected_version must be the string returned as "version".' });
   }
@@ -612,6 +616,13 @@ router.post('/recycle-bin/empty', requireRole(PURGE_ROLES), async (req, res) => 
 //    404 INVENTORY_ITEM_NOT_FOUND / ORDER_NOT_FOUND
 //    409 INSUFFICIENT_STOCK when the loss is larger than the stock on hand
 // ==========================================
+// migration 016: the tagged print line is not on this order
+const printLineMissing = () => new Rejected(400, {
+  error: 'VALIDATION_FAILED',
+  message: 'That print line is not on this order. Choose it again from the list.',
+  details: [{ field: 'print_detail_id', message: 'Choose a print line of this order.' }]
+});
+
 router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => {
   const { inventory_id } = req.params;
   const body = req.body || {};
@@ -624,6 +635,9 @@ router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => 
     : v.requiredString(body.loss_reason, 'loss_reason', 1000);
   const order_id = v.id(body.order_id, 'order_id', { required: false });
   const financial_cost = v.nonNegativeMoney(body.financial_cost, 'financial_cost', { required: false, defaultValue: null });
+  // migration 016: the print line this loss ruined (e.g. jersey #10, size L), on this order
+  const print_detail_id = v.id(body.print_detail_id, 'print_detail_id', { required: false });
+  if (print_detail_id && !order_id) v.errors.push({ field: 'print_detail_id', message: 'A print line can only be tagged on a loss recorded for its order.' });
   if (v.failed()) return v.send(res);
   const reason_code = sentCode || inferReasonCode(typedReason);
   const loss_reason = typedReason || reasonLabel(sentCode);
@@ -655,14 +669,18 @@ router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => 
         WHERE inventory_id = $2 RETURNING ${selectList('inventory_items', 'pg')}, unit_cost AS raw_unit_cost`,
       [quantity_lost, inventory_id]
     );
+    if (print_detail_id) {
+      const line = await client.query('SELECT 1 FROM order_print_details WHERE print_detail_id = $1 AND order_id = $2', [print_detail_id, order_id]);
+      if (line.rowCount === 0) throw printLineMissing();
+    }
     const { production_stage, diagnosis } = await diagnoseInCloud(client, facts);
     const loss = await client.query(
       `INSERT INTO material_loss (loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost,
-                                  reason_code, loss_category, production_stage, is_statistical_anomaly)
-       VALUES ($1, $2, $3, $4::int, $5, COALESCE($6::numeric, ROUND($7::numeric * $4::int, 2)), $8, $9, $10, $11)
+                                  reason_code, loss_category, production_stage, is_statistical_anomaly, print_detail_id)
+       VALUES ($1, $2, $3, $4::int, $5, COALESCE($6::numeric, ROUND($7::numeric * $4::int, 2)), $8, $9, $10, $11, $12)
        RETURNING ${selectList('material_loss', 'pg')}`,
       [loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost, item.rows[0].raw_unit_cost,
-        reason_code, diagnosis.loss_category, production_stage, diagnosis.is_statistical_anomaly]
+        reason_code, diagnosis.loss_category, production_stage, diagnosis.is_statistical_anomaly, print_detail_id]
     );
     const escalated = await escalateClusterInCloud(client, diagnosis.cluster_with);
     const record = serialize('inventory_items', item.rows[0]);
@@ -696,14 +714,18 @@ router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => 
       [quantity_lost, inventory_id]);
 
     const cost = financial_cost !== null ? financial_cost : Math.round(stock.unit_cost * quantity_lost * 100) / 100;
+    if (print_detail_id) {
+      const line = await sqliteGet(tx, 'SELECT 1 AS n FROM order_print_details WHERE print_detail_id = ? AND order_id = ?', [print_detail_id, order_id]);
+      if (!line) throw printLineMissing();
+    }
     const { production_stage, diagnosis } = await diagnoseLocally(tx, facts);
     await sqliteRun(tx,
       `INSERT INTO material_loss (loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost,
                                   reason_code, loss_category, production_stage, is_statistical_anomaly,
-                                  cloud_stock_delta, sync_status, last_modified)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+                                  cloud_stock_delta, print_detail_id, sync_status, last_modified)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
       [loss_id, order_id, inventory_id, quantity_lost, loss_reason, cost, reason_code, diagnosis.loss_category, production_stage,
-        diagnosis.is_statistical_anomaly ? 1 : 0, itemIsLocalOnly ? 0 : quantity_lost]);
+        diagnosis.is_statistical_anomaly ? 1 : 0, itemIsLocalOnly ? 0 : quantity_lost, print_detail_id]);
 
     const record = await readLocal(tx, 'inventory_items', inventory_id);
     await auditLocal(tx, req.user, inventory_id, 'stock_subtracted', record.item_name, {

@@ -24,6 +24,8 @@ export interface InventoryItem {
   /** migration 015: the usual supplier's profile, and whether it is a garment (print details have sizes) */
   supplier_id?: string | null;
   has_sizes?: boolean;
+  /** migration 016: a T-shirt, so its orders go through Pressing */
+  requires_pressing?: boolean;
   sync_status: string;
   version?: number | null;
   deleted_at?: string | null;

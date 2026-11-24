@@ -2,10 +2,14 @@
 // Types and display lists only: every total, status and permission is decided by the server.
 import type { OrderActions } from '@xiaowu/client-core/permissions';
 
-export type ProductionStatus = 'Pending' | 'Approved' | 'Printing' | 'Pressing' | 'Completed' | 'Delayed' | 'Cancelled';
+export type ProductionStatus = 'Pending' | 'Approved' | 'Printing' | 'Pressing' | 'Ready' | 'Completed' | 'Delayed' | 'Cancelled';
 
-/** The server's PRODUCTION_STATUSES, for the status filter. */
-export const ORDER_STATUSES: ProductionStatus[] = ['Pending', 'Approved', 'Printing', 'Pressing', 'Completed', 'Delayed', 'Cancelled'];
+/** The server's PRODUCTION_STATUSES, for the status filter. Migration 016 adds 'Ready'
+ *  (production done, waiting to be picked up or delivered). */
+export const ORDER_STATUSES: ProductionStatus[] = ['Pending', 'Approved', 'Printing', 'Pressing', 'Ready', 'Completed', 'Delayed', 'Cancelled'];
+
+/** Migration 016: GET /api/orders "delivery_status", decided by the server */
+export type DeliveryStatus = 'Not delivered' | 'Partly delivered' | 'Delivered';
 
 /** PB 16: how close an open order is to its deadline, decided by the server
  *  (orderLifecycle.deadlineFlag, shop time). null for Completed / Cancelled orders. */
@@ -28,6 +32,38 @@ export interface Customer {
   social_media?: string | null;
   notes?: string | null;
   archived_at?: string | null;
+  // migration 016: the contact person's own details (apart from the client's)
+  contact_person_number?: string | null;
+  contact_person_email?: string | null;
+  contact_person_social?: string | null;
+}
+
+/** Migration 016: one of a client's other branches (the client's own address is the main branch) */
+export interface CustomerBranch {
+  branch_id: string;
+  customer_id: string;
+  branch_name: string;
+  address: string | null;
+  contact_person: string | null;
+  contact_number: string | null;
+  email: string | null;
+  notes: string | null;
+  archived_at: string | null;
+}
+
+/** Migration 016: a design file uploaded from the computer (kept in the cloud) */
+export interface DesignFile {
+  file_id: string;
+  order_id: string;
+  file_name: string;
+  mime_type: string;
+  size_bytes: number;
+  notes: string | null;
+  uploaded_by_name: string | null;
+  /** UTC */
+  uploaded_at: string;
+  /** a real PNG / JPEG / GIF / WebP image: may be shown in the page */
+  previewable: boolean;
 }
 
 export interface Order {
@@ -60,6 +96,12 @@ export interface Order {
   total_paid?: number;
   remaining?: number;
   payment_status?: string;
+  /** migration 016: the client's branch making this order (null = the main branch) */
+  branch_id?: string | null;
+  /** GET /api/orders (migration 016): hand-over progress for the list */
+  delivery_status?: DeliveryStatus | string | null;
+  pieces_ordered?: number;
+  pieces_delivered?: number;
 }
 
 /** migration 015: a size / name / number (garments) or a text (anything else) to print */
@@ -89,6 +131,30 @@ export interface Delivery {
   received_by_name: string | null;
   notes: string | null;
   recorded_by_name: string;
+  /** migration 016: the planned batch these pieces belong to */
+  plan_id?: string | null;
+  plan_batch_no?: number | null;
+}
+
+/** Migration 016: a delivery batch planned ahead, as the server summarises it */
+export interface DeliveryPlan {
+  plan_id: string;
+  order_id: string;
+  batch_no: number;
+  planned_quantity: number;
+  /** 'YYYY-MM-DD' or null */
+  planned_date: string | null;
+  /** UTC; null = still in production */
+  ready_at: string | null;
+  ready_by_name?: string | null;
+  notes: string | null;
+  delivered: number;
+  remaining: number;
+  state: 'In production' | 'Ready' | 'Partly delivered' | 'Delivered' | string;
+  /** the batch may be handed over now (it is ready, and pieces of it are left) */
+  can_deliver: boolean;
+  /** its planned date has passed and it is not fully delivered */
+  overdue: boolean;
 }
 
 export interface Fulfillment {
@@ -98,6 +164,11 @@ export interface Fulfillment {
   batches: number;
   state: 'none' | 'partial' | 'complete' | string;
   label: string;
+  /** migration 016 */
+  plans?: DeliveryPlan[];
+  pieces_planned?: number;
+  pieces_unplanned?: number;
+  plans_open?: number;
 }
 
 /** What the order still needs before "Completed" (the server's completionCheck) */
@@ -156,6 +227,8 @@ export interface OrderItem {
   item_category?: string | null;
   unit?: string | null;
   has_sizes?: boolean;
+  /** migration 016: a T-shirt, so the order goes through Pressing */
+  requires_pressing?: boolean;
   is_consumable?: boolean;
 }
 
@@ -272,6 +345,8 @@ export interface MaterialLoss {
   /** UTC, like date_created */
   date_recorded: string;
   sync_status: string;
+  /** migration 016: the print line it ruined (one of the order's print_details) */
+  print_detail_id?: string | null;
 }
 
 /** POST /api/inventory/:id/loss: the server's diagnosis and the replacement warning (never blocking) */
@@ -328,6 +403,13 @@ export interface OrderDetail {
   fulfillment?: Fulfillment;
   completion?: Completion;
   has_garments?: boolean;
+  /** migration 016 (absent on an older server) */
+  needs_pressing?: boolean;
+  delivery_plans?: DeliveryPlan[];
+  branch?: CustomerBranch | null;
+  design_files?: DesignFile[];
+  /** false: the cloud cannot be reached, so the design files cannot be listed right now */
+  design_files_available?: boolean;
 }
 
 /** GET /api/orders */
@@ -395,6 +477,6 @@ export const LOSS_REASONS: { code: string; label: string }[] = [
   { code: 'supplier_defect', label: 'Supplier Defect' },
 ];
 
-/** Statuses where the job order still waits for the Owner's approval (display only: the
+/** Statuses where the job order still waits for approval by the Owner or an Admin (display only: the
  *  approval panel; the server decides whether approving is allowed). */
 export const AWAITING_APPROVAL: readonly string[] = ['Pending', 'Delayed'];

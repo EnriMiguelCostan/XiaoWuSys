@@ -14,7 +14,7 @@ const { isConnectionError } = require('../utils/dbErrors');
 const { PG_VERSION_FORMAT } = require('../utils/localSync');
 const { labelOf } = require('../utils/validation');
 const { outranks } = require('./domain/permissions');
-const { CLOSED_STATUSES, QUOTE_FROZEN_STATUSES } = require('./domain/orderLifecycle');
+const { CLOSED_STATUSES, quoteLocked } = require('./domain/orderLifecycle');
 const { withPgTransaction } = require('./records');
 const { writeAudit } = require('./auditLog');
 const { setMovementContext } = require('./stockMovements');
@@ -50,8 +50,9 @@ const SYNC_TABLES = [
     table: 'inventory_items',
     id: 'inventory_id',
     // supplier_id / has_sizes (migration 015): the usual supplier, and whether it is a garment
+    // requires_pressing (migration 016): a T-shirt, so its orders go through the heat press
     columns: ['inventory_id', 'item_name', 'item_category', 'quantity_available', 'quantity_reserved', 'minimum_threshold', 'unit_cost',
-              'unit', 'supplier', 'deleted_at', 'deleted_by', 'purged_at', 'selling_price', 'supplier_id', 'has_sizes'],
+              'unit', 'supplier', 'deleted_at', 'deleted_by', 'purged_at', 'selling_price', 'supplier_id', 'has_sizes', 'requires_pressing'],
     // M9: keep the locally reduced stock while an offline loss for this item is still unsynced
     refreshGuard: ` AND NOT EXISTS (SELECT 1 FROM material_loss ml
                       WHERE ml.inventory_id = excluded.inventory_id
@@ -62,9 +63,21 @@ const SYNC_TABLES = [
     id: 'customer_id',
     // archived_at / archived_by (migration 013): archiving needs the cloud, so they only travel down
     // customer_type ... notes (migration 015): the client profile (an offline new customer pushes them)
+    // contact_person_number / _email / _social (migration 016): the contact person's own details
     columns: ['customer_id', 'full_name', 'contact_number', 'platform_source', 'archived_at', 'archived_by',
-              'customer_type', 'contact_person', 'email', 'address', 'social_media', 'notes'],
+              'customer_type', 'contact_person', 'email', 'address', 'social_media', 'notes',
+              'contact_person_number', 'contact_person_email', 'contact_person_social'],
     cloudOwned: ['archived_at', 'archived_by']
+  },
+  {
+    // Migration 016: a client's other branches, edited online only and copied down so an order
+    // can name its branch offline. Rows removed in the cloud are removed here too.
+    table: 'customer_branches',
+    id: 'branch_id',
+    columns: ['branch_id', 'customer_id', 'branch_name', 'address', 'contact_person', 'contact_number', 'email', 'notes',
+              'archived_at', 'archived_by', 'created_by', 'created_at'],
+    pullOnly: true,
+    prune: true
   },
   {
     table: 'order_profiles',
@@ -75,7 +88,7 @@ const SYNC_TABLES = [
     columns: ['order_id', 'customer_id', 'date_created', 'production_deadline', 'production_status', 'design_drive_link', 'total_quote_amount',
               'stock_reserved', 'approved_by', 'approved_at', 'tracking_no', 'last_edited_by', 'last_edited_role',
               'subtotal_amount', 'discount_amount', 'discount_reason', 'cancellation_reason', 'archived_at', 'archived_by',
-              'order_description', 'labor_amount', 'incidental_amount', 'adjustment_amount', 'adjustment_reason'],
+              'order_description', 'labor_amount', 'incidental_amount', 'adjustment_amount', 'adjustment_reason', 'branch_id'],
     // Given by the cloud database (migration 007 trigger): never pushed, copied back after a push.
     // archived_at / archived_by (migration 013): archiving needs the cloud, so a push never clears them.
     // labor_amount / incidental_amount / adjustment_* (migration 015): set only by the Owner, online
@@ -102,7 +115,16 @@ const SYNC_TABLES = [
     table: 'order_deliveries',
     id: 'delivery_id',
     columns: ['delivery_id', 'order_id', 'batch_no', 'quantity', 'delivered_at', 'method', 'received_by_name', 'notes',
-              'recorded_by', 'created_at'],
+              'recorded_by', 'created_at', 'plan_id'],
+    pullOnly: true,
+    prune: true
+  },
+  {
+    // Migration 016: delivery batches planned ahead, changed online only and copied down for reading
+    table: 'order_delivery_plans',
+    id: 'plan_id',
+    columns: ['plan_id', 'order_id', 'batch_no', 'planned_quantity', 'planned_date', 'ready_at', 'ready_by', 'notes',
+              'created_by', 'created_at'],
     pullOnly: true,
     prune: true
   },
@@ -124,7 +146,7 @@ const SYNC_TABLES = [
     id: 'loss_id',
     // reason_code / loss_category / production_stage / is_statistical_anomaly: diagnostics (migration 012)
     columns: ['loss_id', 'order_id', 'inventory_id', 'quantity_lost', 'loss_reason', 'date_recorded', 'financial_cost',
-              'reason_code', 'loss_category', 'production_stage', 'is_statistical_anomaly', 'loss_batch_id']
+              'reason_code', 'loss_category', 'production_stage', 'is_statistical_anomaly', 'loss_batch_id', 'print_detail_id']
   },
   {
     // PB 22 overheads (migration 012): recorded online or offline (pushed insert-only), deleted
@@ -175,8 +197,9 @@ const SYNC_TABLES = [
 
 // Tables copied Neon -> SQLite (parents first) so offline writes satisfy foreign keys
 // M10: children are refreshed too, so offline reads show the same items/payments/losses.
-const REFRESH_TABLES = ['users', 'customers', 'suppliers', 'inventory_items', 'consumable_rates', 'order_profiles', 'order_items',
-  'order_print_details', 'order_deliveries', 'payments', 'material_loss', 'order_status_history', 'order_consumables_log', 'overhead_expenses'];
+const REFRESH_TABLES = ['users', 'customers', 'customer_branches', 'suppliers', 'inventory_items', 'consumable_rates', 'order_profiles',
+  'order_items', 'order_print_details', 'order_delivery_plans', 'order_deliveries', 'payments', 'material_loss', 'order_status_history',
+  'order_consumables_log', 'overhead_expenses'];
 
 const specFor = (table) => SYNC_TABLES.find((t) => t.table === table);
 const updatableColumns = (spec) => spec.columns.filter((c) => c !== spec.id);
@@ -450,7 +473,7 @@ const QUOTE_COLUMNS = ['total_quote_amount', 'subtotal_amount', 'discount_amount
 // The cloud row as it is now: its version, the contested fields and (orders) what the rank
 // and lifecycle rules need. null when the record is no longer in the cloud.
 const readCloudRow = async (pgPool, spec, id, fields) => {
-  const extra = spec.table === 'order_profiles' ? ['production_status', 'tracking_no', ...EDITOR_COLUMNS] : [];
+  const extra = spec.table === 'order_profiles' ? ['production_status', 'tracking_no', 'total_quote_amount', ...EDITOR_COLUMNS] : [];
   const cols = [...new Set([...fields, ...extra])];
   const { rows } = await pgPool.query(
     `SELECT ${versionExpr} AS version${cols.map((c) => `, ${c}::text AS ${c}`).join('')} FROM ${spec.table} WHERE ${spec.id} = $1`,
@@ -477,7 +500,7 @@ const keepLocalBlockedReason = (spec, row, cloud, fields) => {
     const quoteDiffers = quoteFields.some((f) => (f === 'discount_reason'
       ? (row[f] || null) !== (cloud[f] || null)
       : !sameMoney(row[f], cloud[f])));
-    if (quoteFields.length > 0 && QUOTE_FROZEN_STATUSES.includes(cloud.production_status) && quoteDiffers) {
+    if (quoteFields.length > 0 && quoteLocked(cloud.production_status, cloud.total_quote_amount) && quoteDiffers) {
       return 'The quote cannot be changed after the job order was approved, because the downpayment was based on it.';
     }
   }

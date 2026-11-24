@@ -14,7 +14,7 @@ import { LogoSpinner } from '@/components/brand/brand-logo';
 import { useConnection } from '@/components/connection/connection-provider';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { OrderDetailSheet } from '@/components/orders/order-detail-sheet';
-import { DeadlineBadge, OrderStatusBadge, PaymentStatusBadge } from '@/components/orders/status-badges';
+import { DeadlineBadge, DeliveryStatusBadge, OrderStatusBadge, PaymentStatusBadge } from '@/components/orders/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -456,6 +456,8 @@ export function OrdersScreen() {
                 <SortHead label="Created" k="date_created" sort={sort} onSort={sortByColumn} className="hidden lg:table-cell" />
                 <SortHead label="Deadline" k="production_deadline" sort={sort} onSort={sortByColumn} className="hidden sm:table-cell" />
                 <SortHead label="Status" k="production_status" sort={sort} onSort={sortByColumn} />
+                {/* migration 016: hand-over progress, from the server */}
+                <TableHead className="hidden text-xs font-semibold tracking-wide text-muted-foreground uppercase xl:table-cell">Delivery</TableHead>
                 <SortHead label="Bill" k="total_quote_amount" sort={sort} onSort={sortByColumn} className="hidden text-right md:table-cell" />
                 {/* migration 015: what is left to pay, from the server */}
                 <TableHead className="text-right text-xs font-semibold tracking-wide text-muted-foreground uppercase">Left to pay</TableHead>
@@ -548,12 +550,30 @@ export function OrdersScreen() {
                       </Button>
                     )}
                   </TableCell>
+                  <TableCell className="hidden xl:table-cell">
+                    {o.delivery_status ? (
+                      <>
+                        <DeliveryStatusBadge status={o.delivery_status} />
+                        {(o.pieces_ordered ?? 0) > 0 && (
+                          <span className="block text-xs text-muted-foreground tabular-nums">
+                            {(o.pieces_delivered ?? 0).toLocaleString()} of {(o.pieces_ordered ?? 0).toLocaleString()} pcs
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      '—'
+                    )}
+                  </TableCell>
                   <TableCell className="hidden text-right tabular-nums md:table-cell">{peso(o.total_quote_amount)}</TableCell>
                   <TableCell className="text-right">
                     {o.payment_status ? (
                       <>
                         <span className="block tabular-nums">{peso(o.remaining ?? 0)}</span>
                         <PaymentStatusBadge status={o.payment_status} />
+                        {/* adviser point 5: down payment made or fully paid, at a glance */}
+                        {(o.total_paid ?? 0) > 0 && (
+                          <span className="block text-xs text-muted-foreground tabular-nums">Paid {peso(o.total_paid ?? 0)}</span>
+                        )}
                       </>
                     ) : (
                       '—'

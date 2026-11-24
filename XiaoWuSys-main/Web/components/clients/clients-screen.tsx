@@ -4,16 +4,22 @@
 // social media, notes), their order history and what they still owe. The list is
 // GET /api/customers; a profile is GET /api/customers/:id, which also sends the totals and the
 // buttons this account may use. Saving goes to POST / PATCH /api/customers (works offline too).
+//
+// Migration 016 (adviser consultation, second round): the client's own contacts and the contact
+// person's own phone / email / social media are kept apart, social media may list several
+// accounts, the client's address is its MAIN branch and other branches can be added
+// (POST / PATCH /api/customers/:id/branches, online only), and the order history is split into
+// pending (waiting for approval), current and past orders, each with the branch it was for.
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Archive, ArchiveRestore, ArrowLeft, BookUser, Mail, MapPin, MessageCircle, Pencil, Phone, Plus, PlusCircle, Search, UserRound } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowLeft, BookUser, Building2, Mail, MapPin, MessageCircle, Pencil, Phone, Plus, PlusCircle, Search, UserRound } from 'lucide-react';
 import { formatDateTime, formatMobile, peso } from '@xiaowu/client-core/format';
 import { orderNumber } from '@xiaowu/client-core/orders';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { bannerText, Field, fieldErrorsMap, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { LoadProblem, PageHeader } from '@/components/layout/page-header';
-import { OrderStatusBadge, PaymentStatusBadge } from '@/components/orders/status-badges';
+import { DeadlineBadge, OrderStatusBadge, PaymentStatusBadge } from '@/components/orders/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -28,17 +34,36 @@ import { useApi } from '@/hooks/use-api';
 import { useSession } from '@/hooks/use-session';
 import { can } from '@xiaowu/client-core/permissions';
 import { errorMessage } from '@/lib/api';
-import type { Customer, Order } from '@/lib/orders';
+import type { Customer, CustomerBranch, Order } from '@/lib/orders';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
 
+type ProfileOrder = Order & {
+  total_paid: number;
+  remaining: number;
+  payment_status: string;
+  /** migration 016: 'pending' (waiting for approval), 'current' (approved, in production), 'past' (completed / cancelled) */
+  group?: 'pending' | 'current' | 'past' | string;
+  branch_name?: string | null;
+  branch_address?: string | null;
+};
 interface Profile {
   source: string;
   customer: Customer;
-  orders: (Order & { total_paid: number; remaining: number; payment_status: string })[];
-  totals: { order_count: number; open_orders: number; total_billed: number; total_paid: number; balance_due: number; last_order_at: string | null };
-  allowed_actions: { edit: boolean; create_order: boolean; archive: boolean; restore: boolean };
+  orders: ProfileOrder[];
+  branches?: CustomerBranch[];
+  totals: {
+    order_count: number; open_orders: number; total_billed: number; total_paid: number; balance_due: number; last_order_at: string | null;
+    pending_orders?: number; current_orders?: number; past_orders?: number;
+  };
+  allowed_actions: { edit: boolean; create_order: boolean; archive: boolean; restore: boolean; manage_branches?: boolean };
 }
+
+const ORDER_GROUPS: { key: string; label: string; empty: string }[] = [
+  { key: 'current', label: 'Current', empty: 'No order in production right now.' },
+  { key: 'pending', label: 'Pending', empty: 'No order waiting for approval.' },
+  { key: 'past', label: 'Past', empty: 'No completed or cancelled orders yet.' },
+];
 
 export function ClientsScreen() {
   const api = useApi();
@@ -76,7 +101,8 @@ export function ClientsScreen() {
     const term = search.trim().toLowerCase();
     if (!customers || !term) return customers ?? [];
     return customers.filter((c) =>
-      [c.full_name, c.contact_person, c.contact_number, c.email, c.social_media].some((v) => v && v.toLowerCase().includes(term))
+      [c.full_name, c.contact_person, c.contact_number, c.email, c.social_media, c.contact_person_number, c.contact_person_email]
+        .some((v) => v && v.toLowerCase().includes(term))
     );
   }, [customers, search]);
 
@@ -197,6 +223,9 @@ function ClientProfileSheet({
   const [problem, setProblem] = useState('');
   const [confirm, setConfirm] = useState<'archive' | 'restore' | null>(null);
   const [busy, setBusy] = useState(false);
+  const [group, setGroup] = useState('current');
+  const [branchForm, setBranchForm] = useState<CustomerBranch | 'new' | null>(null);
+  const [localTick, setLocalTick] = useState(0);
   useEffect(() => {
     if (!customerId) return undefined;
     let cancelled = false;
@@ -213,7 +242,7 @@ function ClientProfileSheet({
     return () => {
       cancelled = true;
     };
-  }, [api, customerId, tick]);
+  }, [api, customerId, tick, localTick]);
   const shown = profile && profile.customer.customer_id === customerId ? profile : null;
   const c = shown?.customer;
   const act = async (kind: 'archive' | 'restore') => {
@@ -228,7 +257,7 @@ function ClientProfileSheet({
 
   return (
     <Sheet open={Boolean(customerId)} onOpenChange={(next) => !next && onClose()}>
-      <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-3xl">
+      <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-4xl">
         <SheetHeader className="border-b pr-12">
           <SheetTitle>{c?.full_name ?? 'Client'}</SheetTitle>
           <SheetDescription>{c?.archived_at ? 'Archived: kept for the records. Restore to edit or order again.' : c ? `${c.customer_type || 'Individual'}${c.platform_source ? ` · came from ${c.platform_source}` : ''}` : 'Loading…'}</SheetDescription>
@@ -264,13 +293,72 @@ function ClientProfileSheet({
           {!shown && !problem && <Skeleton className="h-64 w-full" />}
           {shown && c && (
             <>
-              <ul className="grid gap-2 text-sm sm:grid-cols-2">
-                <Contact icon={UserRound} label="Contact person" value={c.contact_person} />
-                <Contact icon={Phone} label="Mobile" value={c.contact_number ? formatMobile(c.contact_number) : null} />
-                <Contact icon={Mail} label="Email" value={c.email} />
-                <Contact icon={MessageCircle} label="Social media" value={c.social_media} />
-                <Contact icon={MapPin} label="Address" value={c.address} />
-              </ul>
+              <div className="grid gap-3 md:grid-cols-2">
+                <section className="space-y-2 rounded-md border p-3" aria-labelledby="client-contacts">
+                  <h3 id="client-contacts" className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                    {c.customer_type && c.customer_type !== 'Individual' ? `${c.customer_type}’s contacts` : 'Client’s contacts'}
+                  </h3>
+                  <ul className="space-y-2 text-sm">
+                    <Contact icon={Phone} label="Phone" value={c.contact_number ? formatMobile(c.contact_number) : null} />
+                    <Contact icon={Mail} label="Email" value={c.email} />
+                    <Contact icon={MessageCircle} label="Social media" value={c.social_media} />
+                  </ul>
+                </section>
+                <section className="space-y-2 rounded-md border p-3" aria-labelledby="client-person">
+                  <h3 id="client-person" className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Contact person</h3>
+                  <ul className="space-y-2 text-sm">
+                    <Contact icon={UserRound} label="Name" value={c.contact_person} />
+                    <Contact icon={Phone} label="Phone" value={c.contact_person_number} />
+                    <Contact icon={Mail} label="Email" value={c.contact_person_email} />
+                    <Contact icon={MessageCircle} label="Social media" value={c.contact_person_social} />
+                  </ul>
+                </section>
+              </div>
+              <section className="space-y-2" aria-labelledby="client-branches">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 id="client-branches" className="flex items-center gap-2 font-semibold">
+                    <Building2 className="size-4 text-muted-foreground" aria-hidden /> Address and branches
+                  </h3>
+                  {shown.allowed_actions.manage_branches && (
+                    <Button size="sm" variant="outline" onClick={() => setBranchForm('new')}>
+                      <Plus aria-hidden /> Add branch
+                    </Button>
+                  )}
+                </div>
+                <ul className="grid gap-2 text-sm sm:grid-cols-2">
+                  <li className="rounded-md border p-2">
+                    <p className="font-medium">
+                      Main branch <Badge variant="outline" className="ml-1">Main</Badge>
+                    </p>
+                    <p className={cn('flex items-start gap-1.5 whitespace-pre-wrap wrap-anywhere', !c.address && 'text-muted-foreground')}>
+                      <MapPin className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden /> {c.address || 'No address saved'}
+                    </p>
+                  </li>
+                  {(shown.branches ?? []).map((b) => (
+                    <li key={b.branch_id} className={cn('rounded-md border p-2', b.archived_at && 'opacity-60')}>
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="font-medium wrap-anywhere">
+                          {b.branch_name}
+                          {b.archived_at && <Badge variant="outline" className={cn('ml-1', TONE_CLASSES.muted.badge)}>Archived</Badge>}
+                        </p>
+                        {shown.allowed_actions.manage_branches && (
+                          <Button size="icon-sm" variant="ghost" onClick={() => setBranchForm(b)} aria-label={`Edit ${b.branch_name}`} title="Edit">
+                            <Pencil aria-hidden />
+                          </Button>
+                        )}
+                      </div>
+                      <p className={cn('flex items-start gap-1.5 whitespace-pre-wrap wrap-anywhere', !b.address && 'text-muted-foreground')}>
+                        <MapPin className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden /> {b.address || 'No address saved'}
+                      </p>
+                      {(b.contact_person || b.contact_number || b.email) && (
+                        <p className="text-xs text-muted-foreground wrap-anywhere">
+                          {[b.contact_person, b.contact_number, b.email].filter(Boolean).join(' · ')}
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </section>
               {c.notes && <p className="rounded-md border bg-muted/30 p-3 text-sm whitespace-pre-wrap">{c.notes}</p>}
               <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
                 <Stat label="Orders" value={`${shown.totals.order_count} (${shown.totals.open_orders} open)`} />
@@ -278,43 +366,79 @@ function ClientProfileSheet({
                 <Stat label="Paid" value={peso(shown.totals.total_paid)} />
                 <Stat label="Still owes" value={peso(shown.totals.balance_due)} tone={shown.totals.balance_due > 0 ? 'warning' : undefined} />
               </dl>
-              <section className="space-y-2">
-                <h3 className="font-semibold">Order history</h3>
-                {shown.orders.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No orders yet.</p>
-                ) : (
-                  <div className="max-w-full min-w-0 overflow-x-auto rounded-md border">
-                    <Table>
-                      <TableHeader className="bg-muted/50">
-                        <TableRow>
-                          <TableHead>Order</TableHead>
-                          <TableHead className="hidden sm:table-cell">Created</TableHead>
-                          <TableHead>Status</TableHead>
-                          <TableHead className="text-right">Bill</TableHead>
-                          <TableHead className="text-right">Balance</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {shown.orders.map((o) => (
-                          <TableRow key={o.order_id}>
-                            <TableCell>
-                              <Link className="font-mono text-sm text-primary underline-offset-4 hover:underline" href={`/orders?order=${encodeURIComponent(o.order_id)}`}>
-                                {orderNumber(o)}
-                              </Link>
-                            </TableCell>
-                            <TableCell className="hidden whitespace-nowrap sm:table-cell">{formatDateTime(o.date_created, { utc: true, withTime: false })}</TableCell>
-                            <TableCell className="space-x-1 whitespace-normal">
-                              <OrderStatusBadge status={o.production_status} />
-                              <PaymentStatusBadge status={o.payment_status} />
-                            </TableCell>
-                            <TableCell className="text-right tabular-nums">{peso(o.total_quote_amount)}</TableCell>
-                            <TableCell className="text-right tabular-nums">{peso(o.remaining)}</TableCell>
+              <section className="space-y-2" aria-labelledby="client-orders">
+                <h3 id="client-orders" className="font-semibold">Orders</h3>
+                {/* Adviser point 1: past, current and pending orders, each with the branch it was for */}
+                <div role="tablist" aria-label="Which orders" className="flex flex-wrap gap-1">
+                  {ORDER_GROUPS.map((g) => {
+                    const n = shown.orders.filter((o) => (o.group ?? 'current') === g.key).length;
+                    return (
+                      <Button
+                        key={g.key}
+                        role="tab"
+                        aria-selected={group === g.key}
+                        size="sm"
+                        variant={group === g.key ? 'default' : 'outline'}
+                        onClick={() => setGroup(g.key)}
+                      >
+                        {g.label} <span className="tabular-nums">({n})</span>
+                      </Button>
+                    );
+                  })}
+                </div>
+                {(() => {
+                  const rows = shown.orders.filter((o) => (o.group ?? 'current') === group);
+                  const empty = ORDER_GROUPS.find((g) => g.key === group)?.empty ?? 'No orders.';
+                  if (rows.length === 0) return <p className="text-sm text-muted-foreground">{shown.orders.length === 0 ? 'No orders yet.' : empty}</p>;
+                  return (
+                    <div className="max-w-full min-w-0 overflow-x-auto rounded-md border">
+                      <Table>
+                        <TableHeader className="bg-muted/50">
+                          <TableRow>
+                            <TableHead>Order</TableHead>
+                            <TableHead className="hidden sm:table-cell">Created</TableHead>
+                            <TableHead className="hidden md:table-cell">Deadline</TableHead>
+                            <TableHead>Status</TableHead>
+                            <TableHead className="hidden lg:table-cell">Branch</TableHead>
+                            <TableHead className="text-right">Bill</TableHead>
+                            <TableHead className="text-right">Balance</TableHead>
                           </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
-                )}
+                        </TableHeader>
+                        <TableBody>
+                          {rows.map((o) => (
+                            <TableRow key={o.order_id}>
+                              <TableCell>
+                                <Link className="font-mono text-sm text-primary underline-offset-4 hover:underline" href={`/orders?order=${encodeURIComponent(o.order_id)}`}>
+                                  {orderNumber(o)}
+                                </Link>
+                                {o.order_description && (
+                                  <span className="block max-w-48 truncate text-xs text-muted-foreground" title={o.order_description}>
+                                    {o.order_description}
+                                  </span>
+                                )}
+                              </TableCell>
+                              <TableCell className="hidden whitespace-nowrap sm:table-cell">{formatDateTime(o.date_created, { utc: true, withTime: false })}</TableCell>
+                              <TableCell className="hidden whitespace-nowrap md:table-cell">
+                                {formatDateTime(o.production_deadline, { withTime: false })}
+                                <DeadlineBadge flag={o.deadline_flag} className="ml-1" />
+                              </TableCell>
+                              <TableCell className="space-x-1 whitespace-normal">
+                                <OrderStatusBadge status={o.production_status} />
+                                <PaymentStatusBadge status={o.payment_status} />
+                              </TableCell>
+                              <TableCell className="hidden max-w-48 whitespace-normal lg:table-cell">
+                                <span className="block">{o.branch_name || 'Main branch'}</span>
+                                {o.branch_address && <span className="block truncate text-xs text-muted-foreground" title={o.branch_address}>{o.branch_address}</span>}
+                              </TableCell>
+                              <TableCell className="text-right tabular-nums">{peso(o.total_quote_amount)}</TableCell>
+                              <TableCell className="text-right tabular-nums">{peso(o.remaining)}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  );
+                })()}
               </section>
             </>
           )}
@@ -331,6 +455,18 @@ function ClientProfileSheet({
         onConfirm={() => confirm && void act(confirm)}
         onCancel={() => setConfirm(null)}
       />
+      {branchForm && c && (
+        <BranchFormDialog
+          customerId={c.customer_id}
+          branch={branchForm === 'new' ? null : branchForm}
+          onClose={() => setBranchForm(null)}
+          onSaved={(message) => {
+            setBranchForm(null);
+            setLocalTick((n) => n + 1);
+            onChanged({ type: 'success', title: 'Branch saved', message });
+          }}
+        />
+      )}
     </Sheet>
   );
 }
@@ -354,7 +490,11 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: 'wa
   );
 }
 
-const EMPTY = { full_name: '', contact_number: '', platform_source: '', customer_type: 'Individual', contact_person: '', email: '', address: '', social_media: '', notes: '' };
+const EMPTY = {
+  full_name: '', contact_number: '', platform_source: '', customer_type: 'Individual', contact_person: '', email: '', address: '', social_media: '', notes: '',
+  // migration 016: the contact person's own details
+  contact_person_number: '', contact_person_email: '', contact_person_social: '',
+};
 type Form = typeof EMPTY;
 
 export function ClientFormDialog({
@@ -425,9 +565,7 @@ export function ClientFormDialog({
                 </SelectContent>
               </Select>
             </Field>
-            <Field id="cl-person" label="Contact person" error={errors.contact_person} hint="For a school or company: who to talk to">
-              <Input id="cl-person" maxLength={255} value={form.contact_person} onChange={set('contact_person')} />
-            </Field>
+            <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase sm:col-span-2">The client’s own contacts (the company / school)</p>
             <Field id="cl-mobile" label="Mobile number" error={errors.contact_number} hint="11 digits, starts with 0">
               <Input
                 id="cl-mobile"
@@ -442,13 +580,26 @@ export function ClientFormDialog({
             <Field id="cl-email" label="Email" error={errors.email}>
               <Input id="cl-email" type="email" maxLength={255} value={form.email} onChange={set('email')} />
             </Field>
-            <Field id="cl-social" label="Social media" error={errors.social_media} hint="e.g. facebook.com/agdaonhs">
-              <Input id="cl-social" maxLength={255} value={form.social_media} onChange={set('social_media')} />
+            <Field id="cl-social" label="Social media" error={errors.social_media} hint="One account per line, e.g. facebook.com/agdaonhs" className="sm:col-span-2">
+              <Textarea id="cl-social" rows={2} maxLength={1000} value={form.social_media} onChange={set('social_media')} />
+            </Field>
+            <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase sm:col-span-2">Contact person</p>
+            <Field id="cl-person" label="Name" error={errors.contact_person} hint="For a school or company: who to talk to">
+              <Input id="cl-person" maxLength={255} value={form.contact_person} onChange={set('contact_person')} />
+            </Field>
+            <Field id="cl-person-phone" label="Their phone" error={errors.contact_person_number} hint="Mobile or landline">
+              <Input id="cl-person-phone" type="tel" maxLength={20} placeholder="09XXXXXXXXX" value={form.contact_person_number} onChange={set('contact_person_number')} />
+            </Field>
+            <Field id="cl-person-email" label="Their email" error={errors.contact_person_email}>
+              <Input id="cl-person-email" type="email" maxLength={255} value={form.contact_person_email} onChange={set('contact_person_email')} />
+            </Field>
+            <Field id="cl-person-social" label="Their social media" error={errors.contact_person_social} hint="One account per line">
+              <Textarea id="cl-person-social" rows={2} maxLength={1000} value={form.contact_person_social} onChange={set('contact_person_social')} />
             </Field>
             <Field id="cl-source" label="Came from" error={errors.platform_source}>
               <Input id="cl-source" maxLength={100} placeholder="Facebook, walk-in…" value={form.platform_source} onChange={set('platform_source')} />
             </Field>
-            <Field id="cl-address" label="Address" error={errors.address} className="sm:col-span-2">
+            <Field id="cl-address" label="Address (main branch)" error={errors.address} hint="Other branches are added in the client’s profile" className="sm:col-span-2">
               <Textarea id="cl-address" rows={2} maxLength={1000} value={form.address} onChange={set('address')} />
             </Field>
             <Field id="cl-notes" label="Notes" error={errors.notes} className="sm:col-span-2">
@@ -461,6 +612,114 @@ export function ClientFormDialog({
             </Button>
             <Button type="submit" busy={busy} disabled={busy}>
               {busy ? 'Saving…' : 'Save client'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Migration 016: add or edit one of the client's other branches (online only)
+const EMPTY_BRANCH = { branch_name: '', address: '', contact_person: '', contact_number: '', email: '', notes: '' };
+type BranchForm = typeof EMPTY_BRANCH;
+
+function BranchFormDialog({
+  customerId,
+  branch,
+  onClose,
+  onSaved,
+}: {
+  customerId: string;
+  branch: CustomerBranch | null;
+  onClose: () => void;
+  onSaved: (message: string) => void;
+}) {
+  const api = useApi();
+  const [form, setForm] = useState<BranchForm>(() =>
+    branch
+      ? (Object.fromEntries(Object.keys(EMPTY_BRANCH).map((k) => [k, (branch as unknown as Record<string, string | null>)[k] ?? ''])) as BranchForm)
+      : EMPTY_BRANCH
+  );
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState('');
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const set = (key: keyof BranchForm) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setForm((f) => ({ ...f, [key]: e.target.value }));
+  const path = `/customers/${encodeURIComponent(customerId)}/branches`;
+
+  const submit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setProblem('');
+    setErrors({});
+    const body = Object.fromEntries(
+      Object.entries(form).map(([k, v]) => [k, v.trim() === '' ? (branch && k !== 'branch_name' ? null : undefined) : v.trim()])
+    );
+    setBusy(true);
+    const { ok, data } = branch
+      ? await api<{ message?: string }>('PATCH', `${path}/${encodeURIComponent(branch.branch_id)}`, body)
+      : await api<{ message?: string }>('POST', path, body);
+    setBusy(false);
+    if (!ok) {
+      setErrors(fieldErrorsMap(data));
+      setProblem(bannerText(data, Object.keys(EMPTY_BRANCH), 'The branch was not saved.'));
+      return;
+    }
+    onSaved(data.message ?? 'Branch saved.');
+  };
+
+  const archive = async (kind: 'archive' | 'restore') => {
+    if (!branch) return;
+    setBusy(true);
+    const { ok, data } = await api<{ message?: string }>('POST', `${path}/${encodeURIComponent(branch.branch_id)}/${kind}`);
+    setBusy(false);
+    if (!ok) {
+      setProblem(errorMessage(data, 'Nothing was changed.'));
+      return;
+    }
+    onSaved(data.message ?? 'Saved.');
+  };
+
+  return (
+    <Dialog open onOpenChange={(next) => !next && !busy && onClose()}>
+      <DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{branch ? `Edit ${branch.branch_name}` : 'Add a branch'}</DialogTitle>
+          <DialogDescription>An order can name the branch that makes it; its address is shown with the order.</DialogDescription>
+        </DialogHeader>
+        <form onSubmit={submit} className="space-y-4">
+          <FormProblem message={problem} />
+          <RequiredNote />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field id="br-name" label="Branch name *" error={errors.branch_name} className="sm:col-span-2">
+              <Input id="br-name" required maxLength={255} placeholder="e.g. Toril campus" value={form.branch_name} onChange={set('branch_name')} autoFocus />
+            </Field>
+            <Field id="br-address" label="Address" error={errors.address} className="sm:col-span-2">
+              <Textarea id="br-address" rows={2} maxLength={1000} value={form.address} onChange={set('address')} />
+            </Field>
+            <Field id="br-person" label="Contact person" error={errors.contact_person}>
+              <Input id="br-person" maxLength={255} value={form.contact_person} onChange={set('contact_person')} />
+            </Field>
+            <Field id="br-phone" label="Phone" error={errors.contact_number} hint="Mobile or landline">
+              <Input id="br-phone" type="tel" maxLength={20} value={form.contact_number} onChange={set('contact_number')} />
+            </Field>
+            <Field id="br-email" label="Email" error={errors.email}>
+              <Input id="br-email" type="email" maxLength={255} value={form.email} onChange={set('email')} />
+            </Field>
+            <Field id="br-notes" label="Notes" error={errors.notes}>
+              <Input id="br-notes" maxLength={1000} value={form.notes} onChange={set('notes')} />
+            </Field>
+          </div>
+          <DialogFooter>
+            {branch && (
+              <Button type="button" variant="outline" className="sm:mr-auto" disabled={busy} onClick={() => void archive(branch.archived_at ? 'restore' : 'archive')}>
+                {branch.archived_at ? <ArchiveRestore aria-hidden /> : <Archive aria-hidden />} {branch.archived_at ? 'Restore branch' : 'Archive branch'}
+              </Button>
+            )}
+            <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
+              Cancel
+            </Button>
+            <Button type="submit" busy={busy} disabled={busy}>
+              {busy ? 'Saving…' : 'Save branch'}
             </Button>
           </DialogFooter>
         </form>

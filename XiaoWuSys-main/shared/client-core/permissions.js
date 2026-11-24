@@ -12,7 +12,9 @@ export const NO_ORDER_ACTIONS = Object.freeze({
   print_receipt: false, print_quote: false, void_payment: false, log_loss: false, archive_order: false, restore_order: false,
   // migration 015
   edit_description: false, add_print_details: false, record_delivery: false, max_delivery: 0, complete_blocked_reason: null,
-  complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: false, edit_payment: false, adjust_price: false
+  complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: false, edit_payment: false, adjust_price: false,
+  // migration 016
+  approve_without_quote: false, plan_deliveries: false, manage_design_files: false
 });
 
 export const orderActions = (detail) => ({ ...NO_ORDER_ACTIONS, ...(detail && detail.allowed_actions) });
@@ -20,10 +22,10 @@ export const orderActions = (detail) => ({ ...NO_ORDER_ACTIONS, ...(detail && de
 // What each role may do, in plain words for the Accounts screen. Display text only, keyed by the
 // role names the server sends in "assignable_roles"; it never decides who may do what.
 export const ROLE_HELP = Object.freeze({
-  Owner: 'Everything, including approving job orders and managing Owners',
-  Admin: 'Everything except approving job orders; manages non-Owner accounts',
-  Staff: 'Orders, payments, deliveries and stock in / out (no account management)',
-  Production: 'Orders, payments, deliveries and stock in / out (no account management)'
+  Owner: 'Everything, including quotes, discounts, cancelling orders and managing Owners',
+  Admin: 'Approves job orders and manages non-Owner accounts; no quotes, discounts or cancelling orders',
+  Staff: 'Creates orders (the Owner or an Admin approves them), payments, waste, deliveries and stock in / out',
+  Production: 'Creates orders (the Owner or an Admin approves them), payments, waste, deliveries and stock in / out'
 });
 
 /** Plain-words description of a role from the server, or '' for a role this version doesn't know. */

@@ -17,10 +17,12 @@ import {
   HardDrive,
   PackageX,
   Loader,
+  PackageCheck,
   Printer,
   ServerCrash,
   ShieldCheck,
   TriangleAlert,
+  Truck,
   UserRound,
   Wifi,
 } from 'lucide-react';
@@ -94,9 +96,20 @@ export const ORDER_STATUS: Record<string, StateLook> = {
   Approved: { tone: 'info', icon: ShieldCheck },
   Printing: { tone: 'warning', icon: Printer },
   Pressing: { tone: 'warning', icon: Flame },
+  // migration 016: production done, waiting to be picked up or delivered
+  Ready: { tone: 'success', icon: PackageCheck },
   Completed: { tone: 'success', icon: CircleCheck },
   Delayed: { tone: 'warning', icon: TriangleAlert },
   Cancelled: { tone: 'danger', icon: CircleX },
+};
+
+// Migration 016: GET /api/orders delivery_status, and a planned batch's state (the server decides both)
+export const DELIVERY_STATUS: Record<string, StateLook> = {
+  'Not delivered': { tone: 'muted', icon: CircleDashed },
+  'Partly delivered': { tone: 'warning', icon: Truck },
+  Delivered: { tone: 'success', icon: PackageCheck },
+  'In production': { tone: 'info', icon: Printer },
+  Ready: { tone: 'success', icon: PackageCheck },
 };
 
 // deadline_flag from the server (PB 16; orderLifecycle.deadlineFlag decides it in shop time,

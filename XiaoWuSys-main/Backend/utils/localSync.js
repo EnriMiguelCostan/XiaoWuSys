@@ -36,25 +36,30 @@ const LOCAL_SYNC_COLUMNS = ['dirty_fields', 'cloud_last_modified', 'sync_conflic
 //   migration 015: inventory_items.supplier_id / has_sizes; order_profiles.order_description /
 //     labor_amount / incidental_amount; payments: payer and method details, refunds, verification,
 //     recorded_at; customers: client profile; material_loss.loss_batch_id (bulk waste)
+//   migration 016: inventory_items.requires_pressing (T-shirts); customers: the contact person's own
+//     number / email / social media; order_profiles.branch_id; order_deliveries.plan_id;
+//     material_loss.print_detail_id (the print line a loss ruined)
 const TABLE_EXTRA_COLUMNS = {
   payments: [['received_by', 'TEXT'], ['receipt_no', 'TEXT'], ['voids_payment_id', 'TEXT'], ['void_reason', 'TEXT'],
              ['payer_name', 'TEXT'], ['reference_no', 'TEXT'], ['bank_name', 'TEXT'], ['account_name', 'TEXT'], ['cheque_no', 'TEXT'],
              ['cheque_date', 'TEXT'], ['payment_notes', 'TEXT'], ['is_refund', 'INTEGER DEFAULT 0'], ['refund_reason', 'TEXT'],
              ['verified_by', 'TEXT'], ['verified_at', 'TEXT'], ['recorded_at', 'TEXT']],
   material_loss: [['cloud_stock_delta', 'INTEGER'], ['reason_code', 'TEXT'], ['loss_category', 'TEXT'], ['production_stage', 'TEXT'],
-                  ['is_statistical_anomaly', 'INTEGER DEFAULT 0'], ['loss_batch_id', 'TEXT']],
+                  ['is_statistical_anomaly', 'INTEGER DEFAULT 0'], ['loss_batch_id', 'TEXT'], ['print_detail_id', 'TEXT']],
   inventory_items: [['deleted_at', 'TEXT'], ['deleted_by', 'TEXT'], ['purged_at', 'TEXT'],
                     ['unit', "TEXT NOT NULL DEFAULT 'pcs'"], ['supplier', 'TEXT'], ['selling_price', 'REAL NOT NULL DEFAULT 0'],
-                    ['supplier_id', 'TEXT'], ['has_sizes', 'INTEGER DEFAULT 0']],
+                    ['supplier_id', 'TEXT'], ['has_sizes', 'INTEGER DEFAULT 0'], ['requires_pressing', 'INTEGER DEFAULT 0']],
   users: [['is_active', 'INTEGER NOT NULL DEFAULT 1'], ['tokens_valid_after', 'TEXT'], ['removed_at', 'TEXT'], ['removed_by', 'TEXT']],
   order_profiles: [['stock_reserved', 'INTEGER NOT NULL DEFAULT 0'], ['approved_by', 'TEXT'], ['approved_at', 'TEXT'],
                    ['tracking_no', 'TEXT'], ['last_edited_by', 'TEXT'], ['last_edited_role', 'TEXT'],
                    ['subtotal_amount', 'REAL NOT NULL DEFAULT 0'], ['discount_amount', 'REAL NOT NULL DEFAULT 0'],
                    ['discount_reason', 'TEXT'], ['cancellation_reason', 'TEXT'], ['archived_at', 'TEXT'], ['archived_by', 'TEXT'],
                    ['order_description', 'TEXT'], ['labor_amount', 'REAL DEFAULT 0'], ['incidental_amount', 'REAL DEFAULT 0'],
-                   ['adjustment_amount', 'REAL DEFAULT 0'], ['adjustment_reason', 'TEXT']],
+                   ['adjustment_amount', 'REAL DEFAULT 0'], ['adjustment_reason', 'TEXT'], ['branch_id', 'TEXT']],
   customers: [['archived_at', 'TEXT'], ['archived_by', 'TEXT'], ['customer_type', "TEXT DEFAULT 'Individual'"],
-              ['contact_person', 'TEXT'], ['email', 'TEXT'], ['address', 'TEXT'], ['social_media', 'TEXT'], ['notes', 'TEXT']],
+              ['contact_person', 'TEXT'], ['email', 'TEXT'], ['address', 'TEXT'], ['social_media', 'TEXT'], ['notes', 'TEXT'],
+              ['contact_person_number', 'TEXT'], ['contact_person_email', 'TEXT'], ['contact_person_social', 'TEXT']],
+  order_deliveries: [['plan_id', 'TEXT']],
   order_items: [['unit_cost', 'REAL']],
   order_consumables_log: [['unit_cost', 'REAL']]
 };

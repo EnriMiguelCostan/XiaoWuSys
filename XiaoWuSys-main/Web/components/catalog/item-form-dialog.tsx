@@ -63,6 +63,7 @@ export function ItemFormDialog({
     supplier: item?.supplier ?? '',
     supplier_id: item?.supplier_id ?? '',
     has_sizes: Boolean(item?.has_sizes),
+    requires_pressing: Boolean(item?.requires_pressing),
     quantity_available: '',
     minimum_threshold: item ? String(item.minimum_threshold) : '',
     unit_cost: item ? String(item.unit_cost) : '',
@@ -116,6 +117,7 @@ export function ItemFormDialog({
         supplier: form.supplier_id ? undefined : supplier || undefined,
         supplier_id: form.supplier_id || undefined,
         has_sizes: form.has_sizes,
+        requires_pressing: form.requires_pressing,
         quantity_available: quantity,
         minimum_threshold: threshold,
         unit_cost: cost,
@@ -130,6 +132,7 @@ export function ItemFormDialog({
       if (form.supplier_id !== (item.supplier_id ?? '')) body.supplier_id = form.supplier_id || null;
       else if (!form.supplier_id && supplier !== (item.supplier ?? '')) body.supplier = supplier || null;
       if (form.has_sizes !== Boolean(item.has_sizes)) body.has_sizes = form.has_sizes;
+      if (form.requires_pressing !== Boolean(item.requires_pressing)) body.requires_pressing = form.requires_pressing;
       if (form.minimum_threshold.trim() !== String(item.minimum_threshold)) body.minimum_threshold = threshold;
       if (form.unit_cost.trim() !== String(item.unit_cost)) body.unit_cost = cost;
       if (form.selling_price.trim() !== String(item.selling_price ?? 0)) body.selling_price = price;
@@ -237,7 +240,20 @@ export function ItemFormDialog({
             <input type="checkbox" className="mt-0.5 size-4" checked={form.has_sizes} onChange={(e) => setForm((f) => ({ ...f, has_sizes: e.target.checked }))} />
             <span>
               <span className="font-medium">Garment (has sizes)</span>
-              <span className="block text-xs text-muted-foreground">Shirts, jerseys, polos… Their print details get a size, name and number, and they go through Pressing.</span>
+              <span className="block text-xs text-muted-foreground">Shirts, jerseys, polos… Their print details get a size, name and number.</span>
+            </span>
+          </label>
+          {/* Migration 016 (adviser consultation): only T-shirts go through the heat press */}
+          <label className="flex min-h-10 items-start gap-2 text-sm sm:col-span-2">
+            <input
+              type="checkbox"
+              className="mt-0.5 size-4"
+              checked={form.requires_pressing}
+              onChange={(e) => setForm((f) => ({ ...f, requires_pressing: e.target.checked }))}
+            />
+            <span>
+              <span className="font-medium">T-shirt (heat-pressed)</span>
+              <span className="block text-xs text-muted-foreground">Orders with this item get the Pressing step. Jerseys, mugs, tarpaulins… skip it.</span>
             </span>
           </label>
           {!editing && (

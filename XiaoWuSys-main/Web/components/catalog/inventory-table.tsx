@@ -8,7 +8,7 @@
 // is summary.stock_value. Not ported from the MVP on purpose (rules guard: no-rule-math): the
 // totals footer over the filtered rows, which would add up stock and money here.
 import Link from 'next/link';
-import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpDown, ArrowUpFromLine, FlaskConical, History, Minus, MoreHorizontal, Pencil, Shirt, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpDown, ArrowUpFromLine, Flame, FlaskConical, History, Minus, MoreHorizontal, Pencil, Shirt, Trash2 } from 'lucide-react';
 import { peso } from '@xiaowu/client-core/format';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -166,6 +166,7 @@ export function InventoryTable({
                   <span className="flex items-center gap-1 font-medium">
                     {item.item_name}
                     {item.has_sizes && <Shirt className="size-3.5 shrink-0 text-muted-foreground" aria-label="Garment (has sizes)" />}
+                    {item.requires_pressing && <Flame className="size-3.5 shrink-0 text-muted-foreground" aria-label="T-shirt: goes through Pressing" />}
                   </span>
                   <span className="block text-xs text-muted-foreground md:hidden">{item.item_category}</span>
                   {item.sync_status !== 'synced' && (

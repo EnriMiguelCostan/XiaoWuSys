@@ -53,11 +53,14 @@ function DialogContent({
   children,
   showCloseButton = true,
   dismissible = false,
+  overlayClassName,
   onInteractOutside,
   onEscapeKeyDown,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
+  /** extra classes for the dimmed background behind the dialog (e.g. a stronger blur) */
+  overlayClassName?: string
   /**
    * false (default): a click / tap outside or the Escape key does NOT close the dialog, so a
    * misclick never throws away what was typed. Only Cancel and the X close it.
@@ -67,7 +70,7 @@ function DialogContent({
 }) {
   return (
     <DialogPortal>
-      <DialogOverlay />
+      <DialogOverlay className={overlayClassName} />
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(

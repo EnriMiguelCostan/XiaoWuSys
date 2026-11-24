@@ -86,7 +86,7 @@ const wasRushed = (history = []) => {
   let enteredPrinting = null;
   for (const h of rows) {
     if (h.to_status === 'Printing') enteredPrinting = toMs(h.changed_at);
-    else if (h.from_status === 'Printing' && ['Pressing', 'Completed'].includes(h.to_status) && enteredPrinting !== null) {
+    else if (h.from_status === 'Printing' && ['Pressing', 'Ready', 'Completed'].includes(h.to_status) && enteredPrinting !== null) {
       const spent = toMs(h.changed_at) - enteredPrinting;
       if (Number.isFinite(spent) && spent >= 0 && spent < RUSH_MINUTES * 60 * 1000) return true;
       enteredPrinting = null;

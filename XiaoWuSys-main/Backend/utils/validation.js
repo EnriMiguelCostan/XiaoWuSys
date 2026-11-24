@@ -28,7 +28,8 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const PHONE_PATTERN = /^\+?[0-9(][0-9 ()-]{5,18}[0-9]$/;
 // Sprint 11 / PB 13 adds 'Approved'; PB 14 (migration 010) adds the optional 'Pressing' step:
 // Pending -> Approved -> Printing -> (Pressing ->) Completed
-const PRODUCTION_STATUSES = ['Pending', 'Approved', 'Printing', 'Pressing', 'Completed', 'Delayed', 'Cancelled'];
+// Migration 016 adds 'Ready': production is done and the order waits to be picked up / delivered
+const PRODUCTION_STATUSES = ['Pending', 'Approved', 'Printing', 'Pressing', 'Ready', 'Completed', 'Delayed', 'Cancelled'];
 
 // 'YYYY-MM-DDTHH:MM:SS' for a Date, as seen on a wall clock in the business timezone
 const localDateTime = (date, timeZone = BUSINESS_TIMEZONE) => {

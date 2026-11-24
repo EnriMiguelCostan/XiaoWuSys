@@ -38,15 +38,21 @@ describe('Batch 3 rules (no database)', () => {
     assert.deepEqual([item.stock_value, item.quantity_available_net, item.stock_status], [100.05, 2, 'low_stock']);
   });
 
-  it('makes Pressing an optional step between Printing and Completed', () => {
-    assert.deepEqual(STATUS_TRANSITIONS.Printing, ['Pressing', 'Completed', 'Cancelled']);
-    assert.deepEqual(STATUS_TRANSITIONS.Pressing, ['Completed', 'Cancelled']);
+  it('makes Pressing an optional step between Printing and Completed, with Ready before the hand-over', () => {
+    assert.deepEqual(STATUS_TRANSITIONS.Printing, ['Pressing', 'Ready', 'Completed', 'Cancelled']);
+    assert.deepEqual(STATUS_TRANSITIONS.Pressing, ['Ready', 'Completed', 'Cancelled']);
+    assert.deepEqual(STATUS_TRANSITIONS.Ready, ['Completed', 'Cancelled']); // migration 016
     assert.ok(canTransition('Printing', 'Completed'), 'tarpaulins and stickers skip pressing');
-    assert.ok(!canTransition('Approved', 'Pressing') && !canTransition('Pressing', 'Printing'));
+    assert.ok(!canTransition('Approved', 'Pressing') && !canTransition('Pressing', 'Printing') && !canTransition('Ready', 'Printing'));
     assert.ok(PRODUCTION_STATUSES.includes('Pressing') && EDITABLE_STATUSES.includes('Pressing') && QUOTE_FROZEN_STATUSES.includes('Pressing'));
-    assert.deepEqual(allowedActions({ production_status: 'Pressing' }, 'Staff').statuses, ['Completed'], 'no Cancel for Production');
-    assert.deepEqual(allowedActions({ production_status: 'Pressing' }, 'Owner').statuses, ['Completed', 'Cancelled']);
-    assert.equal(allowedActions({ production_status: 'Pressing' }, 'Owner').edit_quote, false);
+    assert.ok(PRODUCTION_STATUSES.includes('Ready') && EDITABLE_STATUSES.includes('Ready') && QUOTE_FROZEN_STATUSES.includes('Ready'));
+    assert.deepEqual(allowedActions({ production_status: 'Pressing' }, 'Staff').statuses, ['Ready', 'Completed'], 'no Cancel for Production');
+    assert.deepEqual(allowedActions({ production_status: 'Pressing' }, 'Owner').statuses, ['Ready', 'Completed', 'Cancelled']);
+    assert.equal(allowedActions({ production_status: 'Pressing', total_quote_amount: 500 }, 'Owner').edit_quote, false);
+    // migration 016: Pressing is only offered when the order has a T-shirt
+    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Staff', null, { needs_pressing: false, has_garments: true }).statuses,
+      ['Ready', 'Completed'], 'a jersey order skips the heat press');
+    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Staff', null, { needs_pressing: true }).statuses, ['Pressing', 'Ready', 'Completed']);
   });
 
   it('flags deadlines by shop-time calendar days', () => {

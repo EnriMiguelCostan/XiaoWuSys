@@ -21,9 +21,12 @@ const RATE_SCALE = 10 ** RATE_DECIMALS;
 const RATE_MAX = 9999999.999; // NUMERIC(10,3)
 
 // Which rates a status change sets off, oldest first
+// Migration 016: Ready (production done, waiting for hand-over). Printing -> Ready skips the
+// press, so it takes the 'Pressing' rates like Printing -> Completed does; Ready -> Completed takes
+// what is still left (each rate at most once, so nothing is taken twice).
 const triggersFor = (from, to) => {
-  if (to === 'Pressing' && from === 'Printing') return ['Pressing'];
-  if (to === 'Completed' && (from === 'Printing' || from === 'Pressing')) return ['Pressing', 'Completed'];
+  if ((to === 'Pressing' || to === 'Ready') && from === 'Printing') return ['Pressing'];
+  if (to === 'Completed' && (from === 'Printing' || from === 'Pressing' || from === 'Ready')) return ['Pressing', 'Completed'];
   return [];
 };
 

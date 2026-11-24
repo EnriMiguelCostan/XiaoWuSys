@@ -133,7 +133,7 @@ const downpaymentWarnings = ({ status, quote, paidTotal, paidSynced }) => {
 
 // ---------- PB 23: voiding a payment (D3: never edited or deleted, only reversed) ----------
 // Production has started on the strength of the downpayment in these statuses
-const DOWNPAYMENT_LOCKED_STATUSES = ['Approved', 'Printing', 'Pressing'];
+const DOWNPAYMENT_LOCKED_STATUSES = ['Approved', 'Printing', 'Pressing', 'Ready'];
 
 // May this payment be voided now? Amounts in pesos; paidSynced = what the cloud holds for the
 // order now (voids included), quote = the order's quote.

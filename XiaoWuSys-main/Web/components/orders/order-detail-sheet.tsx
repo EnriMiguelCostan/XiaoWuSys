@@ -19,13 +19,17 @@
 // payments section) and the reason the Owner gives when cancelling (PB 23, saved and audited).
 // M6 part 4: Archive / Restore (PB 23, D2) from allowed_actions.archive_order / restore_order.
 // An archived order is read-only: the server sends no edit actions until it is restored.
+// Migration 016 (adviser consultation, second round): the order opens in the CENTRE of the
+// screen as a large dialog (not full screen) over a blurred background, instead of a panel on the
+// right. "Waste" has its own tab, design files can be uploaded from the computer, a job order can
+// be approved without a quote (Owner or Admin), and Ready sits between production and the hand-over.
 // Migration 015 (adviser consultation): the order profile is full screen. The left column keeps
 // who / when / money and what the order still needs (approval, or completion); the right side
 // splits the order into tabs (Details, Materials & print, Quote, Payments, Deliveries, History)
 // instead of one long scroll. "Mark completed" follows the server's completion check
 // (allowed_actions.complete_blocked_reason / complete_with_balance, detail.completion).
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Archive, ArchiveRestore, CircleCheck, CircleDashed, CircleX, Copy, Flame, Lock, Printer, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-react';
+import { Archive, ArchiveRestore, CircleCheck, CircleDashed, CircleX, Copy, Flame, Lock, PackageCheck, Printer, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { orderNumber, shortfallLines } from '@xiaowu/client-core/orders';
 import { orderActions } from '@xiaowu/client-core/permissions';
@@ -63,7 +67,8 @@ import {
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SHEET_SCROLL_BODY } from '@/components/ui/sheet';
+import { SHEET_SCROLL_BODY } from '@/components/ui/sheet';
+import { DesignFilesSection } from '@/components/orders/design-files-section';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useApi } from '@/hooks/use-api';
 import { useOrderEditLock } from '@/hooks/use-order-edit-lock';
@@ -79,6 +84,7 @@ import { cn } from '@/lib/utils';
 const STATUS_ACTION: Record<string, { label: string; icon: typeof Printer; danger?: boolean }> = {
   Printing: { label: 'Start printing', icon: Printer },
   Pressing: { label: 'Start pressing', icon: Flame },
+  Ready: { label: 'Mark ready for pick-up / delivery', icon: PackageCheck },
   Completed: { label: 'Mark completed', icon: CircleCheck },
   Pending: { label: 'Resume (reserve stock)', icon: RotateCcw },
   Cancelled: { label: 'Cancel order', icon: CircleX, danger: true },
@@ -279,14 +285,15 @@ export function OrderDetailSheet({
     onChanged();
   };
 
-  // ---- Approve (Owner, PB 13): the server re-checks everything in one transaction ----
+  // ---- Approve (Owner or Admin, PB 13): the server re-checks everything in one transaction ----
   const approve = async () => {
     if (!order) return;
     setBusy(true);
     const { ok, status, data } = await api<ApproveError & { reserved?: { item_name?: string; inventory_id: string; quantity: number }[]; newly_reserved?: boolean }>(
       'POST',
       `/orders/${encodeURIComponent(order.order_id)}/approve`,
-      { expected_version: order.version || '' }
+      // Migration 016: the quote is optional; with none, the approver confirmed going ahead without one
+      { expected_version: order.version || '', ...(actions.approve_without_quote ? { without_quote: true } : {}) }
     );
     setBusy(false);
     setConfirmApprove(false);
@@ -300,6 +307,7 @@ export function OrderDetailSheet({
           (customer?.full_name ? `Customer: ${customer.full_name}.\n` : '') +
           (data.newly_reserved ? 'Materials reserved:\n' : 'Materials were already reserved when the order was created:\n') +
           held +
+          (actions.approve_without_quote ? '\nNo quote was set: the Owner can still set the price before the order is completed.' : '') +
           '\nNext: production can start printing (Start printing, at the bottom of this order).',
       });
       reloadDetail();
@@ -441,7 +449,7 @@ export function OrderDetailSheet({
 
   return (
     <>
-      <Sheet
+      <Dialog
         open={open}
         onOpenChange={(next) => {
           if (next || busy) return;
@@ -449,25 +457,26 @@ export function OrderDetailSheet({
           onClose();
         }}
       >
-        <SheetContent
-          side="right"
-          // Full screen (adviser consultation): the order profile uses the whole window
-          className="w-full gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-none"
-          // While an edit form is open, a stray click outside must not close the panel and lose it
-          onInteractOutside={(e) => editing && e.preventDefault()}
-          onEscapeKeyDown={(e) => editing && e.preventDefault()}
+        <DialogContent
+          // Adviser consultation (second round): centred, large but not full screen, with the
+          // page behind it blurred. While an edit form is open, a stray click outside or Escape
+          // must not close it and lose what was typed (dismissible only when nothing is open).
+          dismissible={!editing}
+          overlayClassName="bg-black/30 supports-backdrop-filter:backdrop-blur-sm"
+          className="flex h-[min(92dvh,64rem)] w-[min(96vw,84rem)] max-w-[96vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(96vw,84rem)]"
         >
-          <SheetHeader className="border-b pr-12">
-            <SheetTitle className="flex flex-wrap items-center gap-2">
+          <DialogHeader className="border-b p-4 pr-12">
+            <DialogTitle className="flex flex-wrap items-center gap-2">
               <span>Order</span>
               <code className="font-mono wrap-anywhere">{order ? orderNumber(order) : '…'}</code>
               {order && <OrderStatusBadge status={order.production_status} />}
               {detail && <PaymentStatusBadge status={detail.totals.payment_status} />}
-            </SheetTitle>
-            <SheetDescription className="min-w-0 truncate" title={customer?.full_name}>
+            </DialogTitle>
+            <DialogDescription className="min-w-0 truncate" title={customer?.full_name}>
               {customer?.full_name ?? (order ? 'Unknown customer' : 'Loading the order…')}
+              {detail?.branch && ` · ${detail.branch.branch_name}`}
               {fulfillment && fulfillment.pieces_ordered > 0 && ` · ${fulfillment.label}`}
-            </SheetDescription>
+            </DialogDescription>
             {order && (
               <div className="flex flex-wrap gap-2 pt-1">
                 <Button variant="outline" size="sm" onClick={copySummary}>
@@ -488,7 +497,7 @@ export function OrderDetailSheet({
                 )}
               </div>
             )}
-          </SheetHeader>
+          </DialogHeader>
 
           <div className={cn('min-h-0 flex-1 overflow-y-auto', SHEET_SCROLL_BODY)} aria-busy={!detail}>
             {loadError && (
@@ -544,7 +553,13 @@ export function OrderDetailSheet({
                     </TabsTrigger>
                     <TabsTrigger value="deliveries">
                       Deliveries
-                      {(detail.deliveries?.length ?? 0) > 0 && <CountBadge n={detail.deliveries?.length ?? 0} />}
+                      {(detail.delivery_plans?.length || detail.deliveries?.length || 0) > 0 && (
+                        <CountBadge n={detail.delivery_plans?.length || detail.deliveries?.length || 0} />
+                      )}
+                    </TabsTrigger>
+                    <TabsTrigger value="waste">
+                      Waste
+                      {(detail.material_losses?.length ?? 0) > 0 && <CountBadge n={detail.material_losses?.length ?? 0} />}
                     </TabsTrigger>
                     <TabsTrigger value="history">History</TabsTrigger>
                   </TabsList>
@@ -553,6 +568,7 @@ export function OrderDetailSheet({
                     <div className="flex flex-col gap-3">
                       <DetailsEditor key={`details-${order.version}-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportDetails} />
                       <DesignLink key={`design-${order.version}-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportDesign} />
+                      <DesignFilesSection detail={detail} actions={actions} onResult={sectionResult} />
                     </div>
                     {!order.order_description && actions.edit_description && (
                       <p className="text-sm text-muted-foreground">No description yet. Use “Edit” to write what the customer wants (design, colours, placement).</p>
@@ -563,9 +579,12 @@ export function OrderDetailSheet({
                     <MaterialsSection key={`materials-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportMaterials} />
                     <Separator />
                     <PrintDetailsSection key={`prints-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportPrints} />
-                    <Separator />
-                    <MaterialLossesSection detail={detail} actions={actions} onResult={sectionResult} />
                     <ConsumablesUsed detail={detail} />
+                  </TabsContent>
+
+                  {/* Adviser consultation (second round): the order's wastage in its own tab */}
+                  <TabsContent value="waste">
+                    <MaterialLossesSection detail={detail} actions={actions} onResult={sectionResult} />
                   </TabsContent>
 
                   <TabsContent value="quote">
@@ -645,8 +664,10 @@ export function OrderDetailSheet({
                               : completeBlocked
                                 ? actions.complete_blocked_reason ?? undefined
                                 : a.to === 'Pressing'
-                                  ? 'Pressing: the heat press that fixes the print on garments'
-                                  : undefined
+                                  ? 'Pressing: the heat press, for T-shirts'
+                                  : a.to === 'Ready'
+                                    ? 'Production is done: the order waits to be picked up or delivered'
+                                    : undefined
                           }
                           onClick={onClick}
                         >
@@ -659,8 +680,8 @@ export function OrderDetailSheet({
               )}
             </div>
           )}
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
 
       {/* Migration 015: completing records who took the pieces when no batch was recorded */}
       <Dialog open={Boolean(completing)} onOpenChange={(next) => !next && !busy && setCompleting(null)}>
@@ -793,13 +814,16 @@ export function OrderDetailSheet({
       />
       <ConfirmDialog
         open={confirmApprove}
-        title="Approve this job order?"
+        title={actions.approve_without_quote ? 'Approve this job order without a quote?' : 'Approve this job order?'}
         message={
-          order?.stock_reserved
+          (order?.stock_reserved
             ? 'The order moves to Approved and printing can start. Its materials are already reserved.'
-            : 'The order moves to Approved and its materials are reserved from stock now.'
+            : 'The order moves to Approved and its materials are reserved from stock now.') +
+          (actions.approve_without_quote
+            ? ' It has no quote, so no downpayment is checked. The Owner can still set its price later, before it is completed.'
+            : '')
         }
-        confirmLabel="Approve job order"
+        confirmLabel={actions.approve_without_quote ? 'Approve without a quote' : 'Approve job order'}
         busy={busy}
         busyLabel="Approving…"
         onConfirm={approve}

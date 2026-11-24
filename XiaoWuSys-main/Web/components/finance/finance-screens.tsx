@@ -8,6 +8,8 @@
 //   ExpensesScreen          the overheads card (GET / POST / DELETE /api/reports/overheads)
 //   ProfitLossScreen        the Owner's P&L card (GET /api/reports/pnl)
 //   WasteScreen             GET /api/reports/waste?from=&to=  + record several losses at once
+//                           (migration 016: month by month, like Monthly transactions, plus this week
+//                           and any dates)
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { ChevronLeft, ChevronRight, FileSpreadsheet, Plus, Receipt, Recycle, Scale, Trash2, Wallet } from 'lucide-react';
@@ -490,11 +492,26 @@ const presetPeriod = (preset: string) => {
   return { from: `${today.slice(0, 7)}-01`, to: today };
 };
 
+// Migration 016: one whole month ('YYYY-MM'): its first day to its last (today for this month)
+const monthPeriod = (ym: string) => {
+  const today = shopToday();
+  const [y, m] = ym.split('-').map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+  return { from: `${ym}-01`, to: last > today ? today : last };
+};
+
 export function WasteScreen() {
   const api = useApi();
   const { user } = useSession();
-  const [preset, setPreset] = useState('month');
-  const [period, setPeriod] = useState(() => presetPeriod('month'));
+  const months = useMemo(() => recentMonths(), []);
+  const [preset, setPreset] = useState('monthly');
+  const [month, setMonth] = useState(months[0]);
+  const [period, setPeriod] = useState(() => monthPeriod(months[0]));
+  const pickMonth = (ym: string) => {
+    setMonth(ym);
+    setPeriod(monthPeriod(ym));
+  };
+  const monthIndex = months.indexOf(month);
   const [report, setReport] = useState<WasteReport | null>(null);
   const [problem, setProblem] = useState('');
   const [tick, setTick] = useState(0);
@@ -519,8 +536,8 @@ export function WasteScreen() {
     <div className="space-y-5">
       <PageHeader
         icon={Recycle}
-        title="Waste"
-        description="Misprints, damaged and lost materials: what, how much, why, and what it cost."
+        title="Monthly waste"
+        description="Misprints, damaged and lost materials, month by month: what, how much, why, which order, and what it cost."
         actions={
           can(user, 'edit_inventory') && (
             <Button onClick={() => setRecording(true)}>
@@ -537,14 +554,37 @@ export function WasteScreen() {
           onValueChange={(v) => {
             if (!v) return;
             setPreset(v);
-            if (v !== 'custom') setPeriod(presetPeriod(v));
+            if (v === 'monthly') setPeriod(monthPeriod(month));
+            else if (v !== 'custom') setPeriod(presetPeriod(v));
           }}
           aria-label="Period"
         >
+          <ToggleGroupItem value="monthly">By month</ToggleGroupItem>
           <ToggleGroupItem value="week">This week</ToggleGroupItem>
-          <ToggleGroupItem value="month">This month</ToggleGroupItem>
           <ToggleGroupItem value="custom">Choose dates</ToggleGroupItem>
         </ToggleGroup>
+        {preset === 'monthly' && (
+          <div className="flex items-center gap-1">
+            <Button variant="outline" size="icon" aria-label="Previous month" disabled={monthIndex >= months.length - 1} onClick={() => pickMonth(months[monthIndex + 1])}>
+              <ChevronLeft aria-hidden />
+            </Button>
+            <Select value={month} onValueChange={pickMonth}>
+              <SelectTrigger className="w-40" aria-label="Month">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {months.map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {monthLabel(m)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button variant="outline" size="icon" aria-label="Next month" disabled={monthIndex <= 0} onClick={() => pickMonth(months[monthIndex - 1])}>
+              <ChevronRight aria-hidden />
+            </Button>
+          </div>
+        )}
         {preset === 'custom' && (
           <>
             <Field id="waste-from" label="From" className="w-40">

@@ -121,6 +121,12 @@ export function OrderInfo({ detail, customer }: { detail: OrderDetail; customer:
     <div className="space-y-2">
       <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <Info label="Customer" value={customer?.full_name || 'Unknown customer'} />
+        {/* Migration 016: which branch of the client makes this order (the main branch = the client's address) */}
+        <Info
+          label="Branch / address"
+          value={detail.branch ? detail.branch.branch_name : 'Main branch'}
+          sub={(detail.branch ? detail.branch.address : customer?.address) || 'No address saved'}
+        />
         <Info
           label="Contact number"
           value={
@@ -157,7 +163,7 @@ export function OrderInfo({ detail, customer }: { detail: OrderDetail; customer:
           }
           sub={totals.payment_status ? `Payment: ${totals.payment_status}` : undefined}
         />
-        {order.approved_at && <Info label="Approved" value={formatDateTime(order.approved_at, { utc: true })} sub="by the Owner" />}
+        {order.approved_at && <Info label="Approved" value={formatDateTime(order.approved_at, { utc: true })} sub="by the Owner or an Admin" />}
       </dl>
       {order.order_description && (
         <div className="rounded-md border bg-card p-3">
@@ -559,7 +565,8 @@ export function approvalNotes(detail: OrderDetail) {
   if (order.sync_status !== 'synced' || detail.source === 'local') {
     blocking.push('Approval needs an internet connection, and the order must be synced to the cloud.');
   }
-  if (dp && !dp.required) block('Set a quote amount for this order first.', 'quote');
+  // Migration 016 (adviser: the quote is optional): with no quote, approving skips the downpayment check
+  if (dp && !dp.required) notes.push('No quote yet. It can be approved without one; the Owner can still set the price later.');
   else if (dp && !dp.met) block('The downpayment (half of the quote) is not complete yet.', 'payments');
   const offlinePayments = payments.filter((p) => p.sync_status !== 'synced').length;
   if (offlinePayments) notes.push(`${offlinePayments} payment(s) saved offline do not count until they sync.`);
@@ -598,7 +605,7 @@ export function ApprovalPanel({ detail, canApprove }: { detail: OrderDetail; can
           />
         </>
       ) : (
-        <p className="text-sm text-foreground">No quote yet.</p>
+        <p className="text-sm text-foreground">No quote yet: approving it skips the downpayment check.</p>
       )}
       <p className="text-xs text-foreground/80">
         {detail.order.stock_reserved ? 'Materials are already reserved for this order.' : 'Approving will reserve this order’s materials.'}
@@ -618,7 +625,7 @@ export function ApprovalPanel({ detail, canApprove }: { detail: OrderDetail; can
           ))}
         </ul>
       )}
-      {!canApprove && <p className="text-xs text-foreground/80">Waiting for the Owner to approve this job order before printing can start.</p>}
+      {!canApprove && <p className="text-xs text-foreground/80">Waiting for the Owner or an Admin to approve this job order before printing can start.</p>}
     </section>
   );
 }

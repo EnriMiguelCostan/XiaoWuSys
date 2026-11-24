@@ -13,7 +13,8 @@ const MANAGER_ROLES = ['Owner', 'Admin'];
 const OWNER_ONLY = ['Owner'];
 
 // Owner-only financial decisions (SIA 1 "Authority Limits", UAC PB 2): only the Owner sets
-// or changes a quote, gives discounts, voids (cancels) an order and approves job orders.
+// or changes a quote, gives discounts and voids (cancels) an order. Approving a job order is
+// for the Owner or an Admin (adviser consultation, second round).
 const CAPABILITIES = {
   view_orders: ALL_ROLES,
   create_order: WRITE_ROLES,
@@ -24,7 +25,9 @@ const CAPABILITIES = {
   set_quote: OWNER_ONLY,
   apply_discount: OWNER_ONLY,     // reserved for PB 12
   void_order: OWNER_ONLY,         // cancel an existing order (releases its stock)
-  approve_order: OWNER_ONLY,
+  // Adviser consultation (second round): Staff and Production create orders; the Owner or an
+  // Admin approves them
+  approve_order: MANAGER_ROLES,
   refund_payment: OWNER_ONLY,     // migration 015: money given back to the customer
   complete_with_balance: OWNER_ONLY, // migration 015: hand over an order before it is fully paid
   verify_payment: MANAGER_ROLES,  // migration 015: confirm a non-cash payment arrived

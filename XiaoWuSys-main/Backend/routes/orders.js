@@ -14,8 +14,8 @@ const {
 const { withAvailability } = require('../services/inventorySnapshot');
 const { rolesWith, can, capabilitiesFor, outranks } = require('../services/domain/permissions');
 const {
-  STATUS_TRANSITIONS, CLOSED_STATUSES, EDITABLE_STATUSES, QUOTE_FROZEN_STATUSES, APPROVABLE_STATUSES, capabilityForTransition, allowedActions,
-  withDeadlineFlag, deadlineWindows, ARCHIVED_REASON, DELIVERY_METHODS, fulfillmentSummary, completionCheck
+  STATUS_TRANSITIONS, CLOSED_STATUSES, EDITABLE_STATUSES, quoteLocked, APPROVABLE_STATUSES, capabilityForTransition, allowedActions,
+  withDeadlineFlag, deadlineWindows, ARCHIVED_REASON, DELIVERY_METHODS, fulfillmentSummary, completionCheck, deliveryStatus
 } = require('../services/domain/orderLifecycle');
 const { refreshLocalRows } = require('../services/sync');
 const { writeAudit, writeAuditLocal } = require('../services/auditLog');
@@ -27,7 +27,8 @@ const {
   needsVerification
 } = require('../services/domain/payments');
 const { loadOrderLosses } = require('../services/waste');
-const { loadOrderContext } = require('../services/orderContext');
+const { loadOrderContext, catalogFacts, describeMaterials, piecesOf } = require('../services/orderContext');
+const { listDesignFiles } = require('../services/designFiles');
 const { setMovementContext, clearMovementContext } = require('../services/stockMovements');
 const { checkPaymentDetails, PAYMENT_DETAIL_NAMES } = require('../services/domain/payments');
 
@@ -41,7 +42,7 @@ const CUSTOMER_ARCHIVED = {
 };
 const VOID_REASON_MAX = 1000;
 const WRITE_ROLES = rolesWith('edit_order');
-const APPROVE_ROLES = rolesWith('approve_order'); // PB 13: only an Owner may approve a job order (§4.3)
+const APPROVE_ROLES = rolesWith('approve_order'); // PB 13 (adviser, second round): the Owner or an Admin approves
 
 // PB 2: only the Owner sets or changes a quote, and only the Owner voids (cancels) an order
 const quoteOwnerOnly = (res) => res.status(403).json({
@@ -251,6 +252,32 @@ const actionsWithContext = async (req, order, view = null) => {
   return { allowed_actions: allowedActions(order, req.user.role, payments.summary, context), context, view: payments };
 };
 
+// Migration 016: an order names one of its client's branches (or none = the main branch)
+const BRANCH_NOT_FOUND = {
+  error: 'VALIDATION_FAILED',
+  message: 'That branch does not belong to this client (or it was archived). Choose the branch again.',
+  details: [{ field: 'branch_id', message: 'Choose one of this client’s branches, or the main branch.' }]
+};
+
+// migration 016: order_id -> { status, pieces_ordered, pieces_delivered } for a page of orders
+// (three queries for the whole page: materials, their catalog facts, deliveries)
+const deliveryStatuses = async (req, ids) => {
+  const out = new Map();
+  if (!ids.length) return out;
+  const inList = `order_id IN (${ids.map((id) => `'${String(id).replace(/'/g, "''")}'`).join(', ')})`;
+  const [items, handed] = await Promise.all([
+    listRecords(req, 'order_items', { where: inList, limit: 20000 }),
+    listRecords(req, 'order_deliveries', { where: inList, limit: 20000 })
+  ]);
+  const facts = await catalogFacts(req, items.records.map((i) => i.inventory_id));
+  for (const id of ids) {
+    const materials = describeMaterials(items.records.filter((i) => i.order_id === id), facts);
+    const f = fulfillmentSummary({ pieces_ordered: piecesOf(materials), deliveries: handed.records.filter((d) => d.order_id === id) });
+    out.set(id, { status: deliveryStatus(f), pieces_ordered: f.pieces_ordered, pieces_delivered: f.pieces_delivered });
+  }
+  return out;
+};
+
 // Statuses staff can log when an order is halted for insufficient inventory (PB 10)
 const HALT_RESOLUTIONS = ['Delayed', 'Cancelled'];
 
@@ -411,11 +438,17 @@ router.get('/', requireRole(READ_ROLES), async (req, res) => {
       });
       for (const p of pays.records) if (byOrder.has(p.order_id)) byOrder.get(p.order_id).push(p);
     }
+    // migration 016: the delivery status of each order (Not delivered / Partly delivered / Delivered)
+    const delivery = await deliveryStatuses(req, ids);
     res.status(200).json({
       source: result.source,
       orders: result.records.map((o) => {
         const s = paymentSummary({ quote: o.total_quote_amount, payments: byOrder.get(o.order_id) || [] });
-        return { ...withDeadlineFlag(o), total_paid: s.total_paid, remaining: s.remaining, payment_status: s.payment_status };
+        const d = delivery.get(o.order_id) || null;
+        return {
+          ...withDeadlineFlag(o), total_paid: s.total_paid, remaining: s.remaining, payment_status: s.payment_status,
+          delivery_status: d ? d.status : null, pieces_ordered: d ? d.pieces_ordered : 0, pieces_delivered: d ? d.pieces_delivered : 0
+        };
       }),
       limit, offset, sort, dir, unsynced: result.unsynced,
       include_archived: includeArchived,
@@ -462,6 +495,9 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
     const needs = needsReservation(order) ? stockNeeds(items.records) : [];
     const evaluation = needs.length > 0 ? await evaluateCapacity(req, needs) : null;
     const context = await loadOrderContext(req, order, items.records, view); // migration 015
+    // migration 016: the branch making the order, and the design files uploaded for it
+    const branch = order.branch_id ? (await getRecord(req, 'customer_branches', order.branch_id)).record : null;
+    const designFiles = await listDesignFiles(req, order_id);
     const sources = [source, items.source, view.source, timeline.source, used.source, losses.source, evaluation && evaluation.source, context.source];
 
     res.status(200).json({
@@ -476,6 +512,12 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
       fulfillment: context.fulfillment,
       completion: context.completion,
       has_garments: context.has_garments,
+      // migration 016
+      needs_pressing: context.needs_pressing,
+      delivery_plans: context.delivery_plans,
+      branch,
+      design_files: designFiles.files,
+      design_files_available: designFiles.available,
       payments: view.payments.map((p) => ({ ...p, needs_verification: needsVerification(p) && !p.voided })),
       totals: {
         item_count: items.records.length,
@@ -568,7 +610,9 @@ router.post('/:order_id/restore', requireRole(ARCHIVE_ROLES), requireOrderEditAc
 // ==========================================
 // CREATE ORDER PROFILE (Sprint 6 / PB 6, capacity-gated in Sprint 9 / PB 9 & PB 10)
 // Body: { customer_id, production_deadline, required_items: [{ inventory_id, quantity_needed }],
-//         total_quote_amount?, resolution? }
+//         total_quote_amount?, resolution?, order_description?,
+//         design_drive_link? (migration 016: optional, a Google Drive link like PATCH /:id/design),
+//         branch_id? (migration 016: the client's branch making this order; left out = main branch) }
 //  - No resolution: stock is strictly evaluated; shortages -> 409 and NO order is created.
 //    On success the order, its order_items AND the stock reservation are written in ONE
 //    transaction (quantity_reserved += needed), so the Catalog's "Free to use", Low Stock and
@@ -589,6 +633,13 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
   const total_quote_amount = v.nonNegativeMoney(body.total_quote_amount, 'total_quote_amount', { required: false, defaultValue: 0 });
   // migration 015: what to do, in the customer's words (instructions, colours, placement...)
   const order_description = v.optionalString(body.order_description, 'order_description', ORDER_DESCRIPTION_MAX);
+  const branch_id = v.id(body.branch_id, 'branch_id', { required: false });
+  let design_drive_link = null;
+  if (body.design_drive_link !== undefined && body.design_drive_link !== null && String(body.design_drive_link).trim() !== '') {
+    const link = validateDriveLink(body.design_drive_link);
+    if (link.error) v.errors.push({ field: 'design_drive_link', message: link.error });
+    else design_drive_link = link.url;
+  }
   if (v.failed()) return v.send(res);
   // PB 2: staff create the order; the Owner prices it (0 = "no quote yet")
   if (total_quote_amount !== 0 && !can(req.user.role, 'set_quote')) return quoteOwnerOnly(res);
@@ -609,6 +660,11 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
     // FOR SHARE: an archive of this customer at the same moment waits, then sees this new open order
     const owner = await client.query('SELECT archived_at IS NOT NULL AS archived FROM customers WHERE customer_id = $1 FOR SHARE', [customer_id]);
     if (owner.rows[0] && owner.rows[0].archived) throw new Rejected(409, CUSTOMER_ARCHIVED);
+    if (branch_id) {
+      const branch = await client.query(
+        'SELECT 1 FROM customer_branches WHERE branch_id = $1 AND customer_id = $2 AND archived_at IS NULL', [branch_id, customer_id]);
+      if (branch.rowCount === 0) throw new Rejected(400, BRANCH_NOT_FOUND);
+    }
     const stock = await client.query(
       `SELECT inventory_id, item_name, quantity_available, quantity_reserved FROM inventory_items
         WHERE inventory_id = ANY($1::text[]) AND ${ACTIVE_ITEM_SQL} ORDER BY inventory_id FOR UPDATE`,
@@ -621,9 +677,10 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 
     const { rows } = await client.query(
       `INSERT INTO order_profiles (order_id, customer_id, production_deadline, production_status, total_quote_amount, stock_reserved,
-                                   order_description)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING ${selectList('order_profiles', 'pg')}`,
-      [order_id, customer_id, production_deadline, production_status, total_quote_amount, reserve, order_description]
+                                   order_description, design_drive_link, branch_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING ${selectList('order_profiles', 'pg')}`,
+      [order_id, customer_id, production_deadline, production_status, total_quote_amount, reserve, order_description,
+        design_drive_link, branch_id || null]
     );
     const items = [];
     for (let i = 0; i < needs.length; i++) {
@@ -655,12 +712,18 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
     const { missing, shortages } = checkStock(needs, rowsById);
     if (missing.length) throw missingItemsRejection(missing, 'local');
     if (reserve && shortages.length) throw shortageRejection(shortages, 'local');
+    if (branch_id) {
+      const branch = await sqliteGet(tx,
+        'SELECT 1 AS n FROM customer_branches WHERE branch_id = ? AND customer_id = ? AND archived_at IS NULL', [branch_id, customer_id]);
+      if (!branch) throw new Rejected(400, BRANCH_NOT_FOUND);
+    }
 
     await sqliteRun(tx,
       `INSERT INTO order_profiles (order_id, customer_id, production_deadline, production_status, total_quote_amount,
-                                   stock_reserved, order_description, sync_status, last_modified)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
-      [order_id, customer_id, production_deadline, production_status, total_quote_amount, reserve ? 1 : 0, order_description]);
+                                   stock_reserved, order_description, design_drive_link, branch_id, sync_status, last_modified)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+      [order_id, customer_id, production_deadline, production_status, total_quote_amount, reserve ? 1 : 0, order_description,
+        design_drive_link, branch_id || null]);
     const items = [];
     for (let i = 0; i < needs.length; i++) {
       const { inventory_id, quantity_needed } = needs[i];
@@ -732,17 +795,19 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 // CHANGE ORDER STATUS (Orders tab)
 // PATCH /api/orders/:order_id/status   Body: { status, expected_version?, cancellation_reason? }
 //   The allowed moves are STATUS_TRANSITIONS in services/domain/orderLifecycle.js:
-//   Pending  -> Cancelled             (Pending -> Approved only via POST /:order_id/approve, Owner)
+//   Pending  -> Cancelled             (Pending -> Approved only via POST /:order_id/approve, Owner or Admin)
 //   Approved -> Printing | Cancelled
-//   Printing -> Pressing | Completed | Cancelled   (PB 14: Pressing is optional)
-//   Pressing -> Completed | Cancelled
+//   Printing -> Pressing | Ready | Completed | Cancelled   (PB 14: Pressing is optional; migration 016:
+//                                                           only for orders with a T-shirt)
+//   Pressing -> Ready | Completed | Cancelled
+//   Ready    -> Completed | Cancelled   (migration 016: production done, waiting for the hand-over)
 //   Delayed  -> Pending (reserves stock now; 409 INSUFFICIENT_INVENTORY if short) | Cancelled
 //   Completed / Cancelled are final.
 // PB 2: Cancelled is a void, so only the Owner may send it (403 VOID_OWNER_ONLY otherwise).
 // PB 23: the reason (cancellation_reason, optional for older screens) is saved on the order, and
 // every cancel writes audit_log 'order_voided' (reason, what was released) in the same transaction.
 // PB 13: Printing is only reachable through Approved, so production can never start without
-// the Owner's approval and the 50% downpayment check.
+// an Owner's or Admin's approval and the 50% downpayment check (when the order has a quote).
 // Stock effects (same transaction): Cancelled releases the reservation; Completed consumes it
 // (quantity_available and quantity_reserved both go down). Needs the cloud: stock shared by all
 // branches must not be released or consumed from a stale offline copy.
@@ -813,7 +878,7 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
       if (status === 'Approved') {
         throw new Rejected(409, {
           error: 'INVALID_STATUS_TRANSITION',
-          message: 'Orders are approved with POST /api/orders/:order_id/approve (Owner only), not by a status change.',
+          message: 'Orders are approved with POST /api/orders/:order_id/approve (Owner or Admin), not by a status change.',
           allowed: STATUS_TRANSITIONS[from] || []
         });
       }
@@ -825,15 +890,15 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
         });
       }
 
-      // migration 015: Pressing is the heat press, for garments only
+      // migration 015 / 016: Pressing is the heat press, for T-shirts only (adviser consultation)
       if (status === 'Pressing') {
-        const garments = await client.query(
+        const shirts = await client.query(
           `SELECT 1 FROM order_items oi JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id
-            WHERE oi.order_id = $1 AND ii.has_sizes LIMIT 1`, [order_id]);
-        if (garments.rowCount === 0) {
+            WHERE oi.order_id = $1 AND ii.requires_pressing LIMIT 1`, [order_id]);
+        if (shirts.rowCount === 0) {
           throw new Rejected(409, {
             error: 'PRESSING_NOT_APPLICABLE',
-            message: 'Pressing is the heat-press step for garments (shirts, jerseys...). This order has none, so it goes straight to Completed.'
+            message: 'Pressing is the heat-press step for T-shirts. This order has none, so it goes to Ready or straight to Completed.'
           });
         }
       }
@@ -847,8 +912,10 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
         const facts = await client.query(
           `SELECT COALESCE(SUM(oi.quantity) FILTER (WHERE LOWER(BTRIM(COALESCE(ii.item_category, ''))) <> 'consumable'), 0)::int AS pieces
              FROM order_items oi LEFT JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id WHERE oi.order_id = $1`, [order_id]);
-        const batches = await client.query('SELECT quantity FROM order_deliveries WHERE order_id = $1', [order_id]);
-        const fulfillment = fulfillmentSummary({ pieces_ordered: facts.rows[0].pieces, deliveries: batches.rows });
+        const batches = await client.query('SELECT quantity, plan_id FROM order_deliveries WHERE order_id = $1', [order_id]);
+        const plans = await client.query(
+          'SELECT plan_id, batch_no, planned_quantity, ready_at FROM order_delivery_plans WHERE order_id = $1 ORDER BY batch_no', [order_id]);
+        const fulfillment = fulfillmentSummary({ pieces_ordered: facts.rows[0].pieces, deliveries: batches.rows, plans: plans.rows });
         const check = completionCheck({ order, summary, fulfillment });
         const blocking = check.missing.filter((m) => !(m.code === 'BALANCE_DUE' && allow_unpaid));
         if (blocking.length > 0) {
@@ -1737,6 +1804,8 @@ router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAcc
     updates.order_description = body.order_description === null ? null
       : (v.optionalString(body.order_description, 'order_description', ORDER_DESCRIPTION_MAX) || null);
   }
+  // migration 016: the client's branch making this order (null = the main branch)
+  if (body.branch_id !== undefined) updates.branch_id = body.branch_id === null ? null : v.id(body.branch_id, 'branch_id');
   if (body.expected_version !== undefined && body.expected_version !== null && typeof body.expected_version !== 'string') {
     v.errors.push({ field: 'expected_version', message: 'expected_version must be the string returned as "version".' });
   }
@@ -1744,7 +1813,7 @@ router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAcc
     v.errors.push({ field: 'override', message: 'override must be true or false.' });
   }
   if (Object.keys(updates).length === 0 && !v.failed()) {
-    v.errors.push({ field: 'body', message: 'Nothing to change: send a new deadline, description or quote amount.' });
+    v.errors.push({ field: 'body', message: 'Nothing to change: send a new deadline, description, branch or quote amount.' });
   }
   if (v.failed()) return v.send(res);
   if (body.total_quote_amount !== undefined && !can(req.user.role, 'set_quote')) return quoteOwnerOnly(res);
@@ -1755,13 +1824,17 @@ router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAcc
     if (CLOSED_STATUSES.includes(current.production_status)) {
       return res.status(409).json({ error: 'ORDER_CLOSED', message: `This order is ${current.production_status}, so its details can no longer be changed.` });
     }
-    const quoteLocked = {
+    if (updates.branch_id) {
+      const { record: branch } = await getRecord(req, 'customer_branches', updates.branch_id);
+      if (!branch || branch.customer_id !== current.customer_id || branch.archived_at) return res.status(400).json(BRANCH_NOT_FOUND);
+    }
+    const quoteLockedBody = {
       error: 'QUOTE_LOCKED',
-      message: 'The quote cannot be changed after the job order was approved, because the downpayment was based on it.'
+      message: 'The quote cannot be changed after the job order was approved with it, because the downpayment was based on it.'
     };
     if (updates.total_quote_amount !== undefined && updates.total_quote_amount !== current.total_quote_amount
-        && QUOTE_FROZEN_STATUSES.includes(current.production_status)) {
-      return res.status(409).json(quoteLocked);
+        && quoteLocked(current.production_status, current.total_quote_amount)) {
+      return res.status(409).json(quoteLockedBody);
     }
     const expected = body.expected_version || current.version || null;
     const fields = Object.keys(updates).filter((f) => (updates[f] ?? null) !== (current[f] ?? null)
@@ -1776,8 +1849,8 @@ router.patch('/:order_id/details', requireRole(WRITE_ROLES), requireOrderEditAcc
         return { status: 409, body: { error: 'ORDER_CLOSED', message: `This order is ${locked.production_status}, so its details can no longer be changed.` } };
       }
       if (fields.includes('total_quote_amount') && updates.total_quote_amount !== locked.total_quote_amount
-          && QUOTE_FROZEN_STATUSES.includes(locked.production_status)) {
-        return { status: 409, body: quoteLocked };
+          && quoteLocked(locked.production_status, locked.total_quote_amount)) {
+        return { status: 409, body: quoteLockedBody };
       }
       return null;
     };
@@ -1962,7 +2035,7 @@ router.post('/:order_id/quote', requireRole(rolesWith('set_quote')), requireOrde
       if (CLOSED_STATUSES.includes(before.production_status)) {
         throw new Rejected(409, { error: 'ORDER_CLOSED', message: `This order is ${before.production_status}, so its quote can no longer be changed.` });
       }
-      if (QUOTE_FROZEN_STATUSES.includes(before.production_status)) {
+      if (quoteLocked(before.production_status, before.total_quote_amount)) {
         throw new Rejected(409, {
           error: 'QUOTE_LOCKED', message: 'The quote cannot be changed after the job order was approved, because the downpayment was based on it.'
         });
@@ -2038,10 +2111,13 @@ router.post('/:order_id/quote', requireRole(rolesWith('set_quote')), requireOrde
 
 // ==========================================
 // APPROVE JOB ORDER & RESERVE BLANK STOCK (Sprint 11 / PB 13)
-// POST /api/orders/:order_id/approve   Body: { expected_version }   (required)
+// POST /api/orders/:order_id/approve   Body: { expected_version (required), without_quote? }
 //
-// Auth (§4.3): verifyToken (router.use) -> requireRole(['Owner']) -> requireOrderEditAccess.
-//   Role comes from the JWT only. Admin / Production / Staff -> 403.
+// Auth (§4.3): verifyToken (router.use) -> requireRole(['Owner', 'Admin']) -> requireOrderEditAccess.
+//   Role comes from the JWT only. Production / Staff -> 403 (they create orders, they do not approve).
+// Migration 016 (adviser: the quote is optional): an order with no quote can be approved when the
+// request says so (without_quote: true). The 50% downpayment check is then skipped, and the quote
+// can still be set later (until the order is closed). Recorded in audit_log 'approved_without_quote'.
 //   Another user's edit lock -> 409 ORDER_LOCKED (an Owner may take over any lock by design).
 //
 // Online only: every precondition and the reservation run in ONE Neon transaction after the
@@ -2058,8 +2134,8 @@ router.post('/:order_id/quote', requireRole(rolesWith('set_quote')), requireOrde
 //   1 404 ORDER_NOT_FOUND (409 ORDER_NOT_SYNCED if it exists only in the offline cache)
 //   2 409 EDIT_CONFLICT { current }
 //   3 409 ALREADY_APPROVED | INVALID_STATUS_TRANSITION (only Pending / Delayed can be approved)
-//   4 422 QUOTE_REQUIRED
-//   5 402 DOWNPAYMENT_REQUIRED (integer centavos, Neon payments only)
+//   4 422 QUOTE_REQUIRED (no quote, and without_quote was not sent)
+//   5 402 DOWNPAYMENT_REQUIRED (integer centavos, Neon payments only; only when there is a quote)
 //   6 422 ITEMS_NOT_LINKED_TO_STOCK { unlinked_line_item_ids }
 //   7 409 INSUFFICIENT_INVENTORY { shortages } (only when stock still has to be reserved)
 // -> 200 { message, source:'cloud', order, reserved:[{inventory_id,item_name,quantity}],
@@ -2068,8 +2144,9 @@ router.post('/:order_id/quote', requireRole(rolesWith('set_quote')), requireOrde
 router.post('/:order_id/approve', requireRole(APPROVE_ROLES), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
   const { order_id } = req.params;
   const { expected_version } = req.body || {};
+  const withoutQuote = (req.body || {}).without_quote === true;
 
-  // §4.2: expected_version is REQUIRED, so the approval is based on the order the Owner saw
+  // §4.2: expected_version is REQUIRED, so the approval is based on the order the approver saw
   if (typeof expected_version !== 'string' || expected_version.trim() === '') {
     return res.status(400).json({
       error: 'VALIDATION_FAILED',
@@ -2120,21 +2197,25 @@ router.post('/:order_id/approve', requireRole(APPROVE_ROLES), requireOrderEditAc
         });
       }
 
-      // 4. A quote exists
+      // 4. A quote exists, or the approver confirmed that this order goes ahead without one
       const quoteCentavos = Number(row.quote_centavos);
-      if (quoteCentavos <= 0) {
-        throw new Rejected(422, { error: 'QUOTE_REQUIRED', message: 'Set the order quote before approving it.' });
+      if (quoteCentavos <= 0 && !withoutQuote) {
+        throw new Rejected(422, {
+          error: 'QUOTE_REQUIRED',
+          message: 'This order has no quote. Set the quote first, or approve it without a quote (the price can be set later).',
+          can_approve_without_quote: true
+        });
       }
 
       // 5. 50% downpayment, in integer centavos. Only rows in Neon count: payments still
-      //    pending offline are not visible here by design.
+      //    pending offline are not visible here by design. Skipped when there is no quote.
       const paid = await client.query(
         'SELECT COALESCE(ROUND(SUM(amount) * 100), 0)::bigint AS paid_centavos FROM payments WHERE order_id = $1',
         [order_id]
       );
       const paidCentavos = Number(paid.rows[0].paid_centavos);
       const requiredCentavos = Math.ceil(quoteCentavos / 2); // ₱999.99 -> ₱500.00
-      if (paidCentavos < requiredCentavos) {
+      if (quoteCentavos > 0 && paidCentavos < requiredCentavos) {
         throw new Rejected(402, {
           error: 'DOWNPAYMENT_REQUIRED',
           message: 'At least 50% of the quote must be paid before the job order can be approved.',
@@ -2213,6 +2294,12 @@ router.post('/:order_id/approve', requireRole(APPROVE_ROLES), requireOrderEditAc
       );
       // PB 14: the approval is a status change too (same transaction)
       await recordStatusChange(client, req, order_id, order.production_status, 'Approved');
+      if (quoteCentavos <= 0) {
+        await writeAudit(client, {
+          entity: 'order_profiles', entity_id: order_id, action: 'approved_without_quote', actor: req.user,
+          details: { tracking_no: order.tracking_no, from_status: order.production_status }
+        });
+      }
       const fresh = await client.query(
         `SELECT ${selectList('inventory_items', 'pg')} FROM inventory_items
           WHERE inventory_id = ANY($1::text[]) ORDER BY inventory_id`,
@@ -2233,10 +2320,12 @@ router.post('/:order_id/approve', requireRole(APPROVE_ROLES), requireOrderEditAc
 
     if (result.newlyReserved) pushStockChange(req, result.ids, 'order_approved');
     pushOrderChange(req, result.order);
-    console.log(`✅ Order ${order_id} approved by ${req.user.user_id} (Owner)` +
+    console.log(`✅ Order ${order_id} approved by ${req.user.user_id} (${req.user.role})` +
                 (result.newlyReserved ? `; reserved ${result.ids.length} stock item(s)` : '; stock was already reserved'));
     return res.status(200).json({
-      message: 'Job order approved.',
+      message: Number(result.order.total_quote_amount) > 0
+        ? 'Job order approved.'
+        : 'Job order approved without a quote. The Owner can still set its price before it is completed.',
       source: 'cloud',
       order: withDeadlineFlag(result.order),
       reserved: result.reserved,
