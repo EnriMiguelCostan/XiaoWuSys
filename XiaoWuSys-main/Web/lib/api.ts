@@ -114,6 +114,48 @@ export async function downloadFile(path: string): Promise<DownloadResult> {
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Migration 016: design files picked from this computer. The file goes as the request body
+// (no Google Drive needed); its name and an optional note go in the address. Never throws.
+// ---------------------------------------------------------------------------------------------
+export async function uploadFile<T = ApiBody>(path: string, file: File, query: Record<string, string> = {}): Promise<ApiResult<T>> {
+  const { token } = getSession();
+  const params = new URLSearchParams({ name: file.name, ...query });
+  const done = trackWork('POST', path, undefined);
+  try {
+    const res = await fetch(`${apiBase()}${path}?${params.toString()}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    if (res.status === 401) endSessionIfCurrent(token, SESSION_ENDED_NOTICE);
+    const data = (await res.json().catch(() => ({}))) as T;
+    return { ok: res.ok, status: res.status, data };
+  } catch (err) {
+    console.error(`upload ${path} failed`, err);
+    return { ok: false, status: 0, data: { error: 'NETWORK_ERROR', message: 'Cannot reach the server. Check that the backend is running.' } as unknown as T };
+  } finally {
+    done();
+  }
+}
+
+/** A file from the server as a Blob (for an image preview or a download), or null. Never throws. */
+export async function fetchBlob(path: string): Promise<{ ok: true; blob: Blob } | { ok: false; message: string }> {
+  const { token } = getSession();
+  try {
+    const res = await fetch(`${apiBase()}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (res.status === 401) endSessionIfCurrent(token, SESSION_ENDED_NOTICE);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      return { ok: false, message: errorText(data, 'The file could not be opened.') };
+    }
+    return { ok: true, blob: await res.blob() };
+  } catch (err) {
+    console.error(`fetch ${path} failed`, err);
+    return { ok: false, message: 'Cannot reach the server. Check that the backend is running.' };
+  }
+}
+
 /** Hands a file made in the browser (e.g. a CSV template) to the user. */
 export function saveBlob(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);

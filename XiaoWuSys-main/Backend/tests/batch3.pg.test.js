@@ -120,7 +120,7 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
     const eventsBefore = server.orderEvents.updated.length;
     assert.equal((await setStatus('o-shirts', 'Printing')).status, 200);
     const afterPrinting = await detail('o-shirts', production);
-    assert.deepEqual(afterPrinting.body.allowed_actions.statuses, ['Pressing', 'Completed'], 'both next steps are offered');
+    assert.deepEqual(afterPrinting.body.allowed_actions.statuses, ['Pressing', 'Ready', 'Completed'], 'every next step is offered (a shirt is pressed)');
 
     const skipBack = await setStatus('o-shirts', 'Approved');
     assert.equal(skipBack.status, 409);

@@ -19,10 +19,15 @@
 // Migration 015: an optional description / instructions for the whole order, and a few
 // client-profile fields when a new client is added. /orders/new?customer=CUST-… starts with that
 // client chosen. Print details (sizes, names, numbers) are added in the order's profile.
-import { useMemo, useRef, useState } from 'react';
+//
+// Migration 016 (adviser consultation, second round): the branch of the client making the order
+// (main branch by default), and the design: a Google Drive link and/or files picked from this
+// computer (no need to upload them to Drive first). The files are sent right after the order is
+// saved (POST /api/orders/:id/design-files, online only).
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { CalendarDays, CircleCheck, Clock, Eraser, PlusCircle, Search, Shirt, Trash2, TriangleAlert, XCircle, Plus } from 'lucide-react';
+import { CalendarDays, CircleCheck, Clock, Eraser, Paperclip, PlusCircle, Search, Shirt, Trash2, TriangleAlert, XCircle, Plus } from 'lucide-react';
 import { formatDateTime, formatMobile, MOBILE_PATTERN, peso, todayInManila } from '@xiaowu/client-core/format';
 import { NUMBER_AFTER_SYNC, orderNumber } from '@xiaowu/client-core/orders';
 import { can } from '@xiaowu/client-core/permissions';
@@ -40,6 +45,7 @@ import {
   type RequiredItem,
 } from '@/components/orders/create-order-panels';
 import { ShortageTable } from '@/components/orders/shortage-table';
+import { DESIGN_FILE_ACCEPT, DESIGN_FILE_MAX_MB, fileSize, uploadDesignFiles } from '@/components/orders/design-files-section';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -63,7 +69,7 @@ import { useInventorySnapshot } from '@/hooks/use-inventory-snapshot';
 import { useSession } from '@/hooks/use-session';
 import { errorMessage } from '@/lib/api';
 import { toNumberInput, type InventoryItem } from '@/lib/inventory';
-import type { Order, OrderItem, Shortage } from '@/lib/orders';
+import type { CustomerBranch, Order, OrderItem, Shortage } from '@/lib/orders';
 import { lookFor, STOCK_STATUS, TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
 import { MONEY_INPUT_MAX, TEXT_MAX, WHOLE_NUMBER_MAX } from '@/lib/input-limits';
@@ -80,6 +86,9 @@ interface OrderPayload {
   required_items: { inventory_id: string; quantity_needed: number }[];
   total_quote_amount?: number;
   order_description?: string;
+  /** migration 016 */
+  branch_id?: string;
+  design_drive_link?: string;
 }
 
 interface CreateResponse {
@@ -152,6 +161,13 @@ export function CreateOrderScreen() {
   const formRef = useRef<HTMLFormElement>(null);
   const [customerId, setCustomerId] = useState(() => params.get('customer') ?? '');
   const [description, setDescription] = useState('');
+  // Migration 016: the client's branch (''= main branch) and the design (link and / or files)
+  const [branchId, setBranchId] = useState('');
+  const [branches, setBranches] = useState<CustomerBranch[]>([]);
+  const [designLink, setDesignLink] = useState('');
+  const [designFiles, setDesignFiles] = useState<File[]>([]);
+  const [designNote, setDesignNote] = useState('');
+  const designInputRef = useRef<HTMLInputElement>(null);
   const [newCustomerMode, setNewCustomerMode] = useState(false);
   const [newCustomer, setNewCustomer] = useState(EMPTY_CUSTOMER);
   const [deadline, setDeadline] = useState('');
@@ -244,8 +260,31 @@ export function CreateOrderScreen() {
     setSearch('');
   };
 
+  // Migration 016: the chosen client's branches (from the client profile)
+  useEffect(() => {
+    if (!customerId || newCustomerMode) return undefined;
+    let cancelled = false;
+    api<{ branches?: CustomerBranch[] }>('GET', `/customers/${encodeURIComponent(customerId)}`).then(({ ok, data }) => {
+      if (cancelled) return;
+      const list = ok ? (data.branches ?? []).filter((b) => !b.archived_at) : [];
+      setBranches(list);
+      setBranchId((current) => (list.some((b) => b.branch_id === current) ? current : '')); // another client: main branch
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, customerId, newCustomerMode]);
+  const shownBranches = customerId && !addingCustomer ? branches : [];
+  const chosenBranch = shownBranches.find((b) => b.branch_id === branchId) ?? null;
+  const tooBigFiles = designFiles.filter((f) => f.size > DESIGN_FILE_MAX_MB * 1024 * 1024);
+
   const resetForm = () => {
     setCustomerId('');
+    setBranchId('');
+    setDesignLink('');
+    setDesignFiles([]);
+    setDesignNote('');
+    if (designInputRef.current) designInputRef.current.value = '';
     setNewCustomer(EMPTY_CUSTOMER);
     setNewCustomerMode(false);
     setDeadline('');
@@ -301,9 +340,22 @@ export function CreateOrderScreen() {
   const onCreated = async (data: CreateResponse, title: string, customerName: string, resolvedCustomerId: string) => {
     const offline = data.source === 'local' || !data.order?.tracking_no;
     const quoteNote = await saveCalculatedQuote(data.order, offline);
+    // Migration 016: the design files picked from this computer go to the new order now
+    let filesNote: string | null = null;
+    let filesFailed = false;
+    if (designFiles.length > 0 && data.order?.order_id) {
+      if (offline) {
+        filesNote = 'The design files were not attached because the order is offline. Attach them in the order’s Details tab after it syncs.';
+        filesFailed = true;
+      } else {
+        const sent = await uploadDesignFiles(data.order.order_id, designFiles, designNote);
+        filesFailed = sent.some((r) => !r.ok);
+        filesNote = sent.map((r) => r.message).join('\n');
+      }
+    }
     const deadlineText = data.order?.production_deadline ? formatDateTime(data.order.production_deadline, { withTime: false }) : null;
     setResult({
-      type: quoteNote && !quoteNote.startsWith('Quote saved') ? 'warning' : 'success',
+      type: (quoteNote && !quoteNote.startsWith('Quote saved')) || filesFailed ? 'warning' : 'success',
       title,
       message: [
         offline
@@ -312,6 +364,7 @@ export function CreateOrderScreen() {
         deadlineText ? `Deadline: ${deadlineText}.` : null,
         `${(data.items ?? []).length} material(s) reserved in the Catalog.`,
         quoteNote,
+        filesNote,
       ]
         .filter(Boolean)
         .join('\n'),
@@ -355,6 +408,10 @@ export function CreateOrderScreen() {
       setProblem('Labor and incidental charges must be numbers, like 500 or 5.');
       return;
     }
+    if (tooBigFiles.length > 0) {
+      setProblem(`These design files are over ${DESIGN_FILE_MAX_MB} MB: ${tooBigFiles.map((f) => f.name).join(', ')}. Remove them or choose smaller files.`);
+      return;
+    }
     if (addingCustomer && mobile && !MOBILE_PATTERN.test(mobile)) {
       setProblem('A mobile number must be exactly 11 digits and start with 0, like 09171234567. You can also leave it blank.');
       return;
@@ -396,6 +453,8 @@ export function CreateOrderScreen() {
         required_items,
         ...(quoteValue !== undefined ? { total_quote_amount: quoteValue } : {}),
         ...(description.trim() ? { order_description: description.trim() } : {}),
+        ...(branchId && !addingCustomer ? { branch_id: branchId } : {}),
+        ...(designLink.trim() ? { design_drive_link: designLink.trim() } : {}),
       };
       const { ok, status, data } = await api<CreateResponse>('POST', '/orders', payload);
       if (ok) {
@@ -599,6 +658,32 @@ export function CreateOrderScreen() {
                     ))}
                   </BoundedSelectContent>
                 </Select>
+              )}
+              {/* Migration 016: which branch of the client makes this order */}
+              {shownBranches.length > 0 && (
+                <Field
+                  id="order-branch"
+                  label="Branch"
+                  error={errorFor('branch_id')}
+                  hint={chosenBranch ? chosenBranch.address || 'No address saved for this branch' : 'The main branch: the client’s own address'}
+                  className="mt-4"
+                >
+                  <Select value={branchId || 'main'} onValueChange={(v) => setBranchId(v === 'main' ? '' : v)}>
+                    <BoundedSelectTrigger id="order-branch">
+                      <SelectValue />
+                    </BoundedSelectTrigger>
+                    <BoundedSelectContent>
+                      <BoundedSelectItem value="main" label="Main branch">
+                        Main branch
+                      </BoundedSelectItem>
+                      {shownBranches.map((b) => (
+                        <BoundedSelectItem key={b.branch_id} value={b.branch_id} label={b.branch_name}>
+                          {b.branch_name}
+                        </BoundedSelectItem>
+                      ))}
+                    </BoundedSelectContent>
+                  </Select>
+                </Field>
               )}
             </CardContent>
           </Card>
@@ -884,6 +969,58 @@ export function CreateOrderScreen() {
                   placeholder="e.g. Front: school logo, full colour. Back: surname and number in white. Deliver in 2 batches."
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
+                />
+              </Field>
+            </CardContent>
+          </Card>
+
+          {/* Migration 016 (adviser consultation): the design, as a Drive link and / or files from this computer */}
+          <Card>
+            <CardHeader>
+              <CardTitle>{canSetQuote ? '6.' : '5.'} Design</CardTitle>
+              <CardDescription>
+                Optional. Attach the design files straight from this computer (no need to put them on Google Drive first), or paste a Google
+                Drive link. Files are sent when the order is saved online.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <Field id="order-design-files" label="Design files from this computer" error={errorFor('file')}
+                hint={`Pictures, PDF, AI, PSD, CDR, EPS, ZIP… up to ${DESIGN_FILE_MAX_MB} MB each.`}>
+                <Input
+                  ref={designInputRef}
+                  id="order-design-files"
+                  type="file"
+                  multiple
+                  accept={DESIGN_FILE_ACCEPT}
+                  onChange={(e) => setDesignFiles(Array.from(e.target.files ?? []))}
+                />
+              </Field>
+              {designFiles.length > 0 && (
+                <ul className="space-y-1 text-sm">
+                  {designFiles.map((f) => (
+                    <li key={`${f.name}-${f.size}`} className="flex items-center gap-2">
+                      <Paperclip className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                      <span className="min-w-0 truncate">{f.name}</span>
+                      <span className={cn('text-xs tabular-nums', f.size > DESIGN_FILE_MAX_MB * 1024 * 1024 ? 'text-danger' : 'text-muted-foreground')}>
+                        {fileSize(f.size)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {designFiles.length > 0 && (
+                <Field id="order-design-note" label="Note for these files">
+                  <Input id="order-design-note" maxLength={500} placeholder="e.g. final front and back design" value={designNote} onChange={(e) => setDesignNote(e.target.value)} />
+                </Field>
+              )}
+              <Field id="order-design-link" label="Google Drive link (optional)" error={errorFor('design_drive_link')}>
+                <Input
+                  id="order-design-link"
+                  type="url"
+                  maxLength={TEXT_MAX.designLink}
+                  placeholder="https://drive.google.com/…"
+                  value={designLink}
+                  onChange={(e) => setDesignLink(e.target.value)}
                 />
               </Field>
             </CardContent>

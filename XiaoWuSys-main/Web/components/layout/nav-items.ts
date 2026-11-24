@@ -70,7 +70,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       { href: '/finance/transactions', label: 'Monthly transactions', icon: FileSpreadsheet, capability: 'view_finance' },
       { href: '/finance/expenses', label: 'Expenses', icon: Receipt, capability: 'view_finance', hint: 'Rent, electricity, wages…' },
       { href: '/finance/profit-and-loss', label: 'Profit & loss', icon: Scale, capability: 'set_quote' },
-      { href: '/finance/waste', label: 'Waste', icon: Recycle, capability: 'view_orders', hint: 'This week, this month' },
+      { href: '/finance/waste', label: 'Monthly waste', icon: Recycle, capability: 'view_orders', hint: 'Month by month, this week' },
     ],
   },
   {

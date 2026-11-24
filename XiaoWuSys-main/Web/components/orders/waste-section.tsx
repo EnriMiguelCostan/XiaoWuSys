@@ -7,10 +7,12 @@
 // error, product defect, or a statistical anomaly), and warns when no free stock is left to
 // replace the ruined pieces. This screen picks the material, the reason and the number, and
 // shows what the server answered. The button comes from allowed_actions.log_loss.
+// Migration 016 (adviser consultation): the order's wastage has its own tab, with the totals per
+// material, and a loss can be tagged to the print line it ruined (e.g. jersey #10, size L).
 import { useMemo, useState } from 'react';
-import { ChartNoAxesColumnIncreasing, TriangleAlert } from 'lucide-react';
-import { formatDateTime } from '@xiaowu/client-core/format';
-import type { OrderActions } from '@xiaowu/client-core/permissions';
+import { ChartNoAxesColumnIncreasing, Tag, TriangleAlert } from 'lucide-react';
+import { formatDateTime, peso } from '@xiaowu/client-core/format';
+import { can, type OrderActions } from '@xiaowu/client-core/permissions';
 import { bannerText, Field, fieldErrorsMap, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@/components/forms/bounded-select';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
@@ -20,8 +22,9 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { Select, SelectValue } from '@/components/ui/select';
 import { useApi } from '@/hooks/use-api';
+import { useSession } from '@/hooks/use-session';
 import { LOSS_NOTE_MAX, WHOLE_NUMBER_MAX } from '@/lib/input-limits';
-import { LOSS_REASONS, type LossResponse, type MaterialLoss, type OrderDetail } from '@/lib/orders';
+import { LOSS_REASONS, type LossResponse, type MaterialLoss, type OrderDetail, type PrintDetail } from '@/lib/orders';
 import { LOSS_CATEGORY, lookFor, TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
 
@@ -55,13 +58,30 @@ export function MaterialLossesSection({
 }) {
   const losses = detail.material_losses ?? [];
   const [open, setOpen] = useState(false);
-  if (losses.length === 0 && !actions.log_loss) return null;
+  const { user } = useSession();
+  const showCost = can(user, 'view_finance');
+  const prints = useMemo(() => new Map((detail.print_details ?? []).map((p) => [p.print_detail_id, p])), [detail.print_details]);
+  // Per material: pieces wasted and their cost (the server's figures, added up for this order)
+  const perItem = useMemo(() => {
+    const m = new Map<string, { name: string; unit: string | null; quantity: number; cost: number; count: number }>();
+    for (const l of losses) {
+      const key = l.inventory_id ?? l.item_name;
+      const g = m.get(key) ?? { name: l.item_name, unit: l.unit, quantity: 0, cost: 0, count: 0 };
+      g.quantity += l.quantity_lost;
+      g.cost += Number(l.financial_cost ?? 0);
+      g.count += 1;
+      m.set(key, g);
+    }
+    return [...m.values()].sort((a, b) => b.quantity - a.quantity);
+  }, [losses]);
+  const totalPieces = perItem.reduce((s, g) => s + g.quantity, 0);
+  const totalCost = perItem.reduce((s, g) => s + g.cost, 0);
 
   return (
-    <section className="space-y-2" aria-labelledby="losses-title">
+    <section className="space-y-3" aria-labelledby="losses-title">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 id="losses-title" className="font-semibold">
-          Misprints and material losses
+          Waste on this order (misprints and material losses)
         </h3>
         {actions.log_loss && (
           <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
@@ -70,13 +90,49 @@ export function MaterialLossesSection({
         )}
       </div>
       {losses.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No misprints or losses recorded for this order.</p>
+        <p className="text-sm text-muted-foreground">
+          No misprints or losses recorded for this order.
+          {actions.log_loss ? ' Record each ruined item and how many, tagged to its print line if it had one.' : ''}
+        </p>
       ) : (
-        <ul className="space-y-2 text-sm">
-          {losses.map((l) => (
-            <LossRow key={l.loss_id} loss={l} />
-          ))}
-        </ul>
+        <>
+          <div className="max-w-full min-w-0 overflow-x-auto rounded-md border">
+            <table className="w-full text-sm">
+              <caption className="sr-only">Waste per material on this order</caption>
+              <thead className="bg-muted/50 text-left text-xs text-muted-foreground uppercase">
+                <tr>
+                  <th className="px-3 py-2 font-semibold">Material</th>
+                  <th className="px-3 py-2 text-right font-semibold">Pieces wasted</th>
+                  <th className="px-3 py-2 text-right font-semibold">Records</th>
+                  {showCost && <th className="px-3 py-2 text-right font-semibold">Cost</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {perItem.map((g) => (
+                  <tr key={g.name} className="border-t">
+                    <td className="px-3 py-2 wrap-anywhere">{g.name}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {g.quantity.toLocaleString()} {g.unit ?? ''}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">{g.count}</td>
+                    {showCost && <td className="px-3 py-2 text-right tabular-nums">{peso(g.cost)}</td>}
+                  </tr>
+                ))}
+                <tr className="border-t bg-muted/30 font-semibold">
+                  <td className="px-3 py-2">Total</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{totalPieces.toLocaleString()}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{losses.length}</td>
+                  {showCost && <td className="px-3 py-2 text-right tabular-nums">{peso(totalCost)}</td>}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <ul className="space-y-2 text-sm">
+            {losses.map((l) => (
+              <LossRow key={l.loss_id} loss={l} print={l.print_detail_id ? prints.get(l.print_detail_id) : undefined} />
+            ))}
+          </ul>
+        </>
       )}
       {open && (
         <LogLossDialog
@@ -92,7 +148,11 @@ export function MaterialLossesSection({
   );
 }
 
-function LossRow({ loss }: { loss: MaterialLoss }) {
+/** "Jersey print · M · DELA CRUZ · #7" */
+export const printLineLabel = (p: Pick<PrintDetail, 'print_type' | 'size' | 'custom_name' | 'custom_number' | 'quantity'>) =>
+  [p.print_type, p.size, p.custom_name, p.custom_number && `#${p.custom_number}`].filter(Boolean).join(' · ') + ` (${p.quantity} pc${p.quantity === 1 ? '' : 's'})`;
+
+function LossRow({ loss, print }: { loss: MaterialLoss; print?: PrintDetail }) {
   return (
     <li className="flex min-w-0 flex-col gap-1 rounded-md border p-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -101,6 +161,11 @@ function LossRow({ loss }: { loss: MaterialLoss }) {
         </span>
         <LossCauseBadge label={loss.category_label} />
         {loss.is_statistical_anomaly && <AnomalyBadge />}
+        {print && (
+          <Badge variant="outline" className="gap-1" title="The print line this loss ruined">
+            <Tag className="size-3" aria-hidden /> {printLineLabel(print)}
+          </Badge>
+        )}
         {loss.sync_status !== 'synced' && (
           <Badge title="Saved on this computer; it goes to the cloud when the connection is back" variant="outline" className={TONE_CLASSES.info.badge}>
             Pending sync
@@ -133,6 +198,12 @@ function LogLossDialog({
     return [...seen].map(([inventory_id, name]) => ({ inventory_id, name }));
   }, [detail.items]);
   const [itemId, setItemId] = useState(materials.length === 1 ? materials[0].inventory_id : '');
+  const [printId, setPrintId] = useState('none');
+  // Print lines on the chosen material (or not tied to a material), to tag the loss to one
+  const printLines = useMemo(() => {
+    const lineIds = new Set(detail.items.filter((it) => it.inventory_id === itemId).map((it) => it.line_item_id));
+    return (detail.print_details ?? []).filter((p) => !p.line_item_id || lineIds.has(p.line_item_id));
+  }, [detail.items, detail.print_details, itemId]);
   const [reasonCode, setReasonCode] = useState('');
   const [quantity, setQuantity] = useState('');
   const [note, setNote] = useState('');
@@ -162,11 +233,12 @@ function LogLossDialog({
       reason_code: reasonCode,
       loss_reason: cleanNote || undefined,
       order_id: detail.order.order_id,
+      ...(printId !== 'none' && printLines.some((p) => p.print_detail_id === printId) ? { print_detail_id: printId } : {}),
     });
     setBusy(false);
     if (!ok) {
       setFieldErrors(fieldErrorsMap(data));
-      setProblem(bannerText(data, ['inventory_id', 'quantity_lost', 'reason_code', 'loss_reason'], 'The loss was not recorded.'));
+      setProblem(bannerText(data, ['inventory_id', 'quantity_lost', 'reason_code', 'loss_reason', 'print_detail_id'], 'The loss was not recorded.'));
       return;
     }
     const warning = data.replacement_warning?.message;
@@ -201,7 +273,14 @@ function LogLossDialog({
             <p className="text-sm text-muted-foreground">This order has no materials linked to stock. Record the loss from the Catalog instead.</p>
           ) : (
             <Field id="loss-item" label="Material *" error={fieldErrors.inventory_id}>
-              <Select value={itemId} onValueChange={setItemId} disabled={busy}>
+              <Select
+                value={itemId}
+                onValueChange={(v) => {
+                  setItemId(v);
+                  setPrintId('none');
+                }}
+                disabled={busy}
+              >
                 <BoundedSelectTrigger id="loss-item">
                   <SelectValue placeholder="Choose the material…" />
                 </BoundedSelectTrigger>
@@ -209,6 +288,25 @@ function LogLossDialog({
                   {materials.map((m) => (
                     <BoundedSelectItem key={m.inventory_id} value={m.inventory_id} label={m.name}>
                       {m.name}
+                    </BoundedSelectItem>
+                  ))}
+                </BoundedSelectContent>
+              </Select>
+            </Field>
+          )}
+          {printLines.length > 0 && (
+            <Field id="loss-print" label="Which print line? (optional)" error={fieldErrors.print_detail_id} hint="Tag the ruined piece, e.g. the jersey with number 10, size L">
+              <Select value={printId} onValueChange={setPrintId} disabled={busy}>
+                <BoundedSelectTrigger id="loss-print">
+                  <SelectValue />
+                </BoundedSelectTrigger>
+                <BoundedSelectContent>
+                  <BoundedSelectItem value="none" label="Not tied to one print line">
+                    Not tied to one print line
+                  </BoundedSelectItem>
+                  {printLines.map((p) => (
+                    <BoundedSelectItem key={p.print_detail_id} value={p.print_detail_id} label={printLineLabel(p)}>
+                      {printLineLabel(p)}
                     </BoundedSelectItem>
                   ))}
                 </BoundedSelectContent>

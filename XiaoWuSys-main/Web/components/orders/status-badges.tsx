@@ -3,7 +3,7 @@
 // DeadlineBadge (PB 16) shows the server's deadline_flag; 'normal', closed orders (null) and
 // values this version does not know show nothing.
 import { Badge } from '@/components/ui/badge';
-import { DEADLINE_FLAG, lookFor, ORDER_STATUS, PAYMENT_STATUS, TONE_CLASSES } from '@/lib/ui-tokens';
+import { DEADLINE_FLAG, DELIVERY_STATUS, lookFor, ORDER_STATUS, PAYMENT_STATUS, TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
 
 function StateBadge({ value, look, count }: { value: string; look: ReturnType<typeof lookFor>; count?: number }) {
@@ -37,4 +37,10 @@ export function DeadlineBadge({ flag, className }: { flag: string | null | undef
 export function PaymentStatusBadge({ status }: { status: string | null | undefined }) {
   if (!status) return null;
   return <StateBadge value={status} look={lookFor(PAYMENT_STATUS, status)} />;
+}
+
+/** Migration 016: the server's delivery_status (Orders list) or a planned batch's state */
+export function DeliveryStatusBadge({ status }: { status: string | null | undefined }) {
+  if (!status) return null;
+  return <StateBadge value={status} look={lookFor(DELIVERY_STATUS, status)} />;
 }

@@ -7,33 +7,38 @@
 //   deliveries      batches handed over (order_deliveries)
 //   fulfillment     pieces ordered / handed over (orderLifecycle.fulfillmentSummary)
 //   completion      what is still missing before "Completed" (orderLifecycle.completionCheck)
-//   has_garments    whether the Pressing step applies
+//   has_garments    whether the order has a garment (print details with sizes)
+//   needs_pressing  migration 016: whether the Pressing step applies (the order has a T-shirt)
+//   delivery_plans  migration 016: batches planned ahead (also inside fulfillment.plans)
 //   max_refund      what may be refunded now (payments.maxRefund)
 // ==========================================
 const { isConnectionError } = require('../utils/dbErrors');
 const { listRecords, userNames, sqliteAll } = require('./records');
 const { fulfillmentSummary, completionCheck } = require('./domain/orderLifecycle');
 const { maxRefund, needsVerification } = require('./domain/payments');
+const { localDateTime } = require('../utils/validation');
 
 const CONSUMABLE_CATEGORY = 'consumable';
 
-// inventory_id -> { item_name, item_category, has_sizes, unit } (cloud first)
+// inventory_id -> { item_name, item_category, has_sizes, requires_pressing, unit } (cloud first)
+const truthy = (v) => v === true || v === 1 || v === '1' || v === 't' || v === 'true';
 const catalogFacts = async (req, ids) => {
   const wanted = [...new Set(ids.filter(Boolean))];
   if (wanted.length === 0) return new Map();
   const shape = (r) => [r.inventory_id, {
     item_name: r.item_name, item_category: r.item_category, unit: r.unit,
-    has_sizes: r.has_sizes === true || r.has_sizes === 1 || r.has_sizes === '1' || r.has_sizes === 't'
+    has_sizes: truthy(r.has_sizes),
+    requires_pressing: truthy(r.requires_pressing)
   }];
   try {
     const { rows } = await req.pgPool.query(
-      'SELECT inventory_id, item_name, item_category, unit, has_sizes FROM inventory_items WHERE inventory_id = ANY($1::text[])', [wanted]);
+      'SELECT inventory_id, item_name, item_category, unit, has_sizes, requires_pressing FROM inventory_items WHERE inventory_id = ANY($1::text[])', [wanted]);
     const found = new Map(rows.map(shape));
     // Items created offline and not synced yet
     const missing = wanted.filter((id) => !found.has(id));
     if (missing.length) {
       const local = await sqliteAll(req.localDb,
-        `SELECT inventory_id, item_name, item_category, unit, has_sizes FROM inventory_items WHERE inventory_id IN (${missing.map(() => '?').join(', ')})`,
+        `SELECT inventory_id, item_name, item_category, unit, has_sizes, requires_pressing FROM inventory_items WHERE inventory_id IN (${missing.map(() => '?').join(', ')})`,
         missing).catch(() => []);
       for (const r of local) found.set(...shape(r));
     }
@@ -41,7 +46,7 @@ const catalogFacts = async (req, ids) => {
   } catch (err) {
     if (!isConnectionError(err)) throw err;
     const rows = await sqliteAll(req.localDb,
-      `SELECT inventory_id, item_name, item_category, unit, has_sizes FROM inventory_items WHERE inventory_id IN (${wanted.map(() => '?').join(', ')})`,
+      `SELECT inventory_id, item_name, item_category, unit, has_sizes, requires_pressing FROM inventory_items WHERE inventory_id IN (${wanted.map(() => '?').join(', ')})`,
       wanted);
     return new Map(rows.map(shape));
   }
@@ -57,40 +62,51 @@ const describeMaterials = (items, facts) => items.map((i) => {
     item_category: f ? f.item_category : null,
     unit: f ? f.unit : null,
     has_sizes: Boolean(f && f.has_sizes),
+    requires_pressing: Boolean(f && f.requires_pressing),
     is_consumable: isConsumable(f)
   };
 });
 
 const piecesOf = (materials) => materials.filter((m) => !m.is_consumable).reduce((s, m) => s + Number(m.quantity || 0), 0);
 
-// -> { source, materials, print_details, deliveries, fulfillment, completion, has_garments, max_refund, unverified }
+// -> { source, materials, print_details, deliveries, delivery_plans, fulfillment, completion, has_garments, needs_pressing,
+//      max_refund, unverified }
 //   order, items (order_items records), view (loadPaymentView result) are already loaded by the caller
 const loadOrderContext = async (req, order, items, view) => {
-  const [facts, prints, deliveries] = await Promise.all([
+  const [facts, prints, deliveries, plans] = await Promise.all([
     catalogFacts(req, items.map((i) => i.inventory_id)),
     listRecords(req, 'order_print_details', {
       filters: [['order_id', order.order_id]], orderBy: 'order_print_details.created_at, order_print_details.print_detail_id'
     }),
-    listRecords(req, 'order_deliveries', { filters: [['order_id', order.order_id]], orderBy: 'batch_no, delivery_id' })
+    listRecords(req, 'order_deliveries', { filters: [['order_id', order.order_id]], orderBy: 'batch_no, delivery_id' }),
+    listRecords(req, 'order_delivery_plans', { filters: [['order_id', order.order_id]], orderBy: 'batch_no, plan_id' })
   ]);
   const materials = describeMaterials(items, facts);
-  const names = await userNames(req, deliveries.records.map((d) => d.recorded_by));
-  const fulfillment = fulfillmentSummary({ pieces_ordered: piecesOf(materials), deliveries: deliveries.records });
+  const names = await userNames(req, [...deliveries.records.map((d) => d.recorded_by), ...plans.records.map((p) => p.ready_by)]);
+  const fulfillment = fulfillmentSummary({
+    pieces_ordered: piecesOf(materials), deliveries: deliveries.records, plans: plans.records, today: localDateTime(new Date()).slice(0, 10)
+  });
+  fulfillment.plans = fulfillment.plans.map((p) => ({ ...p, ready_by_name: (p.ready_by && names.get(p.ready_by)) || null }));
   const unverified = (view ? view.payments : []).filter((p) => needsVerification(p) && !p.voided).length;
   const completion = completionCheck({ order, summary: view ? view.summary : null, fulfillment, unverified });
   const byLine = new Map(materials.map((m) => [m.line_item_id, m]));
   return {
-    source: [prints.source, deliveries.source].includes('local') ? 'local' : 'cloud',
+    source: [prints.source, deliveries.source, plans.source].includes('local') ? 'local' : 'cloud',
     materials,
     print_details: prints.records.map((p) => ({
       ...p,
       material_name: p.line_item_id && byLine.get(p.line_item_id) ? byLine.get(p.line_item_id).product_type : null,
       on_garment: Boolean(p.line_item_id && byLine.get(p.line_item_id) && byLine.get(p.line_item_id).has_sizes)
     })),
-    deliveries: deliveries.records.map((d) => ({ ...d, recorded_by_name: (d.recorded_by && names.get(d.recorded_by)) || 'Not recorded' })),
+    deliveries: deliveries.records.map((d) => {
+      const plan = d.plan_id ? fulfillment.plans.find((p) => p.plan_id === d.plan_id) : null;
+      return { ...d, recorded_by_name: (d.recorded_by && names.get(d.recorded_by)) || 'Not recorded', plan_batch_no: plan ? plan.batch_no : null };
+    }),
+    delivery_plans: fulfillment.plans,
     fulfillment,
     completion,
     has_garments: materials.some((m) => m.has_sizes),
+    needs_pressing: materials.some((m) => m.requires_pressing),
     unverified,
     max_refund: view ? maxRefund({ status: order.production_status, quote: view.summary.quote, paidNet: view.summary.total_paid }) : 0
   };

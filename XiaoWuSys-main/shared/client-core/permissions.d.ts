@@ -68,6 +68,13 @@ export interface OrderActions {
   edit_payment: boolean;
   /** the Owner may cut the price after approval (late delivery, production error) */
   adjust_price: boolean;
+  // migration 016
+  /** Owner / Admin: approve an order that has no quote (the 50% downpayment check is skipped) */
+  approve_without_quote: boolean;
+  /** plan delivery batches ahead (pieces per batch, date) and mark a batch ready */
+  plan_deliveries: boolean;
+  /** attach / remove design files uploaded from the computer */
+  manage_design_files: boolean;
   [key: string]: unknown;
 }
 

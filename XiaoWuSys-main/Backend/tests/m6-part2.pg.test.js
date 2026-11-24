@@ -181,6 +181,8 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
   });
 
   it('takes the Pressing consumables once when pressing starts, and the Completed ones at the end', async () => {
+    // Migration 016: only T-shirts are heat-pressed; these blanks are switched on in the Catalog
+    await pool.query("UPDATE inventory_items SET requires_pressing = TRUE WHERE inventory_id IN ('i-shirt-s', 'i-shirt-l')");
     await insertOrder('o-press', 'Printing', [['i-shirt-s', 10], ['i-shirt-l', 5], [null, 3, 'Name print']]);
     const pushesBefore = server.pushes.length;
     const pressing = await setStatus('o-press', 'Pressing');

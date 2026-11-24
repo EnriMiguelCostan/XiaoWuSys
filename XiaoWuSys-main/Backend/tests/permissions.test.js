@@ -8,10 +8,14 @@ const { allowedActions } = require('../services/domain/orderLifecycle');
 const { buildStockCheck, stockNeeds } = require('../services/domain/stockCheck');
 
 describe('Who may do what (rules only)', () => {
-  it('keeps prices, discounts, voids and approvals for the Owner alone', () => {
-    for (const cap of ['set_quote', 'apply_discount', 'void_order', 'approve_order']) {
+  it('keeps prices, discounts and voids for the Owner alone; the Owner or an Admin approves', () => {
+    for (const cap of ['set_quote', 'apply_discount', 'void_order']) {
       assert.deepEqual(rolesWith(cap), ['Owner'], cap);
     }
+    // Adviser consultation (second round): Staff and Production create orders, the Owner or an Admin approves them
+    assert.deepEqual(rolesWith('approve_order'), ['Owner', 'Admin']);
+    assert.ok(can('Staff', 'create_order') && !can('Staff', 'approve_order'));
+    assert.ok(can('Production', 'create_order') && !can('Production', 'approve_order'));
     assert.ok(can('Admin', 'view_finance'));
     assert.ok(!can('Admin', 'set_quote'));
     assert.deepEqual(capabilitiesFor('Production'), capabilitiesFor('Staff'), 'Production works like Staff (November 2026)');
@@ -26,21 +30,29 @@ describe('Who may do what (rules only)', () => {
       print_quote: true, void_payment: true, log_loss: true, archive_order: false, restore_order: false,
       // migration 015
       edit_description: true, add_print_details: true, record_delivery: false, max_delivery: 0, complete_blocked_reason: null,
-      complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: true, edit_payment: true, adjust_price: false
+      complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: true, edit_payment: true, adjust_price: false,
+      // migration 016
+      approve_without_quote: false, plan_deliveries: true, manage_design_files: true
     });
     assert.deepEqual(allowedActions(pending, 'Admin'), {
-      approve: false, statuses: [], edit_deadline: true, edit_quote: false, generate_quote: false, apply_discount: false,
+      approve: true, statuses: [], edit_deadline: true, edit_quote: false, generate_quote: false, apply_discount: false,
       link_design: true, add_items: true, record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true,
       print_quote: true, void_payment: false, log_loss: true, archive_order: false, restore_order: false,
       // migration 015
       edit_description: true, add_print_details: true, record_delivery: false, max_delivery: 0, complete_blocked_reason: null,
-      complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: true, edit_payment: true, adjust_price: false
+      complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: true, edit_payment: true, adjust_price: false,
+      // migration 016
+      approve_without_quote: false, plan_deliveries: true, manage_design_files: true
     });
     assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Owner').print_quote, false, 'no quotation to print yet');
-    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Staff').statuses, ['Pressing', 'Completed'], 'no Cancel for Production');
+    assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Admin').approve_without_quote, true, 'the quote is optional');
+    assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Staff').approve_without_quote, false);
+    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Staff').statuses, ['Pressing', 'Ready', 'Completed'], 'no Cancel for Production');
     assert.deepEqual(allowedActions({ production_status: 'Delayed' }, 'Staff').statuses, ['Pending']);
-    const approved = allowedActions({ production_status: 'Approved' }, 'Owner');
+    const approved = allowedActions({ production_status: 'Approved', total_quote_amount: 900 }, 'Owner');
     assert.deepEqual([approved.edit_quote, approved.generate_quote, approved.apply_discount], [false, false, false], 'the quote is frozen after approval');
+    const unpriced = allowedActions({ production_status: 'Printing', total_quote_amount: 0 }, 'Owner');
+    assert.deepEqual([unpriced.edit_quote, unpriced.generate_quote], [true, true], 'approved without a quote: the price can still be set');
     const closed = allowedActions({ production_status: 'Cancelled' }, 'Owner');
     assert.deepEqual([closed.statuses, closed.edit_deadline, closed.record_payment, closed.log_loss, closed.void_payment],
       [[], false, false, false, true], 'a cancelled order can still have its payments voided (refunds)');
@@ -106,7 +118,8 @@ describe('Owner-only rules and order screens (API)', () => {
     const owner = await t.request('POST', '/api/auth/login', { body: { username: 'owner', password: fixtures.PASSWORD } });
     for (const cap of ['set_quote', 'void_order', 'approve_order', 'apply_discount']) assert.ok(owner.body.capabilities.includes(cap), cap);
     const admin = await t.request('POST', '/api/auth/login', { body: { username: 'admin', password: fixtures.PASSWORD } });
-    for (const cap of ['set_quote', 'void_order', 'approve_order', 'apply_discount']) assert.ok(!admin.body.capabilities.includes(cap), cap);
+    for (const cap of ['set_quote', 'void_order', 'apply_discount']) assert.ok(!admin.body.capabilities.includes(cap), cap);
+    assert.ok(admin.body.capabilities.includes('approve_order'), 'the Admin approves job orders too');
     assert.ok(admin.body.capabilities.includes('view_finance'));
   });
 
@@ -119,14 +132,14 @@ describe('Owner-only rules and order screens (API)', () => {
     assert.equal((await t.request('GET', '/api/auth/me')).status, 401);
   });
 
-  it('shows the Owner the price and cancel buttons, and hides them from the Admin', async () => {
+  it('shows the Owner the price and cancel buttons, and hides them from the Admin (who may approve)', async () => {
     const owner = await t.request('GET', `/api/orders/${pendingId}`, { token: t.tokens.owner });
     assert.equal(owner.status, 200, owner.text);
     assert.deepEqual([owner.body.allowed_actions.approve, owner.body.allowed_actions.edit_quote, owner.body.allowed_actions.statuses],
       [true, true, ['Cancelled']]);
     const admin = await t.request('GET', `/api/orders/${pendingId}`, { token: t.tokens.admin });
     assert.deepEqual([admin.body.allowed_actions.approve, admin.body.allowed_actions.edit_quote, admin.body.allowed_actions.statuses],
-      [false, false, []]);
+      [true, false, []]);
     assert.equal(admin.body.allowed_actions.edit_deadline, true);
     const list = await t.request('GET', '/api/orders', { token: t.tokens.admin });
     assert.ok(Array.isArray(list.body.capabilities) && !list.body.capabilities.includes('set_quote'));

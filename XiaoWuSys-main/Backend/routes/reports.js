@@ -176,7 +176,7 @@ router.get('/dashboard', requireRole(READ_ROLES), async (req, res) => {
       }))
       .sort((a, b) => a.free - b.free || a.item_name.localeCompare(b.item_name));
 
-    const counts = Object.fromEntries(['Pending', 'Approved', 'Printing', 'Pressing', 'Delayed', 'Completed', 'Cancelled']
+    const counts = Object.fromEntries(['Pending', 'Approved', 'Printing', 'Pressing', 'Ready', 'Delayed', 'Completed', 'Cancelled']
       .map((st) => [st, data.orders.filter((o) => o.production_status === st).length]));
 
     // PB 20: this month's waste by cause; costs only for accounts that may see finances

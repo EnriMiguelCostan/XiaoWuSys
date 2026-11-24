@@ -277,10 +277,11 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.equal(approve.status, 200, approve.text);
     assert.equal((await call('PATCH', `/api/orders/${ids.order}/status`, staff, { status: 'Printing' })).status, 200);
     const printing = await call('GET', `/api/orders/${ids.order}`, staff);
-    assert.deepEqual(printing.body.allowed_actions.statuses, ['Pressing', 'Completed'], 'shirts are pressed');
+    assert.deepEqual(printing.body.allowed_actions.statuses, ['Pressing', 'Ready', 'Completed'], 'T-shirts are pressed (migration 016)');
+    assert.equal(printing.body.needs_pressing, true);
   });
 
-  it('offers Pressing only for garments', async () => {
+  it('offers Pressing only for T-shirts', async () => {
     assert.equal((await call('PATCH', '/api/inventory/i-mug', staff, { selling_price: 120 })).status, 200);
     const mug = await call('POST', '/api/orders', staff, { customer_id: 'c-2', production_deadline: shopDate(5), required_items: [{ inventory_id: 'i-mug', quantity_needed: 5 }] });
     assert.equal(mug.status, 201, mug.text);
@@ -291,7 +292,7 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.equal((await call('POST', `/api/orders/${ids.mugOrder}/approve`, owner, { expected_version: d.body.order.version })).status, 200);
     assert.equal((await call('PATCH', `/api/orders/${ids.mugOrder}/status`, staff, { status: 'Printing' })).status, 200);
     const shown = await call('GET', `/api/orders/${ids.mugOrder}`, staff);
-    assert.deepEqual([shown.body.has_garments, shown.body.allowed_actions.statuses], [false, ['Completed']]);
+    assert.deepEqual([shown.body.has_garments, shown.body.needs_pressing, shown.body.allowed_actions.statuses], [false, false, ['Ready', 'Completed']]);
     const pressed = await call('PATCH', `/api/orders/${ids.mugOrder}/status`, staff, { status: 'Pressing' });
     assert.deepEqual([pressed.status, pressed.body.error], [409, 'PRESSING_NOT_APPLICABLE']);
   });

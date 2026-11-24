@@ -399,7 +399,7 @@ export function DashboardScreen() {
               </>
             )}
             {canSeePnl && <Button variant="outline" asChild><Link href="/finance/profit-and-loss">Profit &amp; loss</Link></Button>}
-            <Button variant="outline" asChild><Link href="/finance/waste">Waste this week / month</Link></Button>
+            <Button variant="outline" asChild><Link href="/finance/waste">Monthly waste</Link></Button>
           </CardContent>
         </Card>
       )}

@@ -34,7 +34,25 @@ const ENTITIES = {
       archived_at: 'timestamp', archived_by: 'text',
       // migration 015: instructions for the job, and the quote's labor / incidental parts
       order_description: 'text', labor_amount: 'money', incidental_amount: 'money',
-      adjustment_amount: 'money', adjustment_reason: 'text' // a price cut after approval, with its reason
+      adjustment_amount: 'money', adjustment_reason: 'text', // a price cut after approval, with its reason
+      branch_id: 'text' // migration 016: the client's branch this order is for (null = the main branch)
+    }
+  },
+  // migration 016: a client's other branches (the client's own address is the main branch)
+  customer_branches: {
+    id: 'branch_id',
+    fields: {
+      branch_id: 'text', customer_id: 'text', branch_name: 'text', address: 'text', contact_person: 'text',
+      contact_number: 'text', email: 'text', notes: 'text', archived_at: 'timestamp', archived_by: 'text',
+      created_by: 'text', created_at: 'timestamp'
+    }
+  },
+  // migration 016: delivery batches planned ahead (pieces per batch, date, ready or not)
+  order_delivery_plans: {
+    id: 'plan_id',
+    fields: {
+      plan_id: 'text', order_id: 'text', batch_no: 'int', planned_quantity: 'int', planned_date: 'date',
+      ready_at: 'timestamp', ready_by: 'text', notes: 'text', created_by: 'text', created_at: 'timestamp'
     }
   },
   // migration 015: sizes / names / numbers printed on an order (no stock of their own)
@@ -50,7 +68,8 @@ const ENTITIES = {
     id: 'delivery_id',
     fields: {
       delivery_id: 'text', order_id: 'text', batch_no: 'int', quantity: 'int', delivered_at: 'timestamp', method: 'text',
-      received_by_name: 'text', notes: 'text', recorded_by: 'text', created_at: 'timestamp'
+      received_by_name: 'text', notes: 'text', recorded_by: 'text', created_at: 'timestamp',
+      plan_id: 'text' // migration 016: the planned batch this hand-over belongs to
     }
   },
   // migration 015: supplier profiles
@@ -150,7 +169,8 @@ const ENTITIES = {
       date_recorded: 'timestamp', financial_cost: 'money',
       // PB 18 / PB 19 (migration 012): standard reason, diagnosed cause, order status at the time
       reason_code: 'text', loss_category: 'text', production_stage: 'text', is_statistical_anomaly: 'bool',
-      loss_batch_id: 'text' // migration 015: losses recorded together (bulk waste)
+      loss_batch_id: 'text', // migration 015: losses recorded together (bulk waste)
+      print_detail_id: 'text' // migration 016: the print line it ruined (e.g. jersey #10, size L)
     }
   },
   inventory_items: {
@@ -160,7 +180,8 @@ const ENTITIES = {
       quantity_reserved: 'int', minimum_threshold: 'int', unit_cost: 'money',
       unit: 'text', supplier: 'text', deleted_at: 'timestamp', deleted_by: 'text',
       selling_price: 'money', // PB 11 (migration 011): charged per piece before volume discounts
-      supplier_id: 'text', has_sizes: 'bool' // migration 015: usual supplier; a garment (print details have sizes)
+      supplier_id: 'text', has_sizes: 'bool', // migration 015: usual supplier; a garment (print details have sizes)
+      requires_pressing: 'bool' // migration 016: a T-shirt, so its orders go through the heat press
     }
   },
   customers: {
@@ -169,7 +190,9 @@ const ENTITIES = {
       customer_id: 'text', full_name: 'text', contact_number: 'text', platform_source: 'text',
       archived_at: 'timestamp', archived_by: 'text', // PB 23 / D2 (migration 013)
       // migration 015: client profile
-      customer_type: 'text', contact_person: 'text', email: 'text', address: 'text', social_media: 'text', notes: 'text'
+      customer_type: 'text', contact_person: 'text', email: 'text', address: 'text', social_media: 'text', notes: 'text',
+      // migration 016: the contact person's own details (apart from the client's)
+      contact_person_number: 'text', contact_person_email: 'text', contact_person_social: 'text'
     }
   }
 };
