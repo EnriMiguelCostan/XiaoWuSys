@@ -10,6 +10,7 @@
     "seed-inventory": "node scripts/seedInventory.js",
     "demo:seed": "node scripts/seedDemo.js",
     "seed:history": "node scripts/seedHistory.js",
+    "purge:deactivated": "node scripts/purgeDeactivatedUsers.js",
     "demo": "node scripts/seedDemo.js --if-missing && node scripts/runDemo.js",
     "audit-log": "node scripts/auditLog.js",
     "init-local-db": "node initLocalDb.js"
