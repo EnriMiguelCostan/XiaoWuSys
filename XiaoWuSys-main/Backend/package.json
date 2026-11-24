@@ -9,6 +9,7 @@
     "migrate": "node scripts/migrate.js",
     "seed-inventory": "node scripts/seedInventory.js",
     "demo:seed": "node scripts/seedDemo.js",
+    "seed:history": "node scripts/seedHistory.js",
     "demo": "node scripts/seedDemo.js --if-missing && node scripts/runDemo.js",
     "audit-log": "node scripts/auditLog.js",
     "init-local-db": "node initLocalDb.js"
