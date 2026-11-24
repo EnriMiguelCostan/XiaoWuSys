@@ -128,7 +128,7 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
     assert.equal(pressing.status, 200, pressing.text);
     assert.deepEqual([pressing.body.order.production_status, pressing.body.stock_changes], ['Pressing', []], 'pressing moves no stock');
     const backwards = await setStatus('o-shirts', 'Printing');
-    assert.deepEqual([backwards.status, backwards.body.error, backwards.body.allowed], [409, 'INVALID_STATUS_TRANSITION', ['Completed', 'Cancelled']]);
+    assert.deepEqual([backwards.status, backwards.body.error, backwards.body.allowed], [409, 'INVALID_STATUS_TRANSITION', ['Ready', 'Completed', 'Cancelled']]);
     // Migration 015: an order is completed only once nothing is left to pay
     const unpaid = await setStatus('o-shirts', 'Completed', admin);
     assert.deepEqual([unpaid.status, unpaid.body.error, unpaid.body.missing.map((m) => m.code)], [409, 'COMPLETION_REQUIREMENTS_NOT_MET', ['BALANCE_DUE']]);
