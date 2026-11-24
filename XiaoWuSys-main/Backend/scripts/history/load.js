@@ -102,11 +102,10 @@ const loadHistory = async (pool, history, { log = () => {} } = {}) => {
   }
 };
 
-// The accounts the history credits with each action (removed accounts are left out)
+// The accounts the history credits with each action: active ones only (deactivated and
+// removed accounts are left out)
 const loadUsers = async (pool) => {
-  const hasRemoved = (await pool.query(
-    `SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'removed_at'`)).rowCount > 0;
-  const { rows } = await pool.query(`SELECT user_id, role FROM users ${hasRemoved ? 'WHERE removed_at IS NULL' : ''} ORDER BY user_id`);
+  const { rows } = await pool.query('SELECT user_id, role FROM users WHERE is_active ORDER BY user_id');
   return rows;
 };
 
