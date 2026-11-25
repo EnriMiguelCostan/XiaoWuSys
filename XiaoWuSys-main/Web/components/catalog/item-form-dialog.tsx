@@ -64,6 +64,7 @@ export function ItemFormDialog({
     supplier_id: item?.supplier_id ?? '',
     has_sizes: Boolean(item?.has_sizes),
     requires_pressing: Boolean(item?.requires_pressing),
+    print_per_area: item?.print_pricing === 'per_area',
     quantity_available: '',
     minimum_threshold: item ? String(item.minimum_threshold) : '',
     unit_cost: item ? String(item.unit_cost) : '',
@@ -118,6 +119,7 @@ export function ItemFormDialog({
         supplier_id: form.supplier_id || undefined,
         has_sizes: form.has_sizes,
         requires_pressing: form.requires_pressing,
+        print_pricing: form.print_per_area ? 'per_area' : 'included',
         quantity_available: quantity,
         minimum_threshold: threshold,
         unit_cost: cost,
@@ -133,6 +135,7 @@ export function ItemFormDialog({
       else if (!form.supplier_id && supplier !== (item.supplier ?? '')) body.supplier = supplier || null;
       if (form.has_sizes !== Boolean(item.has_sizes)) body.has_sizes = form.has_sizes;
       if (form.requires_pressing !== Boolean(item.requires_pressing)) body.requires_pressing = form.requires_pressing;
+      if (form.print_per_area !== (item.print_pricing === 'per_area')) body.print_pricing = form.print_per_area ? 'per_area' : 'included';
       if (form.minimum_threshold.trim() !== String(item.minimum_threshold)) body.minimum_threshold = threshold;
       if (form.unit_cost.trim() !== String(item.unit_cost)) body.unit_cost = cost;
       if (form.selling_price.trim() !== String(item.selling_price ?? 0)) body.selling_price = price;
@@ -256,6 +259,22 @@ export function ItemFormDialog({
               <span className="block text-xs text-muted-foreground">Orders with this item get the Pressing step. Jerseys, mugs, tarpaulins… skip it.</span>
             </span>
           </label>
+          {/* Migration 017: a blank priced per print area (front A4, back A3...) or a finished piece */}
+          <label className="flex min-h-10 items-start gap-2 text-sm sm:col-span-2">
+            <input
+              type="checkbox"
+              className="mt-0.5 size-4"
+              checked={form.print_per_area}
+              onChange={(e) => setForm((f) => ({ ...f, print_per_area: e.target.checked }))}
+            />
+            <span>
+              <span className="font-medium">Priced per print area (a blank)</span>
+              <span className="block text-xs text-muted-foreground">
+                The selling price is the plain blank; each print on the order (front A4, back A3, logo, names) adds its charge. Leave it off for
+                items sold finished (sublimation jerseys, mugs, tarpaulin, stickers).
+              </span>
+            </span>
+          </label>
           {!editing && (
             <Field id="item-quantity" error={errorFor('quantity_available')} label="Opening stock" hint="What is on the shelf now. Later deliveries go through Stock in.">
               <Input id="item-quantity" type="number" min={0} max={WHOLE_NUMBER_MAX} step={1} inputMode="numeric" placeholder="0" {...bind('quantity_available')} />
@@ -265,10 +284,10 @@ export function ItemFormDialog({
             <Input id="item-threshold" type="number" min={0} max={WHOLE_NUMBER_MAX} step={1} inputMode="numeric" placeholder="0" required={editing} {...bind('minimum_threshold')} />
           </Field>
           <Field id="item-cost" error={errorFor('unit_cost')} label="Unit cost (₱)">
-            <Input id="item-cost" type="number" min={0} max={MONEY_INPUT_MAX} step="0.01" inputMode="decimal" placeholder="0.00" {...bind('unit_cost')} />
+            <Input id="item-cost" type="number" min={0} max={MONEY_INPUT_MAX} step="any" inputMode="decimal" placeholder="0.00" {...bind('unit_cost')} />
           </Field>
-          <Field id="item-price" error={errorFor('selling_price')} label="Selling price per piece (₱)" hint="What the customer pays before bulk discounts. Used to calculate quotes.">
-            <Input id="item-price" type="number" min={0} max={MONEY_INPUT_MAX} step="0.01" inputMode="decimal" placeholder="0.00" {...bind('selling_price')} />
+          <Field id="item-price" error={errorFor('selling_price')} label={form.print_per_area ? 'Blank price per piece (₱)' : 'Selling price per piece (₱)'} hint={form.print_per_area ? 'The plain blank, before printing. Print areas are added on the order.' : 'The finished piece, before bulk discounts. Used to calculate quotes.'}>
+            <Input id="item-price" type="number" min={0} max={MONEY_INPUT_MAX} step="any" inputMode="decimal" placeholder="0.00" {...bind('selling_price')} />
           </Field>
           {editing && (
             <p className="text-sm text-muted-foreground sm:col-span-2">

@@ -14,11 +14,11 @@ const at = (hhmm, day = '2026-11-10') => `${day}T${hhmm}:00`; // server UTC text
 
 describe('Waste diagnostics (PB 18 / PB 19)', () => {
   it('has the six standard reasons, each with its default cause, and reads old free text', () => {
-    assert.deepEqual(Object.keys(REASON_CODES), [
-      'misprint_alignment', 'sizing_encoding_error', 'heat_press_scorch', 'printer_head_banding', 'supplier_defect', 'damaged_in_storage'
-    ]);
-    assert.deepEqual(Object.values(REASON_CODES).map((r) => r.category),
+    const chosen = ['misprint_alignment', 'sizing_encoding_error', 'heat_press_scorch', 'printer_head_banding', 'supplier_defect', 'damaged_in_storage'];
+    assert.deepEqual(Object.keys(REASON_CODES), [...chosen, 'cancelled_after_printing'], 'migration 017: the system code for cancelled orders');
+    assert.deepEqual(chosen.map((c) => REASON_CODES[c].category),
       ['Human Error', 'Human Error', 'Machine Failure', 'Machine Failure', 'Product Defect', 'Human Error']);
+    assert.equal(REASON_CODES.cancelled_after_printing.category, null, 'not a mistake: no cause');
     assert.equal(inferReasonCode('Scorched by the heat press'), 'heat_press_scorch');
     assert.equal(inferReasonCode('pinhole from supplier'), 'supplier_defect');
     assert.equal(inferReasonCode('Misprint, logo off-center'), 'misprint_alignment');

@@ -58,8 +58,8 @@ describe('Migration 015 rules (no database)', () => {
   });
 
   it('knows what each payment method needs, and what may be refunded', () => {
-    assert.deepEqual(checkPaymentDetails('Cheque', { bank_name: 'BPI' }).errors.map((e) => e.field), ['cheque_no', 'cheque_date']);
-    assert.equal(checkPaymentDetails('Cheque', { bank_name: 'BPI', cheque_no: '0012', cheque_date: '2026-02-30' }).errors[0].field, 'cheque_date');
+    assert.deepEqual(checkPaymentDetails('Cheque', { bank_name: 'BPI' }).errors.map((e) => e.field), ['payer_name', 'cheque_no', 'cheque_date'], 'migration 017: who paid is required');
+    assert.equal(checkPaymentDetails('Cheque', { bank_name: 'BPI', cheque_no: '0012', cheque_date: '2026-02-30', payer_name: 'Ana' }).errors[0].field, 'cheque_date');
     assert.deepEqual(checkPaymentDetails('Cash', { reference_no: 'x' }).details.reference_no, null, 'unused details are not kept');
     assert.deepEqual(checkPaymentDetails('Maya', {}, { allOptional: true }).errors, [], 'a refund forces nothing');
     assert.equal(maxRefund({ status: 'Cancelled', quote: 1000, paidNet: 600 }), 600);
@@ -70,8 +70,8 @@ describe('Migration 015 rules (no database)', () => {
   it('says what an order still needs before it is Completed', () => {
     const f = fulfillmentSummary({ pieces_ordered: 10, deliveries: [{ quantity: 4 }] });
     const c = completionCheck({ order: { production_status: 'Printing' }, summary: { quote: 1000, remaining: 300 }, fulfillment: f });
-    assert.deepEqual(c.missing.map((m) => m.code), ['BALANCE_DUE', 'PIECES_NOT_DELIVERED']);
-    const once = completionCheck({ order: { production_status: 'Pressing' }, summary: { quote: 1000, remaining: 0 }, fulfillment: fulfillmentSummary({ pieces_ordered: 10 }) });
+    assert.deepEqual(c.missing.map((m) => m.code), ['NOT_READY', 'BALANCE_DUE', 'PIECES_NOT_DELIVERED'], 'migration 017: Completed only from Ready');
+    const once = completionCheck({ order: { production_status: 'Ready' }, summary: { quote: 1000, remaining: 0 }, fulfillment: fulfillmentSummary({ pieces_ordered: 10 }) });
     assert.deepEqual([once.ready, once.auto_handover], [true, true], 'a single pick-up is recorded on completion');
   });
 
@@ -136,9 +136,9 @@ describe('Migration 015 on the offline server', () => {
   it('checks payment details offline the same way, and keeps a payment date in the past', async () => {
     const id = order.order_id;
     await t.run('UPDATE order_profiles SET total_quote_amount = 900 WHERE order_id = ?', [id]);
-    const missing = await t.request('POST', `/api/orders/${id}/payments`, { token: staff, body: { amount: 100, payment_type: 'Maya' } });
+    const missing = await t.request('POST', `/api/orders/${id}/payments`, { token: staff, body: { amount: 100, payment_type: 'Maya', payer_name: 'Juan Dela Cruz' } });
     assert.deepEqual([missing.status, missing.body.details[0].field], [400, 'reference_no']);
-    const future = await t.request('POST', `/api/orders/${id}/payments`, { token: staff, body: { amount: 100, payment_type: 'Cash', payment_date: '2033-01-01T10:00' } });
+    const future = await t.request('POST', `/api/orders/${id}/payments`, { token: staff, body: { amount: 100, payment_type: 'Cash', payer_name: 'Juan Dela Cruz', payment_date: '2033-01-01T10:00' } });
     assert.deepEqual([future.status, future.body.details[0].field], [400, 'payment_date']);
     const ok = await t.request('POST', `/api/orders/${id}/payments`, {
       token: staff, body: { amount: 100, payment_type: 'Maya', reference_no: '5551 2345 6789', payer_name: 'Mrs. Lopez', payment_date: '2026-01-05T15:00' }
@@ -198,9 +198,9 @@ describe('Migration 015 on the offline server', () => {
     });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     assert.equal(ok.body.source, 'local');
-    // 60 pieces merged into one line -> 5% bulk tier: 95 x 60 = 5700, + 200 labor, + 10% = 590.00
-    assert.deepEqual([ok.body.quote.lines.length, ok.body.quote.lines[0].inventory_id, ok.body.quote.tier.percent_off], [1, mug, 5]);
-    assert.deepEqual([ok.body.quote.subtotal_amount, ok.body.quote.incidental_amount, ok.body.quote.total_quote_amount], [5700, 590, 6490]);
+    // 60 pieces merged into one line -> 10% bulk tier (migration 017): 90 x 60 = 5400, + 200 labor, + 10% = 560.00
+    assert.deepEqual([ok.body.quote.lines.length, ok.body.quote.lines[0].inventory_id, ok.body.quote.tier.percent_off], [1, mug, 10]);
+    assert.deepEqual([ok.body.quote.subtotal_amount, ok.body.quote.incidental_amount, ok.body.quote.total_quote_amount], [5400, 560, 6160]);
     const after = await t.request('GET', '/api/orders', { token: owner });
     assert.equal(after.body.orders.length, before.body.orders.length, 'nothing saved');
 

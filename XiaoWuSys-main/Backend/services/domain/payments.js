@@ -206,7 +206,7 @@ const paymentBlockedReason = (order, summary) => {
 //   required  must be filled in
 //   optional  may be filled in
 const PAYMENT_DETAIL_FIELDS = {
-  payer_name: { label: 'Paid by (name)', max: 255, hint: 'Who handed over or sent the money, if not the customer.' },
+  payer_name: { label: 'Paid by (name)', max: 255, hint: 'Who handed over or sent the money (the customer, a teacher, an officer...).' },
   reference_no: { label: 'Reference / transaction number', max: 100 },
   bank_name: { label: 'Bank', max: 100 },
   account_name: { label: 'Sender account name or number', max: 255 },
@@ -214,33 +214,34 @@ const PAYMENT_DETAIL_FIELDS = {
   cheque_date: { label: 'Date on the cheque', type: 'date' },
   payment_notes: { label: 'Notes', max: 500 }
 };
+// migration 017: who paid (payer_name) is required for every method, so every receipt names the payer
 const PAYMENT_METHOD_RULES = {
-  Cash: { required: [], optional: ['payer_name', 'payment_notes'], verify: false },
+  Cash: { required: ['payer_name'], optional: ['payment_notes'], verify: false },
   GCash: {
-    required: ['reference_no'], optional: ['account_name', 'payer_name', 'payment_notes'], verify: true,
+    required: ['reference_no', 'payer_name'], optional: ['account_name', 'payment_notes'], verify: true,
     labels: { reference_no: 'GCash reference number (13 digits)', account_name: 'Sender GCash name or number' }
   },
   Maya: {
-    required: ['reference_no'], optional: ['account_name', 'payer_name', 'payment_notes'], verify: true,
+    required: ['reference_no', 'payer_name'], optional: ['account_name', 'payment_notes'], verify: true,
     labels: { reference_no: 'Maya reference number', account_name: 'Sender Maya name or number' }
   },
   PayPal: {
-    required: ['reference_no'], optional: ['account_name', 'payer_name', 'payment_notes'], verify: true,
+    required: ['reference_no', 'payer_name'], optional: ['account_name', 'payment_notes'], verify: true,
     labels: { reference_no: 'PayPal transaction ID', account_name: 'Sender PayPal email or name' }
   },
   'Bank Transfer': {
-    required: ['bank_name', 'reference_no'], optional: ['account_name', 'payer_name', 'payment_notes'], verify: true,
+    required: ['bank_name', 'reference_no', 'payer_name'], optional: ['account_name', 'payment_notes'], verify: true,
     labels: { bank_name: 'Bank the money came from', reference_no: 'Transfer reference number', account_name: 'Sender account name' }
   },
   Cheque: {
-    required: ['bank_name', 'cheque_no', 'cheque_date'], optional: ['account_name', 'payer_name', 'payment_notes'], verify: true,
+    required: ['bank_name', 'cheque_no', 'cheque_date', 'payer_name'], optional: ['account_name', 'payment_notes'], verify: true,
     labels: { bank_name: 'Bank on the cheque', account_name: 'Account name on the cheque' }
   },
   'Credit/Debit Card': {
-    required: ['reference_no'], optional: ['bank_name', 'account_name', 'payer_name', 'payment_notes'], verify: true,
+    required: ['reference_no', 'payer_name'], optional: ['bank_name', 'account_name', 'payment_notes'], verify: true,
     labels: { reference_no: 'Approval code', bank_name: 'Card issuer (bank)', account_name: 'Cardholder name' }
   },
-  Other: { required: ['payment_notes'], optional: ['reference_no', 'payer_name'], verify: true, labels: { payment_notes: 'How it was paid' } }
+  Other: { required: ['payment_notes', 'payer_name'], optional: ['reference_no'], verify: true, labels: { payment_notes: 'How it was paid' } }
 };
 const PAYMENT_DETAIL_NAMES = Object.keys(PAYMENT_DETAIL_FIELDS);
 

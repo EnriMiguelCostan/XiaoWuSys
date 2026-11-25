@@ -220,7 +220,7 @@ describe('M6 part 3 on real PostgreSQL: waste diagnostics, voids, overheads, P&L
 
   it('voids a payment with a negative reversing entry, once, guarding the downpayment', async () => {
     await insertOrder('o-pay', 'Approved', { quote: 1000 });
-    const pay = async (amount) => (await server.request('POST', '/api/orders/o-pay/payments', { token: production, body: { amount, payment_type: 'GCash', reference_no: '1004 123 456789' } })).body.payment;
+    const pay = async (amount) => (await server.request('POST', '/api/orders/o-pay/payments', { token: production, body: { amount, payment_type: 'GCash', payer_name: 'Juan Dela Cruz', reference_no: '1004 123 456789' } })).body.payment;
     const first = await pay(600);
     const second = await pay(100);
 
@@ -323,5 +323,30 @@ describe('M6 part 3 on real PostgreSQL: waste diagnostics, voids, overheads, P&L
     assert.equal(csv.status, 200);
     assert.ok(csv.text.includes('Cost of goods,Blanks used (completed orders),760'));
     assert.ok(csv.text.includes('Total,Net loss,-7857.5'));
+  });
+  it('cancels a Ready order through the shop\'s fault and a half-printed one, recording the made pieces as waste (migration 017 / 018)', async () => {
+    const cap = async () => (await pool.query("SELECT quantity_available AS a, quantity_reserved AS r FROM inventory_items WHERE inventory_id = 'i-cap'")).rows[0];
+    const before = await cap();
+    await insertOrder('o-ready', 'Ready', { quote: 600, reserved: true, lines: [['i-cap', 3]] });
+    const ready = await server.request('PATCH', '/api/orders/o-ready/status', {
+      token: admin, body: { status: 'Cancelled', shop_fault: true, cancellation_reason: 'Wrong color printed' }
+    });
+    assert.equal(ready.status, 200, ready.text);
+    assert.deepEqual([ready.body.cancel_terms.fee, ready.body.cancel_terms.shop_fault, ready.body.order.cancel_shop_fault], [0, true, true]);
+    assert.deepEqual(ready.body.wasted.map((w) => [w.inventory_id, w.quantity]), [['i-cap', 3]]);
+
+    await insertOrder('o-half', 'Printing', { quote: 1000, reserved: true, lines: [['i-cap', 4]] });
+    const half = await server.request('PATCH', '/api/orders/o-half/status', {
+      token: owner, body: { status: 'Cancelled', cancellation_reason: 'Client cancelled', printed: [{ line_item_id: 'o-half-l1', quantity: 1 }] }
+    });
+    assert.equal(half.status, 200, half.text);
+    assert.deepEqual([half.body.order.cancellation_fee, half.body.order.cancelled_stage], [500, 'Printing'], 'the 50% downpayment');
+
+    const losses = (await pool.query(
+      "SELECT order_id, quantity_lost, reason_code, production_stage FROM material_loss WHERE order_id IN ('o-ready', 'o-half') ORDER BY order_id")).rows;
+    assert.deepEqual(losses.map((l) => [l.order_id, l.quantity_lost, l.reason_code, l.production_stage]),
+      [['o-half', 1, 'cancelled_after_printing', 'Cancelled'], ['o-ready', 3, 'cancelled_after_printing', 'Cancelled']]);
+    const after = await cap();
+    assert.deepEqual([after.a, after.r], [before.a - 4, before.r], 'made pieces leave the stock; the rest is free again');
   });
 });

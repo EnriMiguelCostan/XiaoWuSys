@@ -35,7 +35,10 @@ const ENTITIES = {
       // migration 015: instructions for the job, and the quote's labor / incidental parts
       order_description: 'text', labor_amount: 'money', incidental_amount: 'money',
       adjustment_amount: 'money', adjustment_reason: 'text', // a price cut after approval, with its reason
-      branch_id: 'text' // migration 016: the client's branch this order is for (null = the main branch)
+      branch_id: 'text', // migration 016: the client's branch this order is for (null = the main branch)
+      // migration 017: what the shop kept when the order was cancelled, at which stage, whether it was the
+      // shop's fault; and why a late order was the client's doing (no late-delivery price cut then)
+      cancellation_fee: 'money', cancelled_stage: 'text', cancel_shop_fault: 'bool', client_delay_reason: 'text'
     }
   },
   // migration 016: a client's other branches (the client's own address is the main branch)
@@ -144,7 +147,9 @@ const ENTITIES = {
     fields: {
       line_item_id: 'text', order_id: 'text', inventory_id: 'text', product_type: 'text', quantity: 'int',
       size: 'text', custom_name: 'text', custom_number: 'text', price: 'money',
-      unit_cost: 'money' // PB 22 (migration 013): the blank's cost when the order was Completed (null before)
+      unit_cost: 'money', // PB 22 (migration 013): the blank's cost when the order was Completed (null before)
+      // migration 017: production progress, the print areas that price the line, and add-ons after approval
+      qty_printed: 'int', qty_pressed: 'int', print_areas: 'text', added_after_approval: 'bool'
     }
   },
   payments: {
@@ -181,7 +186,8 @@ const ENTITIES = {
       unit: 'text', supplier: 'text', deleted_at: 'timestamp', deleted_by: 'text',
       selling_price: 'money', // PB 11 (migration 011): charged per piece before volume discounts
       supplier_id: 'text', has_sizes: 'bool', // migration 015: usual supplier; a garment (print details have sizes)
-      requires_pressing: 'bool' // migration 016: a T-shirt, so its orders go through the heat press
+      requires_pressing: 'bool', // migration 016: a T-shirt, so its orders go through the heat press
+      print_pricing: 'text' // migration 017: 'included' (finished piece) or 'per_area' (blank + print areas)
     }
   },
   customers: {

@@ -361,7 +361,7 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
                     id="overhead-peso"
                     type="number"
                     min="0.01"
-                    step="0.01"
+                    step="any"
                     max={MONEY_INPUT_MAX}
                     inputMode="decimal"
                     required

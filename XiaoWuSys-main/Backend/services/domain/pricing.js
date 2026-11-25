@@ -1,26 +1,70 @@
 // ==========================================
-// QUOTES, VOLUME PRICES AND DISCOUNTS (PB 11 / PB 12; pure rules: no HTTP, no SQL)
+// QUOTES, VOLUME PRICES AND DISCOUNTS (PB 11 / PB 12; migration 017; pure rules: no HTTP, no SQL)
 //
 // All money is worked out in integer centavos (₱150.00 -> 15000), like services/domain/payments.js.
 //
-//   Volume tiers, on the order's TOTAL quantity (every line together):
-//     100 pieces or more   10% off each piece's selling price
-//     50 to 99 pieces       5% off
-//     fewer than 50         the selling price
-//   unit price  = selling price less the tier, rounded to the nearest centavo
-//   line total  = unit price x quantity
-//   subtotal    = sum of the line totals
-//   discount    = an amount, or a percentage of the subtotal (rounded to the centavo), never more
-//                 than the subtotal; a reason is required whenever there is one
-//   total quote = subtotal - discount (never below 0)
+// Each catalog item is priced one of two ways (inventory_items.print_pricing, migration 017):
+//   'included'  the selling price is the FINISHED piece (sublimation jersey set, mug, lanyard,
+//               tarpaulin per sq ft, sticker sheet): printing is part of the item
+//   'per_area'  the selling price is the BLANK (T-shirt, polo, hoodie, tote) and every print area
+//               on the order line adds its charge (PRINT_SIZES), e.g. front A4 + back A3
+//
+//   Volume tiers, on the order's TOTAL quantity (every line together), Davao-style "by the dozen":
+//     100 pieces or more   15% off      50 to 99   10% off      12 to 49   5% off      1 to 11  regular
+//   The tier comes off the PRINT charges of a per-area item (the blank is sold at its price: its
+//   margin is thin) and off the whole price of an included item.
+//   unit price  = blank + print charges less the tier (per area), or selling price less the tier
+//   line total  = unit price x quantity;   materials (subtotal) = sum of the line totals
+//
+//   total quote = materials + labor - discount + incidental charges
+//     discount     an amount or a % of (materials + labor), never more than that, reason required.
+//                  It is taken BEFORE the incidental charges: a discount is a lower price for the
+//                  work, never a discount on the allowance for reprints and changes.
+//     incidental   an allowance for what cannot be seen yet (reprints, small design changes, rush
+//                  handling): an amount or a % of (materials + labor), at most INCIDENTAL_PERCENT_MAX.
+//   warnings (never block, the Owner decides): a discount above DISCOUNT_GUIDE_PERCENT, or a total
+//   below what the blanks cost the shop.
 // ==========================================
 const { toCentavos, toPesos, pesoText } = require('./payments');
 
 const VOLUME_TIERS = [
-  { min_quantity: 100, percent_off: 10, label: 'Bulk price (100 pieces or more): 10% off' },
-  { min_quantity: 50, percent_off: 5, label: 'Bulk price (50 pieces or more): 5% off' },
+  { min_quantity: 100, percent_off: 15, label: 'Bulk price (100 pieces or more): 15% off the printing' },
+  { min_quantity: 50, percent_off: 10, label: 'Bulk price (50 pieces or more): 10% off the printing' },
+  { min_quantity: 12, percent_off: 5, label: 'Dozen price (12 pieces or more): 5% off the printing' },
   { min_quantity: 0, percent_off: 0, label: 'Regular price' }
 ];
+
+// ---------- Print areas (migration 017): what each print on a blank costs per piece ----------
+// 2026 Davao prices for DTF on cotton (sublimation jerseys, mugs and tarpaulins are 'included')
+const PRINT_SIZES = {
+  Small: { label: 'Small logo (up to 4 x 4 in)', price: 50 },
+  A4: { label: 'A4 (about 8 x 11 in)', price: 100 },
+  A3: { label: 'A3 (about 11 x 16 in)', price: 160 },
+  Name: { label: 'Name and number', price: 40 }
+};
+const PRINT_PLACEMENTS = ['Front', 'Back', 'Left chest', 'Right chest', 'Left sleeve', 'Right sleeve', 'Other'];
+const PRINT_AREAS_MAX = 6;
+const PRINT_PRICING = ['included', 'per_area'];
+// Text or array -> { areas } | { error }
+const parsePrintAreas = (value) => {
+  if (value === undefined || value === null || value === '') return { areas: [] };
+  let list = value;
+  if (typeof value === 'string') {
+    try { list = JSON.parse(value); } catch { return { error: 'Print areas could not be read. Choose them again.' }; }
+  }
+  if (!Array.isArray(list)) return { error: 'Print areas must be a list, like [{ "placement": "Front", "size": "A4" }].' };
+  if (list.length > PRINT_AREAS_MAX) return { error: `At most ${PRINT_AREAS_MAX} print areas per item.` };
+  const areas = [];
+  for (const a of list) {
+    if (!a || typeof a !== 'object' || !PRINT_PLACEMENTS.includes(a.placement) || !PRINT_SIZES[a.size]) {
+      return { error: `Each print area needs a placement (${PRINT_PLACEMENTS.join(', ')}) and a size (${Object.keys(PRINT_SIZES).join(', ')}).` };
+    }
+    areas.push({ placement: a.placement, size: a.size });
+  }
+  return { areas };
+};
+const printChargeCentavos = (areas) => areas.reduce((sum, a) => sum + toCentavos(PRINT_SIZES[a.size].price), 0);
+const DISCOUNT_GUIDE_PERCENT = 30;
 const DISCOUNT_REASON_MAX = 150; // printed on the quote; matches Web/lib/input-limits.ts DISCOUNT_LIMITS
 
 const tierFor = (totalQuantity) => VOLUME_TIERS.find((t) => totalQuantity >= t.min_quantity);
@@ -32,7 +76,7 @@ const unitPriceCentavos = (sellingCentavos, percentOff) => Math.round((sellingCe
 //   (item_name / selling_price come from the linked catalog item; null when not linked)
 // -> { problem } or { total_quantity, tier, lines: [{ line_item_id, product_type, quantity, selling_price,
 //      unit_price, line_total }], subtotal_amount }
-const priceLines = (items) => {
+const priceLines = (items, { tierQuantity = null } = {}) => {
   if (!items || items.length === 0) {
     return { problem: { status: 422, body: { error: 'NO_ITEMS', message: 'This order has no items yet. Add the items first, then calculate the quote.' } } };
   }
@@ -64,24 +108,39 @@ const priceLines = (items) => {
     };
   }
 
+  const badAreas = items.map((i) => ({ i, parsed: parsePrintAreas(i.print_areas) })).find((x) => x.parsed.error);
+  if (badAreas) {
+    return { problem: { status: 400, body: { error: 'VALIDATION_FAILED', message: `${badAreas.i.product_type}: ${badAreas.parsed.error}` } } };
+  }
+
   const total_quantity = items.reduce((sum, i) => sum + Number(i.quantity), 0);
-  const tier = tierFor(total_quantity);
+  // add-ons after approval are priced at the tier of the whole order (tierQuantity)
+  const tier = tierFor(tierQuantity !== null ? tierQuantity : total_quantity);
   let subtotalC = 0;
+  let costC = 0;
   const lines = items.map((i) => {
-    const unitC = unitPriceCentavos(toCentavos(i.selling_price), tier.percent_off);
+    const perArea = i.print_pricing === 'per_area';
+    const areas = perArea ? parsePrintAreas(i.print_areas).areas : [];
+    const blankC = toCentavos(i.selling_price);
+    const printC = printChargeCentavos(areas);
+    const unitC = perArea ? blankC + unitPriceCentavos(printC, tier.percent_off) : unitPriceCentavos(blankC, tier.percent_off);
     const lineC = unitC * Number(i.quantity);
     subtotalC += lineC;
+    costC += toCentavos(i.unit_cost || 0) * Number(i.quantity);
     return {
       line_item_id: i.line_item_id,
       product_type: i.product_type,
       size: i.size || null,
       quantity: Number(i.quantity),
-      selling_price: toPesos(toCentavos(i.selling_price)),
+      print_pricing: perArea ? 'per_area' : 'included',
+      print_areas: areas,
+      selling_price: toPesos(blankC),
+      print_charge: toPesos(printC),
       unit_price: toPesos(unitC),
       line_total: toPesos(lineC)
     };
   });
-  return { total_quantity, tier, lines, subtotal_amount: toPesos(subtotalC), subtotalC };
+  return { total_quantity, tier, lines, subtotal_amount: toPesos(subtotalC), subtotalC, costC };
 };
 
 // The discount for a subtotal, from what the Owner asked for or what the order already has.
@@ -137,7 +196,7 @@ const resolveDiscount = (subtotalC, requested, existing) => {
 // Neither sent: the order's current amounts are kept, like the discount.
 //   requested: { labor?, incidental?, incidental_percent? }   existing: { labor, incidental }
 // -> { problem } or { laborC, incidentalC, incidentalPercent }
-const INCIDENTAL_PERCENT_MAX = 50;
+const INCIDENTAL_PERCENT_MAX = 20;
 const resolveCharges = (materialsC, requested = {}, existing = {}) => {
   const given = (x) => x !== undefined && x !== null;
   const laborC = toCentavos(given(requested.labor) ? requested.labor : existing.labor || 0);
@@ -152,24 +211,54 @@ const resolveCharges = (materialsC, requested = {}, existing = {}) => {
   if (laborC < 0 || incidentalC < 0) {
     return { problem: { status: 400, body: { error: 'VALIDATION_FAILED', message: 'Labor and incidental charges cannot be below ₱0.' } } };
   }
+  // An allowance, not a second price: at most INCIDENTAL_PERCENT_MAX of materials + labor
+  const capC = Math.round(((materialsC + laborC) * INCIDENTAL_PERCENT_MAX) / 100);
+  if (incidentalC > capC) {
+    return {
+      problem: {
+        status: 422,
+        body: {
+          error: 'INCIDENTAL_TOO_LARGE',
+          message: `Incidental charges can be at most ${INCIDENTAL_PERCENT_MAX}% of materials and labor (${pesoText(toPesos(capC))}). `
+            + 'A bigger extra is real work: add it as labor or as items instead.',
+          incidental_max: toPesos(capC)
+        }
+      }
+    };
+  }
   return { laborC, incidentalC, incidentalPercent };
 };
 
 // Everything the quote route needs -> { problem } or { quote }
 //   quote: { total_quantity, tier: { percent_off, label }, lines, subtotal_amount (materials),
 //            labor_amount, incidental_amount, incidental_percent, gross_amount, discount_amount,
-//            discount_percent, discount_reason, total_quote_amount }
-// The discount (an amount, or a percentage) is taken from the gross amount: materials + labor +
-// incidental charges. With no labor or incidental charges that is the materials subtotal, as before.
+//            discount_percent, discount_reason, total_quote_amount, cost_amount, warnings }
+// gross_amount = materials + labor + incidental (what the bill would be without a discount).
+// The discount (an amount, or a percentage) is taken from materials + labor, then the incidental
+// charges are added: total = materials + labor - discount + incidental.
 const computeQuote = ({ items, requested = {}, existing = { amount: 0, reason: null } }) => {
   const priced = priceLines(items);
   if (priced.problem) return { problem: priced.problem };
   const charges = resolveCharges(priced.subtotalC, requested, existing);
   if (charges.problem) return { problem: charges.problem };
-  const grossC = priced.subtotalC + charges.laborC + charges.incidentalC;
-  const discount = resolveDiscount(grossC, requested, existing);
+  const workC = priced.subtotalC + charges.laborC;
+  const discount = resolveDiscount(workC, requested, existing);
   if (discount.problem) return { problem: discount.problem };
-  const totalC = Math.max(0, grossC - discount.discountC);
+  const grossC = workC + charges.incidentalC;
+  const totalC = Math.max(0, workC - discount.discountC + charges.incidentalC);
+  const warnings = [];
+  if (workC > 0 && discount.discountC * 100 > workC * DISCOUNT_GUIDE_PERCENT) {
+    warnings.push({
+      code: 'DISCOUNT_ABOVE_GUIDE',
+      message: `The discount is more than ${DISCOUNT_GUIDE_PERCENT}% of the work. Make sure the shop still earns from this job.`
+    });
+  }
+  if (priced.costC > 0 && totalC < priced.costC) {
+    warnings.push({
+      code: 'BELOW_COST',
+      message: `The total (${pesoText(toPesos(totalC))}) is less than what the blanks cost the shop (${pesoText(toPesos(priced.costC))}).`
+    });
+  }
   return {
     quote: {
       total_quantity: priced.total_quantity,
@@ -183,7 +272,9 @@ const computeQuote = ({ items, requested = {}, existing = { amount: 0, reason: n
       discount_amount: toPesos(discount.discountC),
       discount_percent: discount.percent,
       discount_reason: discount.reason,
-      total_quote_amount: toPesos(totalC)
+      total_quote_amount: toPesos(totalC),
+      cost_amount: toPesos(priced.costC),
+      warnings
     }
   };
 };
@@ -287,6 +378,7 @@ const manualQuoteColumns = (total) => ({
 });
 
 module.exports = {
+  PRINT_SIZES, PRINT_PLACEMENTS, PRINT_AREAS_MAX, PRINT_PRICING, DISCOUNT_GUIDE_PERCENT, parsePrintAreas, printChargeCentavos,
   VOLUME_TIERS, DISCOUNT_REASON_MAX, INCIDENTAL_PERCENT_MAX, ADJUSTMENT_REASON_MAX, tierFor, unitPriceCentavos, priceLines,
   resolveDiscount, resolveCharges, computeQuote, quoteBreakdown, quoteLines, manualQuoteColumns, resolveAdjustment
 };

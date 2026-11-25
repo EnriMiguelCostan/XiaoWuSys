@@ -12,7 +12,7 @@ describe('Payments: balance limit, receiver and payment status', () => {
   const orders = {};
 
   const pay = (orderId, amount, who = 'staff', extra = {}) =>
-    t.request('POST', `/api/orders/${orderId}/payments`, { token: t.tokens[who], body: { amount, payment_type: 'Cash', ...extra } });
+    t.request('POST', `/api/orders/${orderId}/payments`, { token: t.tokens[who], body: { amount, payment_type: 'Cash', payer_name: 'Juan Dela Cruz', ...extra } });
   const paymentCount = async (orderId) => (await t.get('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?', [orderId])).n;
   const newOrder = async (quote, body = {}) => {
     const r = await t.request('POST', '/api/orders', {
@@ -198,7 +198,7 @@ describe('Sync status (changes waiting to sync)', () => {
       body: { customer_id: cust.body.customer.customer_id, production_deadline: shopDate(3), total_quote_amount: 600,
         required_items: [{ inventory_id: item.body.item.inventory_id, quantity_needed: 2 }] }
     });
-    await t.request('POST', `/api/orders/${order.body.order_id}/payments`, { token: t.tokens.owner, body: { amount: 300, payment_type: 'GCash', reference_no: '1004 123 456789' } });
+    await t.request('POST', `/api/orders/${order.body.order_id}/payments`, { token: t.tokens.owner, body: { amount: 300, payment_type: 'GCash', payer_name: 'Juan Dela Cruz', reference_no: '1004 123 456789' } });
     await t.run("UPDATE customers SET sync_conflict = 'changed online' WHERE customer_id = ?", [cust.body.customer.customer_id]);
 
     const s = await t.request('GET', '/api/sync/status', { token: t.tokens.production });

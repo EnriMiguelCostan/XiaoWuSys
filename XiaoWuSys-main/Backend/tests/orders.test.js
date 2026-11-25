@@ -129,9 +129,9 @@ describe('Customers and orders', () => {
   });
 
   it('records payments and shows the balance', async () => {
-    let r = await t.request('POST', `/api/orders/${orderId}/payments`, { token, body: { amount: 26250, payment_type: 'GCash', reference_no: '1004 123 456789' } });
+    let r = await t.request('POST', `/api/orders/${orderId}/payments`, { token, body: { amount: 26250, payment_type: 'GCash', payer_name: 'Juan Dela Cruz', reference_no: '1004 123 456789' } });
     assert.equal(r.status, 201);
-    r = await t.request('POST', `/api/orders/${orderId}/payments`, { token, body: { amount: 1000.5, payment_type: 'Cash' } });
+    r = await t.request('POST', `/api/orders/${orderId}/payments`, { token, body: { amount: 1000.5, payment_type: 'Cash', payer_name: 'Juan Dela Cruz' } });
     assert.equal(r.status, 201);
     const d = await t.request('GET', `/api/orders/${orderId}`, { token: t.tokens.production });
     assert.equal(d.status, 200);
@@ -203,11 +203,11 @@ describe('Customers and orders', () => {
     assert.equal(status.body.error, 'STATUS_CHANGE_REQUIRES_CLOUD');
   });
 
-  it('lets only the Owner cancel (void) an order', async () => {
+  it('lets anyone cancel an order before approval (the change itself needs the cloud)', async () => {
     for (const who of ['staff', 'admin']) {
       const r = await t.request('PATCH', `/api/orders/${orderId}/status`, { token: t.tokens[who], body: { status: 'Cancelled' } });
-      assert.equal(r.status, 403, who);
-      assert.equal(r.body.error, 'VOID_OWNER_ONLY');
+      assert.equal(r.status, 503, who);
+      assert.equal(r.body.error, 'STATUS_CHANGE_REQUIRES_CLOUD');
     }
     assert.equal((await t.get('SELECT production_status AS s FROM order_profiles WHERE order_id = ?', [orderId])).s, 'Pending');
   });

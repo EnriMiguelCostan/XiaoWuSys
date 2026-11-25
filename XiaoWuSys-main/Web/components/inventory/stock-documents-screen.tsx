@@ -708,7 +708,7 @@ function DocumentFormDialog({
                           type="number"
                           min={0}
                           max={MONEY_INPUT_MAX}
-                          step="0.01"
+                          step="any"
                           required
                           inputMode="decimal"
                           aria-invalid={lineError(i, 'unit_cost') ? true : undefined}

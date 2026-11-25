@@ -8,6 +8,8 @@
 const { isConnectionError } = require('../utils/dbErrors');
 const { ID_PATTERN } = require('../utils/validation');
 
+const { parsePrintAreas } = require('./domain/pricing');
+
 // Available stock = what is on hand minus what is already promised to other orders
 const computeAvailable = (row) =>
   Math.max(0, Number(row.quantity_available || 0) - Number(row.quantity_reserved || 0));
@@ -20,6 +22,9 @@ const normalizeRequiredItems = (required_items) => {
   }
 
   const totals = new Map();
+  // migration 017: each line keeps its print areas (two lines of the same blank may be printed
+  // differently); lines with the same blank AND the same print areas are merged
+  const lines = new Map();
 
   for (let i = 0; i < required_items.length; i++) {
     const item = required_items[i] || {};
@@ -38,11 +43,20 @@ const normalizeRequiredItems = (required_items) => {
       return { error: `Material ${i + 1}: the quantity must be a whole number of at least 1.` };
     }
 
+    const parsed = parsePrintAreas(item.print_areas);
+    if (parsed.error) return { error: `Material ${i + 1}: ${parsed.error}` };
+    const print_areas = parsed.areas.length ? JSON.stringify(parsed.areas) : null;
+    const key = `${inventory_id}|${print_areas || ''}`;
+    const line = lines.get(key) || { inventory_id, quantity_needed: 0, print_areas };
+    line.quantity_needed += quantity_needed;
+    lines.set(key, line);
+
     totals.set(inventory_id, (totals.get(inventory_id) || 0) + quantity_needed);
   }
 
   return {
-    items: [...totals].map(([inventory_id, quantity_needed]) => ({ inventory_id, quantity_needed }))
+    items: [...totals].map(([inventory_id, quantity_needed]) => ({ inventory_id, quantity_needed })),
+    lines: [...lines.values()]
   };
 };
 

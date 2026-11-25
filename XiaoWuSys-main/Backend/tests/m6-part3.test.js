@@ -96,13 +96,18 @@ describe('M6 part 3 offline: misprints, waste, overheads, P&L, voids', () => {
     const other = (await t.request('POST', '/api/orders', {
       token: production, body: { customer_id: customer, production_deadline: shopDate(9), resolution: 'Delayed' }
     })).body.order_id;
-    await t.run("UPDATE order_profiles SET production_status = 'Completed' WHERE order_id = ?", [other]);
+    await t.run("UPDATE order_profiles SET production_status = 'Ready' WHERE order_id = ?", [other]);
     const h = (id, from, to, ts) => t.run(
       'INSERT INTO order_status_history (history_id, order_id, from_status, to_status, changed_at) VALUES (?, ?, ?, ?, ?)', [id, other, from, to, ts]);
     await h('h1', 'Approved', 'Printing', '2026-11-10 09:00:00');
-    await h('h2', 'Printing', 'Completed', '2026-11-10 09:03:00');
+    await h('h2', 'Printing', 'Ready', '2026-11-10 09:03:00');
     const r = await loss(cap, { quantity_lost: 1, reason_code: 'heat_press_scorch', order_id: other });
-    assert.deepEqual([r.status, r.body.loss.loss_category, r.body.diagnosis.rule, r.body.loss.production_stage], [201, 'Human Error', 'rushed_step', 'Completed']);
+    assert.deepEqual([r.status, r.body.loss.loss_category, r.body.diagnosis.rule, r.body.loss.production_stage], [201, 'Human Error', 'rushed_step', 'Ready']);
+    // migration 017: no waste on an order before printing starts (that is a Stock out)
+    await t.run("UPDATE order_profiles SET production_status = 'Approved' WHERE order_id = ?", [other]);
+    const early = await loss(cap, { quantity_lost: 1, reason_code: 'damaged_in_storage', order_id: other });
+    assert.deepEqual([early.status, early.body.error], [409, 'WASTE_NOT_IN_PRODUCTION']);
+    await t.run("UPDATE order_profiles SET production_status = 'Ready' WHERE order_id = ?", [other]);
   });
 
   it('shows the order’s losses on its detail, and who may log one', async () => {
@@ -215,7 +220,7 @@ describe('M6 part 3 offline: misprints, waste, overheads, P&L, voids', () => {
   });
 
   it('keeps payment voids and order cancels for the Owner, online only', async () => {
-    const pay = await t.request('POST', `/api/orders/${orderId}/payments`, { token: production, body: { amount: 10, payment_type: 'Cash' } });
+    const pay = await t.request('POST', `/api/orders/${orderId}/payments`, { token: production, body: { amount: 10, payment_type: 'Cash', payer_name: 'Juan Dela Cruz' } });
     // no quote yet: refused, but any id works to check the void route's guards
     assert.equal(pay.status, 422);
     const url = `/api/orders/${orderId}/payments/some-payment/void`;
@@ -226,7 +231,7 @@ describe('M6 part 3 offline: misprints, waste, overheads, P&L, voids', () => {
     const offline = await t.request('POST', url, { token: owner, body: { reason: 'Refund' } });
     assert.deepEqual([offline.status, offline.body.error], [503, 'VOID_REQUIRES_CLOUD']);
     const forged = await t.request('POST', `/api/orders/${orderId}/payments`, {
-      token: owner, body: { amount: 10, payment_type: 'Cash', voids_payment_id: 'x' }
+      token: owner, body: { amount: 10, payment_type: 'Cash', payer_name: 'Juan Dela Cruz', voids_payment_id: 'x' }
     });
     assert.deepEqual([forged.status, forged.body.details[0].field], [400, 'voids_payment_id'], 'a void is never sent as a plain payment');
 

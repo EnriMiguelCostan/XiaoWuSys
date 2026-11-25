@@ -24,11 +24,19 @@ const CAPABILITIES = {
   record_delivery: WRITE_ROLES,   // migration 015: a batch delivered / picked up
   set_quote: OWNER_ONLY,
   apply_discount: OWNER_ONLY,     // reserved for PB 12
-  void_order: OWNER_ONLY,         // cancel an existing order (releases its stock)
+  void_order: OWNER_ONLY,         // void (reverse) a payment, delete an expense
+  // migration 017 (shop policies): cancelling. Anyone may cancel before approval (nothing is kept);
+  // once approved, the cancellation fee applies, so only the Owner or an Admin cancels.
+  cancel_order: WRITE_ROLES,
+  cancel_approved_order: MANAGER_ROLES,
   // Adviser consultation (second round): Staff and Production create orders; the Owner or an
   // Admin approves them
   approve_order: MANAGER_ROLES,
-  refund_payment: OWNER_ONLY,     // migration 015: money given back to the customer
+  refund_payment: MANAGER_ROLES,  // migration 015 / 017: money given back; an Admin up to the policy's suggestion
+  refund_above_policy: OWNER_ONLY,  // migration 017: refunding more than the policy suggests (goodwill)
+  adjust_price: MANAGER_ROLES,    // migration 017: a price cut after approval; an Admin up to the late-delivery suggestion
+  price_cut_above_policy: OWNER_ONLY, // migration 017: a bigger price cut than the late-delivery rule
+  add_items_after_approval: MANAGER_ROLES, // migration 017: add-ons to an approved order (priced on their own)
   complete_with_balance: OWNER_ONLY, // migration 015: hand over an order before it is fully paid
   verify_payment: MANAGER_ROLES,  // migration 015: confirm a non-cash payment arrived
   edit_payment: MANAGER_ROLES,    // migration 015: correct a payment's date / reference / payer

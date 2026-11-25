@@ -169,7 +169,7 @@ export function ConsumableRatesDialog({
                       id={`rate-qty-${r.key}`}
                       type="number"
                       min={0}
-                      step="0.001"
+                      step="any"
                       inputMode="decimal"
                       placeholder="e.g. 0.25"
                       value={r.quantity}

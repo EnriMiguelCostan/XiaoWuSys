@@ -6,7 +6,7 @@ const { normalizeRequiredItems, computeAvailable, evaluateCapacity } = require('
 const { isConnectionError, sendDbError } = require('../utils/dbErrors');
 const { validateDriveLink } = require('../utils/validateDriveLink');
 const { LOCAL_NOW, PG_VERSION_FORMAT, offlineUpdateBookkeeping } = require('../utils/localSync');
-const { createValidator, PAYMENT_TYPES, PRODUCTION_STATUSES } = require('../utils/validation');
+const { createValidator, PAYMENT_TYPES, PRODUCTION_STATUSES, localDateTime } = require('../utils/validation');
 const {
   selectList, serialize, listRecords, getRecord, locateRecord, readLocal, userNames, sqliteRun, sqliteAll, sqliteGet,
   withPgTransaction, withLocalTransaction, ACTIVE_ITEM_SQL
@@ -35,6 +35,14 @@ const { checkPaymentDetails, PAYMENT_DETAIL_NAMES } = require('../services/domai
 const VERSION_SQL = `to_char(last_modified, '${PG_VERSION_FORMAT}')`;
 const READ_ROLES = rolesWith('view_orders');
 const CANCEL_REASON_MAX = 1000; // PB 23
+const { cancellationTerms, productionProgress, addOnCheck } = require('../services/domain/orderPolicies');
+const { priceLines, parsePrintAreas } = require('../services/domain/pricing');
+// migration 017: the order's lines with what the progress rules need
+const PROGRESS_LINES_SQL = `SELECT oi.line_item_id, oi.product_type, oi.size, oi.quantity, oi.qty_printed, oi.qty_pressed, oi.inventory_id,
+        COALESCE(ii.requires_pressing, FALSE) AS requires_pressing,
+        LOWER(BTRIM(COALESCE(ii.item_category, ''))) = 'consumable' AS is_consumable, ii.unit_cost::text AS unit_cost
+   FROM order_items oi LEFT JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id
+  WHERE oi.order_id = $1 ORDER BY oi.line_item_id`;
 const ORDER_DESCRIPTION_MAX = 2000; // migration 015
 const CUSTOMER_ARCHIVED = {
   error: 'RECORD_ARCHIVED',
@@ -518,6 +526,10 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
       branch,
       design_files: designFiles.files,
       design_files_available: designFiles.available,
+      // migration 017: production progress, the cancellation terms and the late-delivery suggestion
+      progress: context.progress,
+      cancel_terms: context.cancel_terms,
+      late_cut: context.late_cut,
       payments: view.payments.map((p) => ({ ...p, needs_verification: needsVerification(p) && !p.voided })),
       totals: {
         item_count: items.records.length,
@@ -525,7 +537,8 @@ router.get('/:order_id', requireRole(READ_ROLES), async (req, res) => {
         pieces: context.fulfillment.pieces_ordered,
         ...paymentTotals(order, view.summary),
         total_refunded: view.summary.total_refunded,
-        max_refund: context.max_refund
+        max_refund: context.max_refund,
+        admin_max_refund: context.admin_max_refund
       },
       allowed_actions: allowedActions(order, req.user.role, view.summary, context),
       stock_check: buildStockCheck(order, items.records, evaluation),
@@ -650,10 +663,12 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
     return res.status(400).json({ error: 'VALIDATION_FAILED', message: normalized.error });
   }
   const needs = normalized.items;
+  // migration 017: the order's lines (with their print areas); needs = the same, merged per material
+  const orderLines = normalized.lines || needs.map((n) => ({ ...n, print_areas: null }));
   const reserve = !resolution && needs.length > 0;
   const ids = needs.map((n) => n.inventory_id).sort();
   const order_id = crypto.randomUUID();
-  const lineIds = needs.map(() => crypto.randomUUID());
+  const lineIds = orderLines.map(() => crypto.randomUUID());
 
   // ---- Online: lock stock rows (fixed order = no deadlocks), check, insert, reserve ----
   const createInCloud = () => withPgTransaction(req.pgPool, async (client) => {
@@ -683,14 +698,17 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
         design_drive_link, branch_id || null]
     );
     const items = [];
-    for (let i = 0; i < needs.length; i++) {
-      const { inventory_id, quantity_needed } = needs[i];
+    for (let i = 0; i < orderLines.length; i++) {
+      const { inventory_id, quantity_needed, print_areas } = orderLines[i];
       const item = await client.query(
-        `INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity, price)
-         VALUES ($1, $2, $3, $4, $5, 0) RETURNING ${selectList('order_items', 'pg')}`,
-        [lineIds[i], order_id, inventory_id, rowsById.get(inventory_id).item_name.slice(0, 100), quantity_needed]
+        `INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity, price, print_areas)
+         VALUES ($1, $2, $3, $4, $5, 0, $6) RETURNING ${selectList('order_items', 'pg')}`,
+        [lineIds[i], order_id, inventory_id, rowsById.get(inventory_id).item_name.slice(0, 100), quantity_needed, print_areas]
       );
       items.push(serialize('order_items', item.rows[0]));
+    }
+    for (let i = 0; i < needs.length; i++) {
+      const { inventory_id, quantity_needed } = needs[i];
       if (reserve) {
         const reserved = await client.query(
           `UPDATE inventory_items SET quantity_reserved = quantity_reserved + $1
@@ -725,19 +743,22 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
       [order_id, customer_id, production_deadline, production_status, total_quote_amount, reserve ? 1 : 0, order_description,
         design_drive_link, branch_id || null]);
     const items = [];
+    for (let i = 0; i < orderLines.length; i++) {
+      const { inventory_id, quantity_needed, print_areas } = orderLines[i];
+      await sqliteRun(tx,
+        `INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity, price, print_areas, sync_status, last_modified)
+         VALUES (?, ?, ?, ?, ?, 0, ?, 'pending_insert', ${LOCAL_NOW})`,
+        [lineIds[i], order_id, inventory_id, rowsById.get(inventory_id).item_name.slice(0, 100), quantity_needed, print_areas]);
+      items.push(await readLocal(tx, 'order_items', lineIds[i]));
+    }
     for (let i = 0; i < needs.length; i++) {
       const { inventory_id, quantity_needed } = needs[i];
-      await sqliteRun(tx,
-        `INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity, price, sync_status, last_modified)
-         VALUES (?, ?, ?, ?, ?, 0, 'pending_insert', ${LOCAL_NOW})`,
-        [lineIds[i], order_id, inventory_id, rowsById.get(inventory_id).item_name.slice(0, 100), quantity_needed]);
       if (reserve) {
         await sqliteRun(tx,
           `UPDATE inventory_items SET quantity_reserved = quantity_reserved + ?,
              ${offlineUpdateBookkeeping('inventory_items', ['quantity_reserved'])} WHERE inventory_id = ?`,
           [quantity_needed, inventory_id]);
       }
-      items.push(await readLocal(tx, 'order_items', lineIds[i]));
     }
     return { source: 'local', record: await readLocal(tx, 'order_profiles', order_id), items };
   });
@@ -797,13 +818,23 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 //   The allowed moves are STATUS_TRANSITIONS in services/domain/orderLifecycle.js:
 //   Pending  -> Cancelled             (Pending -> Approved only via POST /:order_id/approve, Owner or Admin)
 //   Approved -> Printing | Cancelled
-//   Printing -> Pressing | Ready | Completed | Cancelled   (PB 14: Pressing is optional; migration 016:
-//                                                           only for orders with a T-shirt)
-//   Pressing -> Ready | Completed | Cancelled
-//   Ready    -> Completed | Cancelled   (migration 016: production done, waiting for the hand-over)
+//   Printing -> Pressing | Ready | Cancelled   (migration 017: Pressing for orders with an item that needs
+//                                               the heat press, once everything is printed; Ready
+//                                               straight from Printing only when nothing needs pressing)
+//   Pressing -> Ready | Cancelled              (once everything is pressed)
+//   Ready    -> Completed | Cancelled          (production done, waiting for the hand-over and payment)
 //   Delayed  -> Pending (reserves stock now; 409 INSUFFICIENT_INVENTORY if short) | Cancelled
 //   Completed / Cancelled are final.
-// PB 2: Cancelled is a void, so only the Owner may send it (403 VOID_OWNER_ONLY otherwise).
+// Migration 017 (shop policies):
+//   Start Printing needs a quote (422 QUOTE_REQUIRED_BEFORE_PRINTING) and, for an order approved
+//     without one, the 50% downpayment (402 DOWNPAYMENT_REQUIRED).
+//   Pressing / Ready need every piece printed / ready (409 PRINTING_NOT_FINISHED / NOT_ALL_READY);
+//     complete_counts: true marks them all done first (the screen asks before sending it).
+//   Cancelled: anyone before approval; after approval the Owner or an Admin (403 CANCEL_NEEDS_MANAGER).
+//     The cancellation fee of the stage is stored (cancellation_fee, cancelled_stage); shop_fault: true
+//     (Owner / Admin) keeps nothing. Pieces already made are recorded as waste ("Printed for an order
+//     that was cancelled"): in Printing the printed ones (printed: [{ line_item_id, quantity }], or the
+//     recorded progress), in Pressing / Ready all of them. The rest goes back to available stock.
 // PB 23: the reason (cancellation_reason, optional for older screens) is saved on the order, and
 // every cancel writes audit_log 'order_voided' (reason, what was released) in the same transaction.
 // PB 13: Printing is only reachable through Approved, so production can never start without
@@ -841,7 +872,21 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
   if (allow_unpaid && !can(req.user.role, 'complete_with_balance')) {
     return res.status(403).json({ error: 'COMPLETE_WITH_BALANCE_OWNER_ONLY', message: 'Only the Owner can hand over an order that is not fully paid.' });
   }
-  if (status === 'Cancelled' && !can(req.user.role, capabilityForTransition(status))) return voidOwnerOnly(res);
+  // migration 017
+  const complete_counts = v.bool(body.complete_counts, 'complete_counts');
+  const shop_fault = v.bool(body.shop_fault, 'shop_fault');
+  const printedSent = body.printed === undefined || body.printed === null ? null : body.printed;
+  if (printedSent !== null && (!Array.isArray(printedSent) || printedSent.some((p) => !p || typeof p.line_item_id !== 'string'
+    || !Number.isInteger(p.quantity) || p.quantity < 0))) {
+    v.errors.push({ field: 'printed', message: 'Printed pieces must be a list of { line_item_id, quantity } with whole numbers.' });
+  }
+  if (v.failed()) return v.send(res);
+  if ((shop_fault || printedSent) && status !== 'Cancelled') {
+    return res.status(400).json({ error: 'VALIDATION_FAILED', message: 'shop_fault and printed are only sent when cancelling.' });
+  }
+  if (shop_fault && !can(req.user.role, 'cancel_approved_order')) {
+    return res.status(403).json({ error: 'CANCEL_NEEDS_MANAGER', message: "Only the Owner or an Admin can mark a cancellation as the shop's fault." });
+  }
   if (cancellation_reason && status !== 'Cancelled') {
     return res.status(400).json({
       error: 'VALIDATION_FAILED',
@@ -885,21 +930,104 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
       if (!(STATUS_TRANSITIONS[from] || []).includes(status)) {
         throw new Rejected(409, {
           error: 'INVALID_STATUS_TRANSITION',
-          message: `An order that is ${from} cannot be changed to ${status}.`,
+          message: from === 'Printing' || from === 'Pressing'
+            ? `An order that is ${from} is marked Ready first, then Completed when it is handed over and paid.`
+            : `An order that is ${from} cannot be changed to ${status}.`,
           allowed: STATUS_TRANSITIONS[from] || []
         });
       }
+      if (status === 'Cancelled' && !can(req.user.role, capabilityForTransition(status, from))) {
+        throw new Rejected(403, {
+          error: 'CANCEL_NEEDS_MANAGER',
+          message: 'This job order is approved, so a cancellation fee applies. Only the Owner or an Admin can cancel it.'
+        });
+      }
 
+      // migration 017: production progress per item
+      const progressLines = (await client.query(PROGRESS_LINES_SQL, [order_id])).rows;
+      const progress = productionProgress(progressLines, from);
+      const fillCounts = async (withPressing) => {
+        await client.query(
+          `UPDATE order_items oi SET qty_printed = oi.quantity,
+                  qty_pressed = CASE WHEN $2::boolean AND EXISTS (SELECT 1 FROM inventory_items ii
+                                       WHERE ii.inventory_id = oi.inventory_id AND ii.requires_pressing) THEN oi.quantity ELSE oi.qty_pressed END
+            WHERE oi.order_id = $1`, [order_id, withPressing]);
+      };
+
+      // migration 017: never printed without an agreed price and its downpayment
+      if (status === 'Printing') {
+        const quoteC = toCentavos(order.total_quote_amount);
+        if (quoteC <= 0) {
+          throw new Rejected(422, {
+            error: 'QUOTE_REQUIRED_BEFORE_PRINTING',
+            message: 'Set the price first: an order is never printed without an agreed quote. Ask the Owner to calculate it.'
+          });
+        }
+        const paidRow = await client.query('SELECT COALESCE(ROUND(SUM(amount) * 100), 0)::bigint AS c FROM payments WHERE order_id = $1', [order_id]);
+        const requiredC = Math.ceil(quoteC / 2);
+        if (Number(paidRow.rows[0].c) < requiredC) {
+          throw new Rejected(402, {
+            error: 'DOWNPAYMENT_REQUIRED',
+            message: `Printing starts after the 50% downpayment: ${pesoText(toPesos(requiredC - Number(paidRow.rows[0].c)))} more is needed.`,
+            required_downpayment: toPesos(requiredC), total_paid: toPesos(Number(paidRow.rows[0].c))
+          });
+        }
+      }
       // migration 015 / 016: Pressing is the heat press, for T-shirts only (adviser consultation)
       if (status === 'Pressing') {
-        const shirts = await client.query(
-          `SELECT 1 FROM order_items oi JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id
-            WHERE oi.order_id = $1 AND ii.requires_pressing LIMIT 1`, [order_id]);
-        if (shirts.rowCount === 0) {
+        if (!progress.needs_pressing) {
           throw new Rejected(409, {
             error: 'PRESSING_NOT_APPLICABLE',
-            message: 'Pressing is the heat-press step for T-shirts. This order has none, so it goes to Ready or straight to Completed.'
+            message: 'Pressing is the heat-press step for T-shirts. This order has none, so it goes to Ready.'
           });
+        }
+        if (!progress.all_printed) {
+          if (!complete_counts) {
+            throw new Rejected(409, {
+              error: 'PRINTING_NOT_FINISHED',
+              message: `${progress.printed} of ${progress.pieces} pieces are printed. Record the rest as printed first (or confirm that all are printed).`,
+              progress
+            });
+          }
+          await fillCounts(false);
+        }
+      }
+      if (status === 'Ready') {
+        if (from === 'Printing' && progress.needs_pressing) {
+          throw new Rejected(409, { error: 'PRESSING_REQUIRED', message: 'This order has T-shirts: they go through Pressing before the order is Ready.' });
+        }
+        if (!progress.all_ready) {
+          if (!complete_counts) {
+            throw new Rejected(409, {
+              error: 'NOT_ALL_READY',
+              message: `${progress.ready} of ${progress.pieces} pieces are ready. Record the rest first (or confirm that all are done).`,
+              progress
+            });
+          }
+          await fillCounts(true);
+        }
+      }
+      // migration 017: the cancellation fee of the stage, and the pieces already made
+      let cancelTerms = null;
+      const madePieces = [];
+      if (status === 'Cancelled') {
+        const pays = await client.query(
+          'SELECT amount::text AS amount, payment_type, is_refund, voids_payment_id, verified_at FROM payments WHERE order_id = $1', [order_id]);
+        const paidSummary = paymentSummary({ quote: order.total_quote_amount, payments: pays.rows });
+        cancelTerms = cancellationTerms({ status: from, bill: order.total_quote_amount, paidNet: paidSummary.total_paid, shopFault: shop_fault });
+        const sentById = new Map((printedSent || []).map((p) => [p.line_item_id, p.quantity]));
+        for (const l of progressLines) {
+          if (l.is_consumable || !l.inventory_id) continue;
+          let made = 0;
+          if (from === 'Pressing' || from === 'Ready') made = Number(l.quantity);
+          else if (from === 'Printing') made = sentById.has(l.line_item_id) ? sentById.get(l.line_item_id) : Number(l.qty_printed || 0);
+          if (made > Number(l.quantity)) {
+            throw new Rejected(422, { error: 'PROGRESS_TOO_HIGH', message: `${l.product_type}: only ${l.quantity} ordered, so at most ${l.quantity} can be printed.` });
+          }
+          if (made > 0) madePieces.push({ line: l, quantity: made });
+        }
+        if (from === 'Printing' && printedSent) {
+          for (const m of madePieces) await client.query('UPDATE order_items SET qty_printed = $2 WHERE line_item_id = $1', [m.line.line_item_id, m.quantity]);
         }
       }
       // migration 015: what Completed needs (paid, every piece handed over), checked on the locked order
@@ -998,6 +1126,29 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
         }
         stockReserved = false;
       }
+      // migration 017: pieces already made for a cancelled order are waste (they cannot be sold to
+      // anyone else); what was never printed went back to available stock above
+      const cancelLosses = [];
+      for (const m of madePieces) {
+        const loss_id = crypto.randomUUID();
+        await setMovementContext(client, {
+          type: 'loss', reference_type: 'material_loss', reference_id: loss_id, reference_no: order.tracking_no,
+          note: 'Printed for an order that was cancelled', actor: req.user
+        });
+        const taken = await client.query(
+          `UPDATE inventory_items SET quantity_available = GREATEST(quantity_available - $1, 0)
+            WHERE inventory_id = $2 RETURNING item_name`, [m.quantity, m.line.inventory_id]);
+        if (taken.rowCount === 0) continue;
+        await client.query(
+          `INSERT INTO material_loss (loss_id, order_id, inventory_id, quantity_lost, loss_reason, financial_cost,
+                                      reason_code, loss_category, production_stage, is_statistical_anomaly)
+           VALUES ($1, $2, $3, $4::int, $5, ROUND(COALESCE($6::numeric, 0) * $4::int, 2), 'cancelled_after_printing', NULL, 'Cancelled', FALSE)`,
+          [loss_id, order_id, m.line.inventory_id, m.quantity, `Printed for order ${order.tracking_no || order_id} before it was cancelled (${from})`,
+            m.line.unit_cost]);
+        cancelLosses.push({ inventory_id: m.line.inventory_id, item_name: taken.rows[0].item_name, quantity: m.quantity });
+        if (!stockChanges.some((c) => c.inventory_id === m.line.inventory_id)) stockChanges.push({ inventory_id: m.line.inventory_id, item_name: taken.rows[0].item_name, wasted: m.quantity });
+      }
+      await clearMovementContext(client);
       // PB 22: the blanks' unit cost at completion, so a later catalog cost change never moves a past P&L
       if (status === 'Completed') {
         await client.query(
@@ -1025,9 +1176,13 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
 
       const updated = await client.query(
         `UPDATE order_profiles SET production_status = $2::text, stock_reserved = $3, last_edited_by = $4, last_edited_role = $5,
-                cancellation_reason = CASE WHEN $2::text = 'Cancelled' THEN $6::text ELSE cancellation_reason END
+                cancellation_reason = CASE WHEN $2::text = 'Cancelled' THEN $6::text ELSE cancellation_reason END,
+                cancellation_fee = CASE WHEN $2::text = 'Cancelled' THEN $7::numeric ELSE cancellation_fee END,
+                cancelled_stage = CASE WHEN $2::text = 'Cancelled' THEN $8::text ELSE cancelled_stage END,
+                cancel_shop_fault = CASE WHEN $2::text = 'Cancelled' THEN $9::boolean ELSE cancel_shop_fault END
           WHERE order_id = $1 RETURNING ${selectList('order_profiles', 'pg')}`,
-        [order_id, status, stockReserved, ...editorOf(req), cancellation_reason]);
+        [order_id, status, stockReserved, ...editorOf(req), cancellation_reason,
+          cancelTerms ? cancelTerms.fee : null, cancelTerms ? from : null, Boolean(cancelTerms && cancelTerms.shop_fault)]);
       await recordStatusChange(client, req, order_id, from, status);
       if (status === 'Cancelled') {
         // PB 23: the void's own trail (the payments stay as they are; they are voided one by one)
@@ -1040,11 +1195,14 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
             from_status: from,
             reason: cancellation_reason,
             tracking_no: order.tracking_no,
-            released: stockChanges.filter((c) => c.released).map((c) => ({ inventory_id: c.inventory_id, item_name: c.item_name, quantity: c.released }))
+            released: stockChanges.filter((c) => c.released).map((c) => ({ inventory_id: c.inventory_id, item_name: c.item_name, quantity: c.released })),
+            // migration 017
+            cancellation_fee: cancelTerms.fee, suggested_refund: cancelTerms.suggested_refund, shop_fault: cancelTerms.shop_fault,
+            wasted: cancelLosses
           }
         });
       }
-      return { order: serialize('order_profiles', updated.rows[0]), stockChanges, consumables, from };
+      return { order: serialize('order_profiles', updated.rows[0]), stockChanges, consumables, from, cancelTerms, cancelLosses };
     });
 
     pushStockChange(req, changedIds, `order_${status.toLowerCase()}`);
@@ -1058,10 +1216,16 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
         ? (status === 'Cancelled' ? ' Reserved materials were released back to stock.'
           : status === 'Completed' ? ' Reserved materials were used up from stock.'
             : ' Materials were reserved.')
-        : '') + consumablesSentence(result.consumables),
+        : '') + consumablesSentence(result.consumables)
+        + (result.cancelTerms
+          ? ` Cancellation fee: ${pesoText(result.cancelTerms.fee)}; suggested refund: ${pesoText(result.cancelTerms.suggested_refund)}.`
+            + (result.cancelLosses.length ? ` ${result.cancelLosses.reduce((s, l) => s + l.quantity, 0)} piece(s) already made were recorded as waste.` : '')
+          : ''),
       order: withDeadlineFlag(result.order),
       stock_changes: result.stockChanges,
-      consumables_deducted: result.consumables
+      consumables_deducted: result.consumables,
+      cancel_terms: result.cancelTerms,
+      wasted: result.cancelLosses
     });
   } catch (err) {
     if (err instanceof Rejected) return res.status(err.status).json(err.body);
@@ -1075,6 +1239,76 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
     }
     sendDbError(res, err, 'changing order status');
   }
+});
+
+// ==========================================
+// MIGRATION 017: ITEMS ADDED TO AN APPROVED ORDER ("add-ons", services/domain/orderPolicies.js)
+// Called in the items transaction once the order row is locked. Pending / Delayed: nothing to do
+// (the quote is calculated again as usual). Approved / Printing: an Owner or Admin only; close to
+// the deadline or a big add-on needs a later deadline (new_deadline) or a reason to keep it
+// (keep_deadline_reason). The new lines are priced at the whole order's tier, marked
+// added_after_approval, and their total is added to the bill. Later statuses: refused.
+// -> { addOn, added_amount, deadline }
+// ==========================================
+const ADD_ON_ORDER_SQL = `SELECT production_status, stock_reserved, to_char(production_deadline, 'YYYY-MM-DD') AS production_deadline, tracking_no,
+        total_quote_amount::text AS total_quote_amount, subtotal_amount::text AS subtotal_amount
+   FROM order_profiles WHERE order_id = $1 FOR UPDATE`;
+const readAddOnFields = (body, v) => ({
+  new_deadline: body.new_deadline === undefined || body.new_deadline === null ? null : v.deadline(body.new_deadline, 'new_deadline'),
+  keep_deadline_reason: v.optionalString(body.keep_deadline_reason, 'keep_deadline_reason', 300)
+});
+const checkAddOn = async (client, req, order_id, ord, newLines, fields) => {
+  const status = ord.production_status;
+  const existing = await client.query(
+    `SELECT COALESCE(SUM(oi.quantity) FILTER (WHERE LOWER(BTRIM(COALESCE(ii.item_category, ''))) <> 'consumable'), 0)::int AS pieces,
+            COALESCE(SUM(oi.quantity), 0)::int AS quantity
+       FROM order_items oi LEFT JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id WHERE oi.order_id = $1`, [order_id]);
+  const addPieces = newLines.reduce((s, l) => s + Number(l.quantity || 0), 0);
+  const check = addOnCheck({
+    status, isManager: can(req.user.role, 'add_items_after_approval'), deadline: ord.production_deadline,
+    today: localDateTime(new Date()).slice(0, 10), existingPieces: existing.rows[0].pieces, addPieces,
+    newDeadline: fields.new_deadline, keepReason: fields.keep_deadline_reason
+  });
+  if (check.status) throw new Rejected(check.status, check.body);
+  return { ...check, tierQuantity: existing.rows[0].quantity + addPieces };
+};
+const priceAddOn = async (client, req, order_id, ord, lineIds, check, fields) => {
+  if (!check.addOn) return { addOn: false, added_amount: 0, deadline: null };
+  const { rows: items } = await client.query(
+    `SELECT oi.line_item_id, oi.product_type, oi.size, oi.quantity, oi.inventory_id, oi.print_areas,
+            ii.item_name, ii.selling_price::text AS selling_price, ii.unit_cost::text AS unit_cost, ii.print_pricing
+       FROM order_items oi LEFT JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id
+      WHERE oi.line_item_id = ANY($1::text[])`, [lineIds]);
+  const hasQuote = toCentavos(ord.total_quote_amount) > 0;
+  let addedC = 0;
+  if (hasQuote) {
+    const priced = priceLines(items, { tierQuantity: check.tierQuantity });
+    if (priced.problem) throw new Rejected(priced.problem.status, priced.problem.body);
+    for (const l of priced.lines) {
+      await client.query('UPDATE order_items SET price = $2 WHERE line_item_id = $1', [l.line_item_id, l.unit_price]);
+    }
+    addedC = priced.subtotalC;
+  }
+  await client.query('UPDATE order_items SET added_after_approval = TRUE WHERE line_item_id = ANY($1::text[])', [lineIds]);
+  const moved = fields.new_deadline && String(fields.new_deadline).slice(0, 10) > String(ord.production_deadline).slice(0, 10);
+  await client.query(
+    `UPDATE order_profiles SET subtotal_amount = subtotal_amount + $2::numeric, total_quote_amount = total_quote_amount + $2::numeric,
+            production_deadline = COALESCE($3::timestamp, production_deadline), last_edited_by = $4, last_edited_role = $5
+      WHERE order_id = $1`,
+    [order_id, toPesos(addedC), moved ? fields.new_deadline : null, req.user.user_id, req.user.role]);
+  await writeAudit(client, {
+    entity: 'order_profiles', entity_id: order_id, action: 'items_added_after_approval', actor: req.user,
+    details: {
+      tracking_no: ord.tracking_no, status: ord.production_status, line_item_ids: lineIds, pieces: items.reduce((s, i) => s + Number(i.quantity), 0),
+      added_amount: toPesos(addedC), deadline_before: ord.production_deadline, deadline_after: moved ? fields.new_deadline : ord.production_deadline,
+      keep_deadline_reason: moved ? null : fields.keep_deadline_reason || null
+    }
+  });
+  return { addOn: true, added_amount: toPesos(addedC), deadline: moved ? fields.new_deadline : null };
+};
+const ADD_ON_NEEDS_CLOUD = new Rejected(503, {
+  error: 'ADD_ON_REQUIRES_CLOUD',
+  message: 'This job order is approved, so adding items changes its bill. That needs the cloud connection. Try again when online.'
 });
 
 // ==========================================
@@ -1108,6 +1342,11 @@ router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess
   // migration 015: a material is always a catalog item. Sizes, names and numbers are print
   // details (POST /:order_id/print-details), so they never stop the quote or the approval.
   const inventory_id = v.id(body.inventory_id, 'inventory_id', { required: false });
+  // migration 017: the line's print areas (per-area items) and, for add-ons, the deadline decision
+  const areas = parsePrintAreas(body.print_areas);
+  if (areas.error) v.errors.push({ field: 'print_areas', message: areas.error });
+  const print_areas = areas.areas && areas.areas.length ? JSON.stringify(areas.areas) : null;
+  const addOnFields = readAddOnFields(body, v);
   if (!inventory_id && !v.failed()) {
     v.errors.push({
       field: 'inventory_id',
@@ -1117,7 +1356,7 @@ router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess
   if (v.failed()) return v.send(res);
 
   const line_item_id = crypto.randomUUID();
-  const values = [line_item_id, order_id, inventory_id || null, product_type, quantity, size, custom_name, custom_number];
+  const values = [line_item_id, order_id, inventory_id || null, product_type, quantity, size, custom_name, custom_number, print_areas];
   const missingStock = () => new Rejected(404, {
     error: 'INVENTORY_ITEM_NOT_FOUND',
     message: `Inventory item ${inventory_id} does not exist (or is in the Recycle Bin).`
@@ -1132,8 +1371,9 @@ router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess
 
   // ---- Online: lock order (+ stock row), insert, and reserve if the order holds stock ----
   const addInCloud = () => withPgTransaction(req.pgPool, async (client) => {
-    const ord = await client.query('SELECT stock_reserved FROM order_profiles WHERE order_id = $1 FOR UPDATE', [order_id]);
+    const ord = await client.query(ADD_ON_ORDER_SQL, [order_id]);
     if (ord.rowCount === 0) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: `Order ${order_id} does not exist.` });
+    const addOn = await checkAddOn(client, req, order_id, ord.rows[0], [{ quantity }], addOnFields);
     let stockRow = null;
     if (inventory_id) {
       const stock = await client.query(
@@ -1143,8 +1383,8 @@ router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess
       stockRow = stock.rows[0];
     }
     const { rows } = await client.query(
-      `INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity, size, custom_name, custom_number)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING ${selectList('order_items', 'pg')}`,
+      `INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity, size, custom_name, custom_number, print_areas)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING ${selectList('order_items', 'pg')}`,
       values
     );
     const reserve = Boolean(stockRow && ord.rows[0].stock_reserved);
@@ -1157,13 +1397,18 @@ router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess
         throw shortageRejection(checkStock([{ inventory_id, quantity_needed: quantity }], new Map([[inventory_id, stockRow]])).shortages, 'cloud');
       }
     }
-    return { source: 'cloud', record: serialize('order_items', rows[0]), reserved: reserve };
+    const priced = await priceAddOn(client, req, order_id, ord.rows[0], [line_item_id], addOn, addOnFields);
+    const fresh = priced.addOn
+      ? (await client.query(`SELECT ${selectList('order_items', 'pg')} FROM order_items WHERE line_item_id = $1`, [line_item_id])).rows[0]
+      : rows[0];
+    return { source: 'cloud', record: serialize('order_items', fresh), reserved: reserve, addOn: priced };
   });
 
   // ---- Offline: allowed only when nothing has to be reserved ----
   const addLocally = async () => {
-    const local = await sqliteGet(req.localDb, 'SELECT stock_reserved FROM order_profiles WHERE order_id = ?', [order_id]);
+    const local = await sqliteGet(req.localDb, 'SELECT stock_reserved, production_status FROM order_profiles WHERE order_id = ?', [order_id]);
     if (!local) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: `Order ${order_id} does not exist.` });
+    if (!['Pending', 'Delayed'].includes(local.production_status)) throw ADD_ON_NEEDS_CLOUD;
     if (inventory_id) {
       const stock = await sqliteGet(req.localDb,
         `SELECT 1 AS ok FROM inventory_items WHERE inventory_id = ? AND ${ACTIVE_ITEM_SQL}`, [inventory_id]);
@@ -1172,8 +1417,8 @@ router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess
     }
     await sqliteRun(
       req.localDb,
-      `INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity, size, custom_name, custom_number, sync_status, last_modified)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+      `INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity, size, custom_name, custom_number, print_areas, sync_status, last_modified)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
       values
     );
     return { source: 'local', record: await readLocal(req.localDb, 'order_items', line_item_id), reserved: false };
@@ -1204,13 +1449,21 @@ router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess
 
     if (result.reserved) pushStockChange(req, [inventory_id], 'order_item_reserved');
     res.status(201).json({
-      message: result.source === 'cloud'
+      message: (result.source === 'cloud'
         ? (result.reserved ? 'Order item added and its stock reserved.' : 'Order item added.')
-        : 'Order item saved locally (Offline Mode).',
+        : 'Order item saved locally (Offline Mode).')
+        + (result.addOn && result.addOn.addOn
+          ? ` Added to the approved order: the bill went up by ${pesoText(result.addOn.added_amount)}${result.addOn.deadline ? ' and the deadline moved' : ''}.`
+          : ''),
       source: result.source,
       item: result.record,
-      stock_reserved: result.reserved
+      stock_reserved: result.reserved,
+      add_on: result.addOn || null
     });
+    if (result.addOn && result.addOn.addOn) {
+      const { record: fresh } = await getRecord(req, 'order_profiles', order_id).catch(() => ({ record: null }));
+      if (fresh) pushOrderChange(req, fresh);
+    }
   } catch (err) {
     if (err instanceof Rejected) return res.status(err.status).json(err.body);
     sendDbError(res, err, 'adding order item');
@@ -1278,12 +1531,16 @@ router.post('/:order_id/items/bulk', requireRole(WRITE_ROLES), requireOrderEditA
       + 'That needs the cloud connection (and the order synced). Try again when online.'
   });
   const columns = ['line_item_id', 'inventory_id', 'product_type', 'quantity', 'size', 'custom_name', 'custom_number'];
+  const av = createValidator();
+  const addOnFields = readAddOnFields(req.body || {}, av);
+  if (av.failed()) return av.send(res);
 
   // ---- Online: lock the order and the stock rows (inventory_id order), insert all, reserve ----
   const addInCloud = () => withPgTransaction(req.pgPool, async (client) => {
-    const ord = await client.query('SELECT production_status, stock_reserved FROM order_profiles WHERE order_id = $1 FOR UPDATE', [order_id]);
+    const ord = await client.query(ADD_ON_ORDER_SQL, [order_id]);
     if (ord.rowCount === 0) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
     if (!EDITABLE_STATUSES.includes(ord.rows[0].production_status)) throw closed(ord.rows[0].production_status);
+    const addOn = await checkAddOn(client, req, order_id, ord.rows[0], rows, addOnFields);
     const stock = ids.length === 0 ? { rows: [] } : await client.query(
       `SELECT inventory_id, item_name, quantity_available, quantity_reserved FROM inventory_items
         WHERE inventory_id = ANY($1::text[]) AND ${ACTIVE_ITEM_SQL} ORDER BY inventory_id FOR UPDATE`, [ids]);
@@ -1308,8 +1565,12 @@ router.post('/:order_id/items/bulk', requireRole(WRITE_ROLES), requireOrderEditA
         if (held.rowCount !== 1) throw shortageRejection(checkStock([n], rowsById).shortages, 'cloud');
       }
     }
-    const byId = new Map(inserted.rows.map((r) => [r.line_item_id, serialize('order_items', r)]));
-    return { source: 'cloud', items: rows.map((r) => byId.get(r.line_item_id)), reserved: reserve };
+    const priced = await priceAddOn(client, req, order_id, ord.rows[0], rows.map((r) => r.line_item_id), addOn, addOnFields);
+    const finalRows = priced.addOn
+      ? (await client.query(`SELECT ${selectList('order_items', 'pg')} FROM order_items WHERE line_item_id = ANY($1::text[])`, [rows.map((r) => r.line_item_id)])).rows
+      : inserted.rows;
+    const byId = new Map(finalRows.map((r) => [r.line_item_id, serialize('order_items', r)]));
+    return { source: 'cloud', items: rows.map((r) => byId.get(r.line_item_id)), reserved: reserve, addOn: priced };
   });
 
   // ---- Offline: allowed only when nothing has to be reserved ----
@@ -1317,6 +1578,7 @@ router.post('/:order_id/items/bulk', requireRole(WRITE_ROLES), requireOrderEditA
     const local = await sqliteGet(tx, 'SELECT production_status, stock_reserved FROM order_profiles WHERE order_id = ?', [order_id]);
     if (!local) throw new Rejected(404, { error: 'ORDER_NOT_FOUND', message: NOT_FOUND_TEXT.Order });
     if (!EDITABLE_STATUSES.includes(local.production_status)) throw closed(local.production_status);
+    if (!['Pending', 'Delayed'].includes(local.production_status)) throw ADD_ON_NEEDS_CLOUD;
     const found = ids.length === 0 ? [] : await sqliteAll(tx,
       `SELECT inventory_id FROM inventory_items WHERE inventory_id IN (${ids.map(() => '?').join(', ')}) AND ${ACTIVE_ITEM_SQL}`, ids);
     const present = new Set(found.map((r) => r.inventory_id));
@@ -2041,8 +2303,8 @@ router.post('/:order_id/quote', requireRole(rolesWith('set_quote')), requireOrde
         });
       }
       const items = await client.query(
-        `SELECT oi.line_item_id, oi.product_type, oi.size, oi.quantity, oi.inventory_id,
-                ii.item_name, ii.selling_price::text AS selling_price
+        `SELECT oi.line_item_id, oi.product_type, oi.size, oi.quantity, oi.inventory_id, oi.print_areas,
+                ii.item_name, ii.selling_price::text AS selling_price, ii.unit_cost::text AS unit_cost, ii.print_pricing
            FROM order_items oi LEFT JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id
           WHERE oi.order_id = $1 ORDER BY oi.line_item_id`, [order_id]);
       const shown = quoteBreakdown(before);
