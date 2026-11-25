@@ -143,7 +143,7 @@ const policyContext = (order, materials, view, fulfillment, deliveries, plans) =
     plans, piecesOrdered: fulfillment.pieces_ordered, today
   });
   return {
-    progress: productionProgress(materials),
+    progress: productionProgress(materials, order.production_status),
     cancel_terms: terms,
     admin_max_refund: limits.admin_max,
     late_cut: late,

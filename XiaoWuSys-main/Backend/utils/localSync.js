@@ -51,7 +51,7 @@ const TABLE_EXTRA_COLUMNS = {
   inventory_items: [['deleted_at', 'TEXT'], ['deleted_by', 'TEXT'], ['purged_at', 'TEXT'],
                     ['unit', "TEXT NOT NULL DEFAULT 'pcs'"], ['supplier', 'TEXT'], ['selling_price', 'REAL NOT NULL DEFAULT 0'],
                     ['supplier_id', 'TEXT'], ['has_sizes', 'INTEGER DEFAULT 0'], ['requires_pressing', 'INTEGER DEFAULT 0'],
-                    ['print_pricing', "TEXT NOT NULL DEFAULT 'included'"]],
+                    ['print_pricing', "TEXT DEFAULT 'included'"]],
   users: [['is_active', 'INTEGER NOT NULL DEFAULT 1'], ['tokens_valid_after', 'TEXT'], ['removed_at', 'TEXT'], ['removed_by', 'TEXT']],
   order_profiles: [['stock_reserved', 'INTEGER NOT NULL DEFAULT 0'], ['approved_by', 'TEXT'], ['approved_at', 'TEXT'],
                    ['tracking_no', 'TEXT'], ['last_edited_by', 'TEXT'], ['last_edited_role', 'TEXT'],
@@ -59,14 +59,14 @@ const TABLE_EXTRA_COLUMNS = {
                    ['discount_reason', 'TEXT'], ['cancellation_reason', 'TEXT'], ['archived_at', 'TEXT'], ['archived_by', 'TEXT'],
                    ['order_description', 'TEXT'], ['labor_amount', 'REAL DEFAULT 0'], ['incidental_amount', 'REAL DEFAULT 0'],
                    ['adjustment_amount', 'REAL DEFAULT 0'], ['adjustment_reason', 'TEXT'], ['branch_id', 'TEXT'],
-                   ['cancellation_fee', 'REAL'], ['cancelled_stage', 'TEXT'], ['cancel_shop_fault', 'INTEGER NOT NULL DEFAULT 0'],
+                   ['cancellation_fee', 'REAL'], ['cancelled_stage', 'TEXT'], ['cancel_shop_fault', 'INTEGER DEFAULT 0'],
                    ['client_delay_reason', 'TEXT']],
   customers: [['archived_at', 'TEXT'], ['archived_by', 'TEXT'], ['customer_type', "TEXT DEFAULT 'Individual'"],
               ['contact_person', 'TEXT'], ['email', 'TEXT'], ['address', 'TEXT'], ['social_media', 'TEXT'], ['notes', 'TEXT'],
               ['contact_person_number', 'TEXT'], ['contact_person_email', 'TEXT'], ['contact_person_social', 'TEXT']],
   order_deliveries: [['plan_id', 'TEXT']],
-  order_items: [['unit_cost', 'REAL'], ['qty_printed', 'INTEGER NOT NULL DEFAULT 0'], ['qty_pressed', 'INTEGER NOT NULL DEFAULT 0'],
-                ['print_areas', 'TEXT'], ['added_after_approval', 'INTEGER NOT NULL DEFAULT 0']],
+  order_items: [['unit_cost', 'REAL'], ['qty_printed', 'INTEGER DEFAULT 0'], ['qty_pressed', 'INTEGER DEFAULT 0'],
+                ['print_areas', 'TEXT'], ['added_after_approval', 'INTEGER DEFAULT 0']],
   order_consumables_log: [['unit_cost', 'REAL']]
 };
 

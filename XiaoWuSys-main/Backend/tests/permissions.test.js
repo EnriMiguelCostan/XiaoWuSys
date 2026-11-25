@@ -138,14 +138,14 @@ describe('Owner-only rules and order screens (API)', () => {
     assert.equal((await t.request('GET', '/api/auth/me')).status, 401);
   });
 
-  it('shows the Owner the price and cancel buttons, and hides them from the Admin (who may approve)', async () => {
+  it('shows the Owner the price and cancel buttons, and the Admin the approve and cancel buttons', async () => {
     const owner = await t.request('GET', `/api/orders/${pendingId}`, { token: t.tokens.owner });
     assert.equal(owner.status, 200, owner.text);
     assert.deepEqual([owner.body.allowed_actions.approve, owner.body.allowed_actions.edit_quote, owner.body.allowed_actions.statuses],
       [true, true, ['Cancelled']]);
     const admin = await t.request('GET', `/api/orders/${pendingId}`, { token: t.tokens.admin });
     assert.deepEqual([admin.body.allowed_actions.approve, admin.body.allowed_actions.edit_quote, admin.body.allowed_actions.statuses],
-      [true, false, []]);
+      [true, false, ['Cancelled']]);
     assert.equal(admin.body.allowed_actions.edit_deadline, true);
     const list = await t.request('GET', '/api/orders', { token: t.tokens.admin });
     assert.ok(Array.isArray(list.body.capabilities) && !list.body.capabilities.includes('set_quote'));

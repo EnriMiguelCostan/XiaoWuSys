@@ -198,14 +198,23 @@ const addOnCheck = ({ status, isManager, deadline, today, existingPieces, addPie
 
 // ---------- Production progress ----------
 // lines: [{ line_item_id, product_type, quantity, qty_printed, qty_pressed, requires_pressing, is_consumable }]
+// status: the order's status. A step already passed says it for itself (orders from before
+// migration 017 have no counts): Pressing = everything printed, Ready / Completed = all done.
 // -> { lines: [{ ..., needs_pressing, printed, pressed, ready }], pieces, printed, pressed, ready, press_pieces,
 //      all_printed, all_ready, needs_pressing }
-const productionProgress = (lines = []) => {
+const PRINTED_BY_STATUS = ['Pressing', 'Ready', 'Completed'];
+const DONE_BY_STATUS = ['Ready', 'Completed'];
+// The counts a status implies, on top of the recorded ones
+const effectiveCounts = (l, status) => {
+  const quantity = Number(l.quantity || 0);
+  const needs = Boolean(l.requires_pressing);
+  const printed = PRINTED_BY_STATUS.includes(status) ? quantity : Math.min(quantity, Math.max(0, Number(l.qty_printed || 0)));
+  const pressed = !needs ? 0 : DONE_BY_STATUS.includes(status) ? quantity : Math.min(printed, Math.max(0, Number(l.qty_pressed || 0)));
+  return { quantity, needs, printed, pressed };
+};
+const productionProgress = (lines = [], status = null) => {
   const shown = lines.filter((l) => !l.is_consumable).map((l) => {
-    const quantity = Number(l.quantity || 0);
-    const needs = Boolean(l.requires_pressing);
-    const printed = Math.min(quantity, Math.max(0, Number(l.qty_printed || 0)));
-    const pressed = needs ? Math.min(printed, Math.max(0, Number(l.qty_pressed || 0))) : 0;
+    const { quantity, needs, printed, pressed } = effectiveCounts(l, status);
     return {
       line_item_id: l.line_item_id, product_type: l.product_type, size: l.size || null, quantity,
       needs_pressing: needs, printed, pressed, ready: needs ? pressed : printed
@@ -229,7 +238,11 @@ const productionProgress = (lines = []) => {
 // A progress update -> { problem } | { updates: [{ line_item_id, printed, pressed }] }
 //   sent: [{ line_item_id, printed?, pressed? }]   (whole numbers; left out = unchanged)
 //   delivered: pieces already handed over (ready may never drop below it)
-const checkProgressUpdate = ({ lines, sent, delivered = 0 }) => {
+const checkProgressUpdate = ({ lines: recorded, sent, delivered = 0, status = null }) => {
+  const lines = recorded.map((l) => {
+    const e = effectiveCounts(l, status);
+    return { ...l, qty_printed: e.printed, qty_pressed: e.pressed };
+  });
   if (!Array.isArray(sent) || sent.length === 0) {
     return { problem: { status: 400, body: { error: 'VALIDATION_FAILED', message: 'Send at least one line.' } } };
   }
@@ -272,5 +285,5 @@ module.exports = {
   CANCEL_POLICY, CANCEL_STAGE_RULES, cancellationTerms, refundLimits,
   LATE_POLICY, latePercent, lateDeliveryCut,
   ADD_ON_POLICY, addOnCheck,
-  productionProgress, checkProgressUpdate
+  productionProgress, checkProgressUpdate, effectiveCounts
 };

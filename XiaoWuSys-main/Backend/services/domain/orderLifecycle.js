@@ -273,7 +273,7 @@ const allowedActions = (order, role, summary = null, context = {}) => {
     manage_design_files: editable && can(role, 'edit_order'),
     // migration 017
     cancel: statuses.includes('Cancelled'),
-    update_progress: ['Printing', 'Pressing', 'Ready'].includes(status) && can(role, 'change_status'),
+    update_progress: ['Printing', 'Pressing'].includes(status) && can(role, 'change_status'),
     status_needs_confirm: progress ? {
       Pressing: statuses.includes('Pressing') && !progress.all_printed,
       Ready: statuses.includes('Ready') && !progress.all_ready

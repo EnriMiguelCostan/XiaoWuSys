@@ -203,11 +203,11 @@ describe('Customers and orders', () => {
     assert.equal(status.body.error, 'STATUS_CHANGE_REQUIRES_CLOUD');
   });
 
-  it('lets only the Owner cancel (void) an order', async () => {
+  it('lets anyone cancel an order before approval (the change itself needs the cloud)', async () => {
     for (const who of ['staff', 'admin']) {
       const r = await t.request('PATCH', `/api/orders/${orderId}/status`, { token: t.tokens[who], body: { status: 'Cancelled' } });
-      assert.equal(r.status, 403, who);
-      assert.equal(r.body.error, 'VOID_OWNER_ONLY');
+      assert.equal(r.status, 503, who);
+      assert.equal(r.body.error, 'STATUS_CHANGE_REQUIRES_CLOUD');
     }
     assert.equal((await t.get('SELECT production_status AS s FROM order_profiles WHERE order_id = ?', [orderId])).s, 'Pending');
   });

@@ -58,8 +58,8 @@ describe('Migration 015 rules (no database)', () => {
   });
 
   it('knows what each payment method needs, and what may be refunded', () => {
-    assert.deepEqual(checkPaymentDetails('Cheque', { bank_name: 'BPI' }).errors.map((e) => e.field), ['cheque_no', 'cheque_date']);
-    assert.equal(checkPaymentDetails('Cheque', { bank_name: 'BPI', cheque_no: '0012', cheque_date: '2026-02-30' }).errors[0].field, 'cheque_date');
+    assert.deepEqual(checkPaymentDetails('Cheque', { bank_name: 'BPI' }).errors.map((e) => e.field), ['payer_name', 'cheque_no', 'cheque_date'], 'migration 017: who paid is required');
+    assert.equal(checkPaymentDetails('Cheque', { bank_name: 'BPI', cheque_no: '0012', cheque_date: '2026-02-30', payer_name: 'Ana' }).errors[0].field, 'cheque_date');
     assert.deepEqual(checkPaymentDetails('Cash', { reference_no: 'x' }).details.reference_no, null, 'unused details are not kept');
     assert.deepEqual(checkPaymentDetails('Maya', {}, { allOptional: true }).errors, [], 'a refund forces nothing');
     assert.equal(maxRefund({ status: 'Cancelled', quote: 1000, paidNet: 600 }), 600);

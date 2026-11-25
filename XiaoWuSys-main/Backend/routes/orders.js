@@ -945,7 +945,7 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
 
       // migration 017: production progress per item
       const progressLines = (await client.query(PROGRESS_LINES_SQL, [order_id])).rows;
-      const progress = productionProgress(progressLines);
+      const progress = productionProgress(progressLines, from);
       const fillCounts = async (withPressing) => {
         await client.query(
           `UPDATE order_items oi SET qty_printed = oi.quantity,

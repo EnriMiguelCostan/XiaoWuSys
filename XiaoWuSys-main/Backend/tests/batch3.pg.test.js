@@ -106,6 +106,8 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
     production = server.tokenFor('u-production', 'Staff');
     staff = server.tokenFor('u-staff', 'Production');
 
+    // The by-hand runs of 009 / 010 above put back their own status CHECK: 016 adds Ready to it again
+    await pool.query(readMigration('016_adviser_followup.sql'));
     await insertOrder('o-shirts');
     await pool.query(`INSERT INTO order_items (line_item_id, order_id, inventory_id, product_type, quantity) VALUES ('l-1', 'o-shirts', 'i-shirt', 'Custom Shirt', 10)`);
     await pool.query(`INSERT INTO payments (payment_id, order_id, amount, payment_type) VALUES ('p-1', 'o-shirts', 500, 'Cash')`);

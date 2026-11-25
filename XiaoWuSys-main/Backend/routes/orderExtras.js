@@ -487,13 +487,13 @@ const checkPlannedBatch = ({ plans, others, plan_id, quantity }) => {
 };
 
 // migration 017: how many pieces are ready (printed, and pressed where needed)
-const readyPieces = async (client, order_id) => {
+const readyPieces = async (client, order_id, status = null) => {
   const { rows } = await client.query(
     `SELECT oi.line_item_id, oi.product_type, oi.quantity, oi.qty_printed, oi.qty_pressed,
             COALESCE(ii.requires_pressing, FALSE) AS requires_pressing,
             LOWER(BTRIM(COALESCE(ii.item_category, ''))) = 'consumable' AS is_consumable
        FROM order_items oi LEFT JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id WHERE oi.order_id = $1`, [order_id]);
-  return productionProgress(rows).ready;
+  return productionProgress(rows, status).ready;
 };
 const notReady = (canGive, ready) => new Rejected(409, {
   error: 'PIECES_NOT_READY',
@@ -545,7 +545,7 @@ router.post('/:order_id/deliveries', requireRole(rolesWith('record_delivery')), 
     }
     const f = fulfillmentSummary({ pieces_ordered: pieces, deliveries });
     if (fields.quantity > f.pieces_remaining) throw tooMany(f.pieces_remaining);
-    const ready = await readyPieces(client, order_id);
+    const ready = await readyPieces(client, order_id, order.production_status);
     if (fields.quantity > ready - f.pieces_delivered) throw notReady(ready - f.pieces_delivered, ready);
     const plan = checkPlannedBatch({ plans, others: deliveries, plan_id: fields.plan_id, quantity: fields.quantity });
     const batch_no = deliveries.reduce((m, d) => Math.max(m, d.batch_no), 0) + 1;
@@ -582,7 +582,7 @@ router.patch('/:order_id/deliveries/:delivery_id', requireRole(rolesWith('record
       const others = fulfillmentSummary({ pieces_ordered: pieces, deliveries: otherRows });
       if (fields.quantity > others.pieces_remaining) throw tooMany(others.pieces_remaining);
       if (fields.quantity > current.quantity) {
-        const ready = await readyPieces(client, order_id);
+        const ready = await readyPieces(client, order_id, order.production_status);
         if (fields.quantity > ready - others.pieces_delivered) throw notReady(ready - others.pieces_delivered, ready);
       }
     }
@@ -1135,7 +1135,7 @@ router.post('/:order_id/price-adjustment', requireRole(rolesWith('adjust_price')
 // MIGRATION 017: PRODUCTION PROGRESS AND THE CLIENT'S DELAY
 // POST  /api/orders/:order_id/progress      { lines: [{ line_item_id, printed?, pressed? }] }   anyone who changes statuses
 //   How many pieces of each item are printed / pressed (pressed only for items that need the heat
-//   press). Printing, Pressing or Ready orders, online only. Pieces already handed over stay ready.
+//   press). Printing or Pressing orders, online only. Pieces already handed over stay ready.
 // PATCH /api/orders/:order_id/client-delay  { reason: string | null }   Owner / Admin
 //   The delay was the client's doing (late design, late payment, changes): no late-delivery price
 //   cut is suggested. null clears it.
@@ -1148,7 +1148,7 @@ router.post('/:order_id/progress', requireRole(rolesWith('change_status')), requ
     const result = await withPgTransaction(req.pgPool, async (client) => {
       const ord = await client.query('SELECT production_status FROM order_profiles WHERE order_id = $1 FOR UPDATE', [order_id]);
       if (ord.rowCount === 0) throw orderNotFound();
-      if (!['Printing', 'Pressing', 'Ready'].includes(ord.rows[0].production_status)) {
+      if (!['Printing', 'Pressing'].includes(ord.rows[0].production_status)) {
         throw new Rejected(409, {
           error: 'PROGRESS_NOT_ALLOWED',
           message: `This order is ${ord.rows[0].production_status}. Printed and pressed pieces are recorded while it is being printed or pressed.`
@@ -1161,7 +1161,7 @@ router.post('/:order_id/progress', requireRole(rolesWith('change_status')), requ
            FROM order_items oi LEFT JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id
           WHERE oi.order_id = $1 ORDER BY oi.line_item_id FOR UPDATE OF oi`, [order_id]);
       const delivered = (await client.query('SELECT COALESCE(SUM(quantity), 0)::int AS n FROM order_deliveries WHERE order_id = $1', [order_id])).rows[0].n;
-      const checked = checkProgressUpdate({ lines, sent, delivered });
+      const checked = checkProgressUpdate({ lines, sent, delivered, status: ord.rows[0].production_status });
       if (checked.problem) throw new Rejected(checked.problem.status, checked.problem.body);
       for (const u of checked.updates) {
         await client.query('UPDATE order_items SET qty_printed = $2, qty_pressed = $3 WHERE line_item_id = $1', [u.line_item_id, u.printed, u.pressed]);
