@@ -215,7 +215,7 @@ describe('M6 part 3 offline: misprints, waste, overheads, P&L, voids', () => {
   });
 
   it('keeps payment voids and order cancels for the Owner, online only', async () => {
-    const pay = await t.request('POST', `/api/orders/${orderId}/payments`, { token: production, body: { amount: 10, payment_type: 'Cash' } });
+    const pay = await t.request('POST', `/api/orders/${orderId}/payments`, { token: production, body: { amount: 10, payment_type: 'Cash', payer_name: 'Juan Dela Cruz' } });
     // no quote yet: refused, but any id works to check the void route's guards
     assert.equal(pay.status, 422);
     const url = `/api/orders/${orderId}/payments/some-payment/void`;
@@ -226,7 +226,7 @@ describe('M6 part 3 offline: misprints, waste, overheads, P&L, voids', () => {
     const offline = await t.request('POST', url, { token: owner, body: { reason: 'Refund' } });
     assert.deepEqual([offline.status, offline.body.error], [503, 'VOID_REQUIRES_CLOUD']);
     const forged = await t.request('POST', `/api/orders/${orderId}/payments`, {
-      token: owner, body: { amount: 10, payment_type: 'Cash', voids_payment_id: 'x' }
+      token: owner, body: { amount: 10, payment_type: 'Cash', payer_name: 'Juan Dela Cruz', voids_payment_id: 'x' }
     });
     assert.deepEqual([forged.status, forged.body.details[0].field], [400, 'voids_payment_id'], 'a void is never sent as a plain payment');
 

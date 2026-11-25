@@ -3,10 +3,13 @@
 //
 //   Pending  -> Cancelled             (Pending -> Approved only through Approve: Owner or Admin)
 //   Approved -> Printing | Cancelled
-//   Printing -> Pressing | Ready | Completed | Cancelled   (Pressing is optional: only T-shirts are
-//                                                   heat-pressed; tarpaulins and stickers skip it)
-//   Pressing -> Ready | Completed | Cancelled
-//   Ready    -> Completed | Cancelled  (migration 016: production done, waiting to be handed over)
+//   Printing -> Pressing | Ready | Cancelled   (migration 017: Pressing when the order has an item
+//                                       that needs the heat press, and only once everything is
+//                                       printed; Ready straight from Printing only when nothing
+//                                       needs pressing)
+//   Pressing -> Ready | Cancelled              (once everything is pressed)
+//   Ready    -> Completed | Cancelled          (production done, waiting to be handed over and paid;
+//                                       Completed = handed over and paid: the order is closed)
 //   Delayed  -> Pending (reserves stock) | Cancelled
 //   Completed / Cancelled are final.
 //
@@ -20,8 +23,8 @@ const { localDateTime } = require('../../utils/validation');
 const STATUS_TRANSITIONS = {
   Pending: ['Cancelled'],
   Approved: ['Printing', 'Cancelled'],
-  Printing: ['Pressing', 'Ready', 'Completed', 'Cancelled'],
-  Pressing: ['Ready', 'Completed', 'Cancelled'],
+  Printing: ['Pressing', 'Ready', 'Cancelled'],
+  Pressing: ['Ready', 'Cancelled'],
   Ready: ['Completed', 'Cancelled'],
   Delayed: ['Pending', 'Cancelled'],
   Completed: [],
@@ -41,11 +44,18 @@ const IN_PRODUCTION_STATUSES = ['Printing', 'Pressing', 'Ready'];
 // be approved without a quote. Its price can then still be set later, until the order is closed.
 // So the quote is locked when the order is closed, or approved WITH a quote (the downpayment was
 // checked against that amount).
+// Migration 017: and from the moment printing starts, the price is final (an order is never
+// printed without an agreed price), so Start Printing needs a quote.
 const quoteLocked = (status, quote) =>
-  CLOSED_STATUSES.includes(status) || (QUOTE_FROZEN_STATUSES.includes(status) && Number(quote || 0) > 0);
+  CLOSED_STATUSES.includes(status) || IN_PRODUCTION_STATUSES.includes(status)
+  || (QUOTE_FROZEN_STATUSES.includes(status) && Number(quote || 0) > 0);
 
-// Which capability a status change needs. Cancelling an existing order is a void (Owner only).
-const capabilityForTransition = (to) => (to === 'Cancelled' ? 'void_order' : 'change_status');
+// Which capability a status change needs. Migration 017: anyone may cancel an order that is not
+// approved yet (nothing is kept); after approval the cancellation fee applies (Owner or Admin).
+const capabilityForTransition = (to, from = null) => {
+  if (to !== 'Cancelled') return 'change_status';
+  return from && APPROVABLE_STATUSES.includes(from) ? 'cancel_order' : 'cancel_approved_order';
+};
 
 const canTransition = (from, to) => (STATUS_TRANSITIONS[from] || []).includes(to);
 
@@ -67,8 +77,9 @@ const ARCHIVED_REASON = 'This order is archived. Restore it first if you need to
 const isArchived = (record) => Boolean(record && record.archived_at);
 
 // ---------- Migration 015: deliveries and what "Completed" means ----------
-// Pieces can be handed over (in batches) once the job order is approved, while it is open.
-const DELIVERY_STATUSES = ['Approved', 'Printing', 'Pressing', 'Ready'];
+// Pieces can be handed over (in batches) once printing has started, while it is open, and only
+// as many as are ready (migration 017: printed, and pressed when they need it).
+const DELIVERY_STATUSES = ['Printing', 'Pressing', 'Ready'];
 const DELIVERY_METHODS = ['Pick-up', 'Delivery', 'Courier'];
 
 // Migration 016: batches planned ahead (order_delivery_plans). A planned batch is
@@ -136,8 +147,8 @@ const completionCheck = ({ order, summary, fulfillment, unverified = 0 }) => {
   const missing = [];
   const warnings = [];
   const status = order && order.production_status;
-  if (!IN_PRODUCTION_STATUSES.includes(status)) {
-    missing.push({ code: 'NOT_IN_PRODUCTION', message: 'Printing must have started before the order can be completed.' });
+  if (status !== 'Ready') {
+    missing.push({ code: 'NOT_READY', message: 'Mark the order Ready first: every piece printed (and pressed where needed).' });
   }
   const remaining = summary ? Number(summary.remaining) : 0;
   if (summary && summary.quote > 0 && remaining > 0) {
@@ -191,7 +202,8 @@ const allowedActions = (order, role, summary = null, context = {}) => {
       void_payment: false, log_loss: false, archive_order: false, restore_order: can(role, 'manage_accounts'),
       edit_description: false, add_print_details: false, record_delivery: false, max_delivery: 0, complete_blocked_reason: null,
       complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: false, edit_payment: false, adjust_price: false,
-      approve_without_quote: false, plan_deliveries: false, manage_design_files: false
+      approve_without_quote: false, plan_deliveries: false, manage_design_files: false,
+      cancel: false, update_progress: false, max_adjustment: 0, status_needs_confirm: {}
     };
   }
   const status = order && order.production_status;
@@ -201,10 +213,13 @@ const allowedActions = (order, role, summary = null, context = {}) => {
   const mayPay = Boolean(status) && can(role, 'record_payment');
   const quoteOpen = EDITABLE_STATUSES.includes(status) && !quoteLocked(status, order && order.total_quote_amount);
   const pressing = context.needs_pressing !== undefined ? context.needs_pressing : context.has_garments;
+  const progress = context.progress || null;
   const statuses = (STATUS_TRANSITIONS[status] || [])
-    .filter((to) => can(role, capabilityForTransition(to)))
-    // Pressing is the heat press for T-shirts (migration 016): everything else skips it
-    .filter((to) => to !== 'Pressing' || pressing !== false);
+    .filter((to) => can(role, capabilityForTransition(to, status)))
+    // Pressing is the heat press for T-shirts (migration 016): everything else skips it, and an
+    // order with such an item is pressed before it is Ready (migration 017)
+    .filter((to) => to !== 'Pressing' || pressing !== false)
+    .filter((to) => !(to === 'Ready' && status === 'Printing' && pressing === true));
   const completion = context.completion || null;
   const fulfillment = context.fulfillment || null;
   const completeBlocked = statuses.includes('Completed') && completion && !completion.ready
@@ -221,35 +236,64 @@ const allowedActions = (order, role, summary = null, context = {}) => {
     generate_quote: quoteOpen && can(role, 'set_quote'),
     apply_discount: quoteOpen && can(role, 'set_quote') && can(role, 'apply_discount'),
     link_design: editable && can(role, 'edit_order'),
-    add_items: editable && can(role, 'edit_order'),
+    // migration 017: before approval anyone; Approved / Printing the Owner or an Admin (add-ons)
+    add_items: ['Pending', 'Delayed'].includes(status) ? can(role, 'edit_order')
+      : ['Approved', 'Printing'].includes(status) && can(role, 'add_items_after_approval'),
     record_payment: mayPay && !blocked,
     max_payment: mayPay && !blocked ? totals.remaining : 0,
     payment_blocked_reason: mayPay ? blocked : null,
     print_receipt: can(role, 'view_orders'),
     print_quote: can(role, 'view_orders') && Number(order && order.total_quote_amount) > 0,
     void_payment: Boolean(status) && can(role, 'void_order'),
-    log_loss: editable && can(role, 'edit_inventory'),
+    // migration 017: waste is recorded once printing has started (a loss before that is stock out)
+    log_loss: IN_PRODUCTION_STATUSES.includes(status) && can(role, 'edit_inventory'),
     archive_order: CLOSED_STATUSES.includes(status) && can(role, 'manage_accounts'),
     restore_order: false,
     // migration 015
     edit_description: editable && can(role, 'edit_order'),
     add_print_details: editable && can(role, 'edit_order'),
-    record_delivery: DELIVERY_STATUSES.includes(status) && can(role, 'record_delivery') && Boolean(fulfillment) && fulfillment.pieces_remaining > 0,
-    max_delivery: DELIVERY_STATUSES.includes(status) && fulfillment ? fulfillment.pieces_remaining : 0,
+    record_delivery: DELIVERY_STATUSES.includes(status) && can(role, 'record_delivery') && deliverable(fulfillment, progress) > 0,
+    max_delivery: DELIVERY_STATUSES.includes(status) ? deliverable(fulfillment, progress) : 0,
     complete_blocked_reason: completeBlocked,
     complete_with_balance: statuses.includes('Completed') && onlyBalanceMissing && can(role, 'complete_with_balance'),
-    refund_payment: can(role, 'refund_payment') && Number(context.max_refund || 0) > 0,
-    max_refund: can(role, 'refund_payment') ? Number(context.max_refund || 0) : 0,
+    refund_payment: can(role, 'refund_payment') && refundMax(role, context) > 0,
+    max_refund: can(role, 'refund_payment') ? refundMax(role, context) : 0,
     verify_payment: can(role, 'verify_payment'),
     edit_payment: can(role, 'edit_payment'),
-    adjust_price: can(role, 'set_quote') && ['Approved', 'Printing', 'Pressing', 'Ready', 'Completed'].includes(status)
-      && (Number(totals.quote) > 0 || Number(order && order.adjustment_amount) > 0),
+    adjust_price: can(role, 'adjust_price') && ['Approved', 'Printing', 'Pressing', 'Ready', 'Completed'].includes(status)
+      && (Number(totals.quote) > 0 || Number(order && order.adjustment_amount) > 0)
+      && (can(role, 'price_cut_above_policy') || Number(context.late_cut_amount || 0) > 0 || Number(order && order.adjustment_amount) > 0),
+    max_adjustment: !can(role, 'adjust_price') || !['Approved', 'Printing', 'Pressing', 'Ready', 'Completed'].includes(status) ? 0
+      : can(role, 'price_cut_above_policy') ? Number(totals.quote || 0) + Number((order && order.adjustment_amount) || 0)
+        : Number(context.late_cut_amount || 0),
     // migration 016: batches planned ahead (number of pieces per batch, date, ready or not)
     // (can be planned from the start; a batch is marked ready once the job order is approved)
     plan_deliveries: editable && can(role, 'record_delivery'),
     // migration 016: design files uploaded from the computer
-    manage_design_files: editable && can(role, 'edit_order')
+    manage_design_files: editable && can(role, 'edit_order'),
+    // migration 017
+    cancel: statuses.includes('Cancelled'),
+    update_progress: ['Printing', 'Pressing', 'Ready'].includes(status) && can(role, 'change_status'),
+    status_needs_confirm: progress ? {
+      Pressing: statuses.includes('Pressing') && !progress.all_printed,
+      Ready: statuses.includes('Ready') && !progress.all_ready
+    } : {}
   };
+};
+
+// Pieces that may be handed over now: not yet handed over, and ready (migration 017)
+const deliverable = (fulfillment, progress) => {
+  if (!fulfillment) return 0;
+  const remaining = Number(fulfillment.pieces_remaining || 0);
+  if (!progress) return remaining;
+  return Math.max(0, Math.min(remaining, Number(progress.ready || 0) - Number(fulfillment.pieces_delivered || 0)));
+};
+// The largest refund this role may record (migration 017: an Admin up to the policy's suggestion)
+const refundMax = (role, context) => {
+  const ownerMax = Number(context.max_refund || 0);
+  if (can(role, 'refund_above_policy')) return ownerMax;
+  const adminMax = context.admin_max_refund === undefined ? ownerMax : Number(context.admin_max_refund || 0);
+  return Math.min(ownerMax, adminMax);
 };
 
 // ---------- PB 16: how close an open order is to its deadline ----------
@@ -313,5 +357,7 @@ module.exports = {
   DELIVERY_STATUSES,
   DELIVERY_METHODS,
   fulfillmentSummary,
-  completionCheck
+  completionCheck,
+  deliverable,
+  refundMax
 };

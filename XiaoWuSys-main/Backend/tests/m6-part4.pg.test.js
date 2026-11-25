@@ -89,7 +89,7 @@ describe('M6 part 4 on real PostgreSQL: archiving, cost history, load and stress
   it('keeps the unit cost of the moment an order is completed and its consumables are taken', async () => {
     await pool.query(`INSERT INTO consumable_rates (rate_id, product_inventory_id, consumable_inventory_id, quantity_per_piece, trigger_status)
                       VALUES ('r-1', 'i-shirt', 'i-ink', 2, 'Pressing')`);
-    await insertOrder('o-cost', 'Printing', { quote: 3000, lines: [['i-shirt', 5]], reserved: true });
+    await insertOrder('o-cost', 'Ready', { quote: 3000, lines: [['i-shirt', 5]], reserved: true }); // migration 017: completed from Ready
     const pnlBefore = (await call('GET', '/api/reports/pnl', owner)).body;
     // Migration 015: nothing has been paid, so only the Owner may hand it over, and must say so
     const refused = await call('PATCH', '/api/orders/o-cost/status', production, { status: 'Completed' });
@@ -130,13 +130,13 @@ describe('M6 part 4 on real PostgreSQL: archiving, cost history, load and stress
     const list = await call('GET', '/api/orders', production);
     assert.ok(!list.body.orders.some((o) => o.order_id === 'o-cost'));
     assert.ok((await call('GET', '/api/orders?include_archived=true', production)).body.orders.some((o) => o.order_id === 'o-cost'));
-    const pay = await call('POST', '/api/orders/o-cost/payments', production, { amount: 100, payment_type: 'Cash' });
+    const pay = await call('POST', '/api/orders/o-cost/payments', production, { amount: 100, payment_type: 'Cash', payer_name: 'Juan Dela Cruz' });
     assert.deepEqual([pay.status, pay.body.error], [409, 'RECORD_ARCHIVED']);
 
     const back = await call('POST', '/api/orders/o-cost/restore', owner);
     assert.equal(back.status, 200, back.text);
     assert.equal(back.body.order.archived_at, null);
-    assert.equal((await call('POST', '/api/orders/o-cost/payments', production, { amount: 100, payment_type: 'Cash' })).status, 201);
+    assert.equal((await call('POST', '/api/orders/o-cost/payments', production, { amount: 100, payment_type: 'Cash', payer_name: 'Juan Dela Cruz' })).status, 201);
     assert.deepEqual((await audits('o-cost')).map((a) => [a.action, a.performed_role]),
       [['completed_with_balance', 'Owner'], ['order_archived', 'Admin'], ['order_restored', 'Owner']]);
   });

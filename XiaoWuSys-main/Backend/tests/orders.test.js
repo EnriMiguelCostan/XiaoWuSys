@@ -129,9 +129,9 @@ describe('Customers and orders', () => {
   });
 
   it('records payments and shows the balance', async () => {
-    let r = await t.request('POST', `/api/orders/${orderId}/payments`, { token, body: { amount: 26250, payment_type: 'GCash', reference_no: '1004 123 456789' } });
+    let r = await t.request('POST', `/api/orders/${orderId}/payments`, { token, body: { amount: 26250, payment_type: 'GCash', payer_name: 'Juan Dela Cruz', reference_no: '1004 123 456789' } });
     assert.equal(r.status, 201);
-    r = await t.request('POST', `/api/orders/${orderId}/payments`, { token, body: { amount: 1000.5, payment_type: 'Cash' } });
+    r = await t.request('POST', `/api/orders/${orderId}/payments`, { token, body: { amount: 1000.5, payment_type: 'Cash', payer_name: 'Juan Dela Cruz' } });
     assert.equal(r.status, 201);
     const d = await t.request('GET', `/api/orders/${orderId}`, { token: t.tokens.production });
     assert.equal(d.status, 200);

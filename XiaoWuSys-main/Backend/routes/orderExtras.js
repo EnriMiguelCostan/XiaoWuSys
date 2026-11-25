@@ -58,6 +58,8 @@ const {
 } = require('../services/domain/payments');
 const { resolveAdjustment, ADJUSTMENT_REASON_MAX, quoteBreakdown, computeQuote, INCIDENTAL_PERCENT_MAX } = require('../services/domain/pricing');
 const { normalizeRequiredItems } = require('../services/capacity');
+const { PRINT_SIZES, PRINT_PLACEMENTS, VOLUME_TIERS } = require('../services/domain/pricing');
+const { productionProgress, refundLimits, lateDeliveryCut, checkProgressUpdate } = require('../services/domain/orderPolicies');
 const { GARMENT_SIZES, PRINT_LIMITS, checkPrintLine, overListed, defaultMaterialFor } = require('../services/domain/printDetails');
 const { catalogFacts, describeMaterials, piecesOf } = require('../services/orderContext');
 const { writeAudit } = require('../services/auditLog');
@@ -83,7 +85,8 @@ const needsCloud = (what) => ({
     payment_check: 'Checking or correcting a payment needs the cloud connection. Try again when online.',
     price_adjustment: 'A price cut needs the cloud connection, so every branch sees the same bill. Try again when online.',
     delivery_plan: 'Planning delivery batches needs the cloud connection, so every branch sees the same plan. Nothing was saved. Try again when online.',
-    design_file: 'Design files are kept in the cloud, so attaching, opening or removing one needs the internet connection. Try again when online.'
+    design_file: 'Design files are kept in the cloud, so attaching, opening or removing one needs the internet connection. Try again when online.',
+    progress: 'Recording production progress needs the cloud connection, so every branch sees the same counts. Try again when online.'
   }[what]
 });
 const sendError = (res, err, context, cloudBody) => {
@@ -110,7 +113,11 @@ router.get('/options', requireRole(rolesWith('view_orders')), (req, res) => {
     refund_reasons: REFUND_REASONS,
     delivery_methods: DELIVERY_METHODS,
     garment_sizes: GARMENT_SIZES,
-    print_limits: PRINT_LIMITS
+    print_limits: PRINT_LIMITS,
+    // migration 017: print areas that price a per-area item (blank + each print), and the tiers
+    print_sizes: Object.entries(PRINT_SIZES).map(([size, s]) => ({ size, label: s.label, price: s.price })),
+    print_placements: PRINT_PLACEMENTS,
+    volume_tiers: VOLUME_TIERS
   });
 });
 
@@ -143,12 +150,12 @@ router.post('/quote-preview', requireRole(rolesWith('set_quote')), async (req, r
   if (v.failed()) return v.send(res);
 
   const ids = normalized.items.map((i) => i.inventory_id);
-  const SQL_COLUMNS = 'inventory_id, item_name, selling_price';
+  const SQL_COLUMNS = 'inventory_id, item_name, selling_price, unit_cost, print_pricing';
   let rows;
   let source = 'cloud';
   try {
     rows = (await req.pgPool.query(
-      `SELECT inventory_id, item_name, selling_price::text AS selling_price FROM inventory_items
+      `SELECT inventory_id, item_name, selling_price::text AS selling_price, unit_cost::text AS unit_cost, print_pricing FROM inventory_items
         WHERE inventory_id = ANY($1::text[]) AND deleted_at IS NULL AND purged_at IS NULL`, [ids])).rows;
   } catch (err) {
     if (!isConnectionError(err)) return sendDbError(res, err, 'quote preview');
@@ -171,11 +178,12 @@ router.post('/quote-preview', requireRole(rolesWith('set_quote')), async (req, r
     });
   }
   const { problem, quote } = computeQuote({
-    items: normalized.items.map((n, i) => {
+    items: normalized.lines.map((n, i) => {
       const row = byId.get(n.inventory_id);
       return {
         line_item_id: String(i + 1), product_type: row.item_name, quantity: n.quantity_needed,
-        inventory_id: n.inventory_id, item_name: row.item_name, selling_price: row.selling_price
+        inventory_id: n.inventory_id, item_name: row.item_name, selling_price: row.selling_price,
+        unit_cost: row.unit_cost, print_pricing: row.print_pricing, print_areas: n.print_areas
       };
     }),
     requested: { labor, incidental, incidental_percent },
@@ -183,7 +191,7 @@ router.post('/quote-preview', requireRole(rolesWith('set_quote')), async (req, r
   });
   if (problem) return res.status(problem.status).json({ ...problem.body, source });
   // line_item_id here is only a position: send the material instead
-  quote.lines = quote.lines.map((l, i) => ({ ...l, line_item_id: undefined, inventory_id: normalized.items[i].inventory_id }));
+  quote.lines = quote.lines.map((l, i) => ({ ...l, line_item_id: undefined, inventory_id: normalized.lines[i].inventory_id }));
   return res.status(200).json({ quote, source });
 });
 
@@ -193,10 +201,17 @@ const freshOrderView = async (req, order_id) => {
   const { allowed_actions, context, view } = await actionsWithContext(req, order);
   return {
     order: withDeadlineFlag(order),
-    totals: { ...paymentTotals(order, view.summary), total_refunded: view.summary.total_refunded, max_refund: context.max_refund },
+    totals: {
+      ...paymentTotals(order, view.summary), total_refunded: view.summary.total_refunded, max_refund: context.max_refund,
+      admin_max_refund: context.admin_max_refund
+    },
     allowed_actions,
     fulfillment: context.fulfillment,
-    completion: context.completion
+    completion: context.completion,
+    // migration 017
+    progress: context.progress,
+    cancel_terms: context.cancel_terms,
+    late_cut: context.late_cut
   };
 };
 
@@ -471,6 +486,23 @@ const checkPlannedBatch = ({ plans, others, plan_id, quantity }) => {
   return plan;
 };
 
+// migration 017: how many pieces are ready (printed, and pressed where needed)
+const readyPieces = async (client, order_id) => {
+  const { rows } = await client.query(
+    `SELECT oi.line_item_id, oi.product_type, oi.quantity, oi.qty_printed, oi.qty_pressed,
+            COALESCE(ii.requires_pressing, FALSE) AS requires_pressing,
+            LOWER(BTRIM(COALESCE(ii.item_category, ''))) = 'consumable' AS is_consumable
+       FROM order_items oi LEFT JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id WHERE oi.order_id = $1`, [order_id]);
+  return productionProgress(rows).ready;
+};
+const notReady = (canGive, ready) => new Rejected(409, {
+  error: 'PIECES_NOT_READY',
+  message: canGive > 0
+    ? `Only ${canGive} more piece${canGive === 1 ? ' is' : 's are'} ready to hand over (${ready} ready so far). Record the printing / pressing first.`
+    : `No more pieces are ready to hand over (${ready} ready so far). Record the printing / pressing first.`,
+  ready
+});
+
 const tooMany = (remaining) => new Rejected(409, {
   error: 'DELIVERY_EXCEEDS_REMAINING',
   message: remaining > 0 ? `Only ${remaining} piece${remaining === 1 ? ' is' : 's are'} left to hand over.` : 'Every piece of this order was already handed over.',
@@ -508,11 +540,13 @@ router.post('/:order_id/deliveries', requireRole(rolesWith('record_delivery')), 
         error: 'DELIVERY_NOT_ALLOWED',
         message: CLOSED_STATUSES.includes(order.production_status)
           ? `This order is ${order.production_status}, so no more pieces can be handed over.`
-          : 'Pieces can be handed over once the job order is approved.'
+          : 'Pieces can be handed over once printing has started, as they are finished.'
       });
     }
     const f = fulfillmentSummary({ pieces_ordered: pieces, deliveries });
     if (fields.quantity > f.pieces_remaining) throw tooMany(f.pieces_remaining);
+    const ready = await readyPieces(client, order_id);
+    if (fields.quantity > ready - f.pieces_delivered) throw notReady(ready - f.pieces_delivered, ready);
     const plan = checkPlannedBatch({ plans, others: deliveries, plan_id: fields.plan_id, quantity: fields.quantity });
     const batch_no = deliveries.reduce((m, d) => Math.max(m, d.batch_no), 0) + 1;
     const { rows } = await client.query(
@@ -547,6 +581,10 @@ router.patch('/:order_id/deliveries/:delivery_id', requireRole(rolesWith('record
     if (fields.quantity !== undefined) {
       const others = fulfillmentSummary({ pieces_ordered: pieces, deliveries: otherRows });
       if (fields.quantity > others.pieces_remaining) throw tooMany(others.pieces_remaining);
+      if (fields.quantity > current.quantity) {
+        const ready = await readyPieces(client, order_id);
+        if (fields.quantity > ready - others.pieces_delivered) throw notReady(ready - others.pieces_delivered, ready);
+      }
     }
     // migration 016: a hand-over of a planned batch stays within what is left of that batch
     if (plans.length > 0 && (fields.quantity !== undefined || fields.plan_id !== undefined)) {
@@ -692,7 +730,7 @@ router.patch('/:order_id/delivery-plans/:plan_id', requireRole(rolesWith('record
     let readyNote = '';
     if (fields.ready === true && !current.ready_at) {
       if (!DELIVERY_STATUSES.includes(order.production_status)) {
-        throw new Rejected(409, { error: 'NOT_APPROVED_YET', message: 'A batch can be marked ready once the job order is approved and in production.' });
+        throw new Rejected(409, { error: 'NOT_APPROVED_YET', message: 'A batch can be marked ready once printing has started.' });
       }
       sets.push("ready_at = NOW() AT TIME ZONE 'UTC'");
       put('ready_by', req.user.user_id);
@@ -894,13 +932,27 @@ router.post('/:order_id/refunds', requireRole(rolesWith('refund_payment')), requ
     if (!(await cloudOrder(req, res, 'refund'))) return;
     const saved = await withPgTransaction(req.pgPool, async (client) => {
       const ord = await client.query(
-        'SELECT production_status, tracking_no, total_quote_amount::text AS quote, archived_at IS NOT NULL AS archived FROM order_profiles WHERE order_id = $1 FOR UPDATE',
+        `SELECT production_status, tracking_no, total_quote_amount::text AS quote, cancellation_fee::text AS cancellation_fee,
+                archived_at IS NOT NULL AS archived FROM order_profiles WHERE order_id = $1 FOR UPDATE`,
         [order_id]);
       if (ord.rowCount === 0) throw orderNotFound();
       if (ord.rows[0].archived) throw new Rejected(409, RECORD_ARCHIVED);
       const paidNet = toPesos(await paidNetCentavos(client, order_id));
       const problem = checkRefund({ status: ord.rows[0].production_status, quote: Number(ord.rows[0].quote), paidNet, amount });
       if (problem) throw new Rejected(problem.status, problem.body);
+      // migration 017: an Admin refunds up to the policy's suggestion; more is the Owner's goodwill
+      const limits = refundLimits({
+        status: ord.rows[0].production_status, bill: Number(ord.rows[0].quote), paidNet,
+        cancellationFee: ord.rows[0].cancellation_fee === null ? null : Number(ord.rows[0].cancellation_fee)
+      });
+      if (!can(req.user.role, 'refund_above_policy') && toCentavos(amount) > toCentavos(limits.admin_max)) {
+        throw new Rejected(403, {
+          error: 'REFUND_ABOVE_POLICY',
+          message: `The shop policy suggests refunding at most ${pesoText(limits.admin_max)} (what was paid less the cancellation fee). `
+            + 'Only the Owner can give back more.',
+          suggested_refund: limits.admin_max
+        });
+      }
       const { rows } = await client.query(
         `INSERT INTO payments (payment_id, order_id, amount, payment_type, received_by, payment_date, is_refund, refund_reason, ${PAYMENT_DETAIL_NAMES.join(', ')})
          VALUES ($1, $2, -($3::numeric), $4, $5, COALESCE($6::timestamp, NOW() AT TIME ZONE 'UTC'), TRUE, $7,
@@ -1013,7 +1065,7 @@ router.patch('/:order_id/payments/:payment_id', requireRole(rolesWith('edit_paym
   }
 });
 
-router.post('/:order_id/price-adjustment', requireRole(rolesWith('set_quote')), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
+router.post('/:order_id/price-adjustment', requireRole(rolesWith('adjust_price')), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
   const { order_id } = req.params;
   const body = req.body || {};
   const v = createValidator();
@@ -1022,6 +1074,22 @@ router.post('/:order_id/price-adjustment', requireRole(rolesWith('set_quote')), 
   if (v.failed()) return v.send(res);
   try {
     if (!(await cloudOrder(req, res, 'price_adjustment'))) return;
+    // migration 017: an Admin gives a price cut up to the late-delivery suggestion; more is the Owner's
+    if (!can(req.user.role, 'price_cut_above_policy')) {
+      const { record: current } = await getRecord(req, 'order_profiles', order_id);
+      const { context } = current ? await actionsWithContext(req, current) : { context: null };
+      const allowedC = Math.max(toCentavos(context ? context.late_cut_amount : 0), toCentavos(current ? current.adjustment_amount : 0));
+      if (toCentavos(amount) > allowedC) {
+        return res.status(403).json({
+          error: 'PRICE_CUT_ABOVE_POLICY',
+          message: allowedC > 0
+            ? `The late-delivery rule suggests a price cut of at most ${pesoText(toPesos(allowedC))}. Only the Owner can give more.`
+            : 'This order is not late by the shop policy (1 day of grace), so only the Owner can give a price cut.',
+          suggested_cut: toPesos(allowedC),
+          late_cut: context ? context.late_cut : null
+        });
+      }
+    }
     await withPgTransaction(req.pgPool, async (client) => {
       const { rows } = await client.query(`SELECT ${selectList('order_profiles', 'pg')} FROM order_profiles WHERE order_id = $1 FOR UPDATE`, [order_id]);
       if (rows.length === 0) throw orderNotFound();
@@ -1060,6 +1128,86 @@ router.post('/:order_id/price-adjustment', requireRole(rolesWith('set_quote')), 
     });
   } catch (err) {
     sendError(res, err, 'saving a price cut', needsCloud('price_adjustment'));
+  }
+});
+
+// ==========================================
+// MIGRATION 017: PRODUCTION PROGRESS AND THE CLIENT'S DELAY
+// POST  /api/orders/:order_id/progress      { lines: [{ line_item_id, printed?, pressed? }] }   anyone who changes statuses
+//   How many pieces of each item are printed / pressed (pressed only for items that need the heat
+//   press). Printing, Pressing or Ready orders, online only. Pieces already handed over stay ready.
+// PATCH /api/orders/:order_id/client-delay  { reason: string | null }   Owner / Admin
+//   The delay was the client's doing (late design, late payment, changes): no late-delivery price
+//   cut is suggested. null clears it.
+// ==========================================
+router.post('/:order_id/progress', requireRole(rolesWith('change_status')), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
+  const { order_id } = req.params;
+  const sent = (req.body || {}).lines;
+  try {
+    if (!(await cloudOrder(req, res, 'progress'))) return;
+    const result = await withPgTransaction(req.pgPool, async (client) => {
+      const ord = await client.query('SELECT production_status FROM order_profiles WHERE order_id = $1 FOR UPDATE', [order_id]);
+      if (ord.rowCount === 0) throw orderNotFound();
+      if (!['Printing', 'Pressing', 'Ready'].includes(ord.rows[0].production_status)) {
+        throw new Rejected(409, {
+          error: 'PROGRESS_NOT_ALLOWED',
+          message: `This order is ${ord.rows[0].production_status}. Printed and pressed pieces are recorded while it is being printed or pressed.`
+        });
+      }
+      const { rows: lines } = await client.query(
+        `SELECT oi.line_item_id, oi.product_type, oi.size, oi.quantity, oi.qty_printed, oi.qty_pressed,
+                COALESCE(ii.requires_pressing, FALSE) AS requires_pressing,
+                LOWER(BTRIM(COALESCE(ii.item_category, ''))) = 'consumable' AS is_consumable
+           FROM order_items oi LEFT JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id
+          WHERE oi.order_id = $1 ORDER BY oi.line_item_id FOR UPDATE OF oi`, [order_id]);
+      const delivered = (await client.query('SELECT COALESCE(SUM(quantity), 0)::int AS n FROM order_deliveries WHERE order_id = $1', [order_id])).rows[0].n;
+      const checked = checkProgressUpdate({ lines, sent, delivered });
+      if (checked.problem) throw new Rejected(checked.problem.status, checked.problem.body);
+      for (const u of checked.updates) {
+        await client.query('UPDATE order_items SET qty_printed = $2, qty_pressed = $3 WHERE line_item_id = $1', [u.line_item_id, u.printed, u.pressed]);
+      }
+      await client.query("UPDATE order_profiles SET last_edited_by = $2, last_edited_role = $3 WHERE order_id = $1", [order_id, req.user.user_id, req.user.role]);
+      return checked.after;
+    });
+    await refreshLocalRows(req.pgPool, req.localDb, 'order_items', null).catch(() => {});
+    const view = await freshOrderView(req, order_id);
+    pushOrderChange(req, view.order);
+    res.status(200).json({
+      message: `${result.printed} of ${result.pieces} printed${result.needs_pressing ? `, ${result.pressed} of ${result.press_pieces} pressed` : ''}; ${result.ready} ready.`,
+      source: 'cloud', progress: result, ...view
+    });
+  } catch (err) {
+    sendError(res, err, 'recording production progress', needsCloud('progress'));
+  }
+});
+
+router.patch('/:order_id/client-delay', requireRole(rolesWith('adjust_price')), requireOrderEditAccess, refuseArchivedOrder, async (req, res) => {
+  const { order_id } = req.params;
+  const body = req.body || {};
+  const v = createValidator();
+  const reason = body.reason === null ? null : v.requiredString(body.reason, 'reason', 300);
+  if (v.failed()) return v.send(res);
+  try {
+    if (!(await cloudOrder(req, res, 'progress'))) return;
+    await withPgTransaction(req.pgPool, async (client) => {
+      const ord = await client.query('SELECT production_status, tracking_no, client_delay_reason FROM order_profiles WHERE order_id = $1 FOR UPDATE', [order_id]);
+      if (ord.rowCount === 0) throw orderNotFound();
+      await client.query('UPDATE order_profiles SET client_delay_reason = $2, last_edited_by = $3, last_edited_role = $4 WHERE order_id = $1',
+        [order_id, reason, req.user.user_id, req.user.role]);
+      await writeAudit(client, {
+        entity: 'order_profiles', entity_id: order_id, action: 'client_delay_marked', actor: req.user,
+        details: { tracking_no: ord.rows[0].tracking_no, before: ord.rows[0].client_delay_reason, after: reason }
+      });
+    });
+    await refreshLocalRows(req.pgPool, req.localDb, 'order_profiles', [order_id]).catch(() => {});
+    const view = await freshOrderView(req, order_id);
+    pushOrderChange(req, view.order);
+    res.status(200).json({
+      message: reason ? 'Marked as delayed by the client: no late-delivery price cut is suggested.' : "The client's delay was cleared.",
+      source: 'cloud', ...view
+    });
+  } catch (err) {
+    sendError(res, err, "saving the client's delay", needsCloud('progress'));
   }
 });
 

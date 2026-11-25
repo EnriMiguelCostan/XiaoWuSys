@@ -10,6 +10,8 @@ export type Capability =
   | 'record_delivery' | 'refund_payment' | 'complete_with_balance' | 'verify_payment' | 'edit_payment'
   | 'view_stock' | 'receive_stock' | 'issue_stock' | 'count_stock' | 'void_stock_document'
   | 'manage_suppliers' | 'archive_supplier' | 'edit_customer'
+  // migration 017
+  | 'cancel_order' | 'cancel_approved_order' | 'refund_above_policy' | 'adjust_price' | 'price_cut_above_policy' | 'add_items_after_approval'
   | (string & {});
 
 export interface SessionUser {
@@ -75,6 +77,15 @@ export interface OrderActions {
   plan_deliveries: boolean;
   /** attach / remove design files uploaded from the computer */
   manage_design_files: boolean;
+  // migration 017
+  /** cancel the order (anyone before approval; the Owner or an Admin after) */
+  cancel: boolean;
+  /** record how many pieces of each item are printed / pressed */
+  update_progress: boolean;
+  /** the largest price cut this account may give (the Owner: the whole bill; an Admin: the late-delivery suggestion) */
+  max_adjustment: number;
+  /** a status button that first marks every piece printed (Pressing) or ready (Ready): ask before sending complete_counts */
+  status_needs_confirm: Record<string, boolean>;
   [key: string]: unknown;
 }
 

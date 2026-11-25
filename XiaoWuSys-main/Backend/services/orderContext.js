@@ -10,13 +10,17 @@
 //   has_garments    whether the order has a garment (print details with sizes)
 //   needs_pressing  migration 016: whether the Pressing step applies (the order has a T-shirt)
 //   delivery_plans  migration 016: batches planned ahead (also inside fulfillment.plans)
-//   max_refund      what may be refunded now (payments.maxRefund)
+//   max_refund      what may be refunded now (payments.maxRefund); admin_max_refund (migration 017)
+//   progress        migration 017: pieces printed / pressed / ready per item (orderPolicies.productionProgress)
+//   cancel_terms    migration 017: the cancellation fee and suggested refund (now, or as cancelled)
+//   late_cut        migration 017: the suggested late-delivery price cut (orderPolicies.lateDeliveryCut)
 // ==========================================
 const { isConnectionError } = require('../utils/dbErrors');
 const { listRecords, userNames, sqliteAll } = require('./records');
 const { fulfillmentSummary, completionCheck } = require('./domain/orderLifecycle');
 const { maxRefund, needsVerification } = require('./domain/payments');
 const { localDateTime } = require('../utils/validation');
+const { productionProgress, cancellationTerms, refundLimits, lateDeliveryCut } = require('./domain/orderPolicies');
 
 const CONSUMABLE_CATEGORY = 'consumable';
 
@@ -108,7 +112,42 @@ const loadOrderContext = async (req, order, items, view) => {
     has_garments: materials.some((m) => m.has_sizes),
     needs_pressing: materials.some((m) => m.requires_pressing),
     unverified,
-    max_refund: view ? maxRefund({ status: order.production_status, quote: view.summary.quote, paidNet: view.summary.total_paid }) : 0
+    max_refund: view ? maxRefund({ status: order.production_status, quote: view.summary.quote, paidNet: view.summary.total_paid }) : 0,
+    ...policyContext(order, materials, view, fulfillment, deliveries.records, plans.records)
+  };
+};
+
+// A server UTC timestamp -> the shop day ('YYYY-MM-DD'), or null
+const shopDayOfUtc = (text) => {
+  if (!text) return null;
+  const t = String(text).replace(' ', 'T');
+  const ms = Date.parse(/[zZ]|[+-]\d{2}:\d{2}$/.test(t) ? t : `${t}Z`);
+  return Number.isFinite(ms) ? localDateTime(new Date(ms)).slice(0, 10) : null;
+};
+
+// migration 017: progress, cancellation terms, refund limits and the late-delivery suggestion
+const policyContext = (order, materials, view, fulfillment, deliveries, plans) => {
+  const today = localDateTime(new Date()).slice(0, 10);
+  const paid = view ? view.summary.total_paid : 0;
+  const bill = view ? view.summary.quote : Number(order.total_quote_amount || 0);
+  const cancelled = order.production_status === 'Cancelled';
+  const limits = refundLimits({ status: order.production_status, bill, paidNet: paid, cancellationFee: order.cancellation_fee });
+  const terms = cancelled
+    ? {
+      stage: order.cancelled_stage || null, fee: Number(order.cancellation_fee || 0), kept: Math.min(Number(order.cancellation_fee || 0), Number(paid || 0)),
+      paid, suggested_refund: limits.suggested, shop_fault: Boolean(order.cancel_shop_fault), rule: null
+    }
+    : cancellationTerms({ status: order.production_status, bill, paidNet: paid });
+  const late = lateDeliveryCut({
+    order, deliveries: deliveries.map((d) => ({ ...d, delivered_at: shopDayOfUtc(d.delivered_at) })),
+    plans, piecesOrdered: fulfillment.pieces_ordered, today
+  });
+  return {
+    progress: productionProgress(materials),
+    cancel_terms: terms,
+    admin_max_refund: limits.admin_max,
+    late_cut: late,
+    late_cut_amount: late.amount
   };
 };
 

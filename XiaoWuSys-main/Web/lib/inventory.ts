@@ -26,6 +26,8 @@ export interface InventoryItem {
   has_sizes?: boolean;
   /** migration 016: a T-shirt, so its orders go through Pressing */
   requires_pressing?: boolean;
+  /** migration 017: 'included' (the price is the finished piece) or 'per_area' (the blank; print areas add) */
+  print_pricing?: 'included' | 'per_area';
   sync_status: string;
   version?: number | null;
   deleted_at?: string | null;

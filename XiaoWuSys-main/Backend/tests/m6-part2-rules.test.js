@@ -13,23 +13,26 @@ const line = (id, quantity, selling_price, extra = {}) => ({
 
 describe('Volume quote (PB 11)', () => {
   it('picks the tier from the TOTAL quantity of the order', () => {
-    assert.equal(tierFor(49).percent_off, 0);
-    assert.equal(tierFor(50).percent_off, 5);
-    assert.equal(tierFor(99).percent_off, 5);
-    assert.equal(tierFor(100).percent_off, 10);
-    // 30 + 30 pieces of two different blanks: 60 in all, so both lines get the 5% tier
+    // migration 017: Davao-style "by the dozen" tiers
+    assert.equal(tierFor(11).percent_off, 0);
+    assert.equal(tierFor(12).percent_off, 5);
+    assert.equal(tierFor(49).percent_off, 5);
+    assert.equal(tierFor(50).percent_off, 10);
+    assert.equal(tierFor(99).percent_off, 10);
+    assert.equal(tierFor(100).percent_off, 15);
+    // 30 + 30 pieces of two different items: 60 in all, so both lines get the 10% tier
     const { quote } = computeQuote({ items: [line('a', 30, 150), line('b', 30, 200)] });
-    assert.deepEqual([quote.total_quantity, quote.tier.percent_off], [60, 5]);
-    assert.deepEqual(quote.lines.map((l) => [l.unit_price, l.line_total]), [[142.5, 4275], [190, 5700]]);
-    assert.deepEqual([quote.subtotal_amount, quote.discount_amount, quote.total_quote_amount], [9975, 0, 9975]);
+    assert.deepEqual([quote.total_quantity, quote.tier.percent_off], [60, 10]);
+    assert.deepEqual(quote.lines.map((l) => [l.unit_price, l.line_total]), [[135, 4050], [180, 5400]]);
+    assert.deepEqual([quote.subtotal_amount, quote.discount_amount, quote.total_quote_amount], [9450, 0, 9450]);
   });
 
   it('rounds each unit price to the centavo and multiplies in centavos (no float drift)', () => {
     assert.equal(unitPriceCentavos(9999, 10), 8999); // ₱99.99 less 10% = ₱89.991 -> ₱89.99
     assert.equal(unitPriceCentavos(1005, 5), 955); // ₱10.05 less 5% = ₱9.5475 -> ₱9.55
     const { quote } = computeQuote({ items: [line('a', 100, 0.1), line('b', 3, 0.2)] });
-    assert.deepEqual(quote.lines.map((l) => l.unit_price), [0.09, 0.18]);
-    assert.equal(quote.subtotal_amount, 9.54, '100 x 0.09 + 3 x 0.18');
+    assert.deepEqual(quote.lines.map((l) => l.unit_price), [0.09, 0.17], '103 pieces: 15% off');
+    assert.equal(quote.subtotal_amount, 9.51, '100 x 0.09 + 3 x 0.17');
   });
 
   it('refuses to price items that are not linked, or whose blank has no selling price', () => {
@@ -65,7 +68,7 @@ describe('Discounts (PB 12)', () => {
 
   it('keeps the order’s current discount when re-pricing, and 0 removes it', () => {
     const kept = computeQuote({ items: [line('a', 20, 100)], existing: { amount: 100, reason: 'Loyal' } }).quote;
-    assert.deepEqual([kept.subtotal_amount, kept.discount_amount, kept.discount_reason, kept.total_quote_amount], [2000, 100, 'Loyal', 1900]);
+    assert.deepEqual([kept.subtotal_amount, kept.discount_amount, kept.discount_reason, kept.total_quote_amount], [1900, 100, 'Loyal', 1800], '20 pieces: 5% off');
     const removed = computeQuote({ items, requested: { amount: 0 }, existing: { amount: 100, reason: 'Loyal' } }).quote;
     assert.deepEqual([removed.discount_amount, removed.discount_reason], [0, null]);
     const stale = computeQuote({ items: [line('a', 1, 50)], existing: { amount: 100, reason: 'Loyal' } });

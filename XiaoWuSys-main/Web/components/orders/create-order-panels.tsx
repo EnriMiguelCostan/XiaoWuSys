@@ -24,6 +24,8 @@ import { cn } from '@/lib/utils';
 export interface RequiredItem {
   inventory_id: string;
   quantity_needed: number;
+  /** migration 017: print areas of a per-area item */
+  print_areas?: { placement: string; size: string }[];
 }
 
 const DEBOUNCE_MS = 450;

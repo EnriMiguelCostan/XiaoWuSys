@@ -53,6 +53,7 @@ import { PaymentsSection } from '@/components/orders/payments-section';
 import { PrintDetailsSection } from '@/components/orders/print-details-section';
 import { ConsumablesUsed, PriceCutPanel, QuoteSection } from '@/components/orders/pricing-section';
 import { MaterialLossesSection } from '@/components/orders/waste-section';
+import { ProductionSection } from '@/components/orders/production-section';
 import { ShortageTable } from '@/components/orders/shortage-table';
 import { OrderStatusBadge, PaymentStatusBadge } from '@/components/orders/status-badges';
 import { RequiredNote } from '@/components/forms/form-bits';
@@ -65,6 +66,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { SHEET_SCROLL_BODY } from '@/components/ui/sheet';
@@ -84,8 +86,8 @@ import { cn } from '@/lib/utils';
 const STATUS_ACTION: Record<string, { label: string; icon: typeof Printer; danger?: boolean }> = {
   Printing: { label: 'Start printing', icon: Printer },
   Pressing: { label: 'Start pressing', icon: Flame },
-  Ready: { label: 'Mark ready for pick-up / delivery', icon: PackageCheck },
-  Completed: { label: 'Mark completed', icon: CircleCheck },
+  Ready: { label: 'Mark ready (every piece done)', icon: PackageCheck },
+  Completed: { label: 'Mark completed (handed over and paid)', icon: CircleCheck },
   Pending: { label: 'Resume (reserve stock)', icon: RotateCcw },
   Cancelled: { label: 'Cancel order', icon: CircleX, danger: true },
 };
@@ -138,6 +140,10 @@ export function OrderDetailSheet({
   const reloadAfterEditing = useRef(false);
   const [tab, setTab] = useState('details');
   const [completing, setCompleting] = useState<{ unpaid: boolean } | null>(null);
+  // migration 017: a step that first marks every piece printed / ready (the server asks for complete_counts)
+  const [confirmCounts, setConfirmCounts] = useState<string | null>(null);
+  const [printedOnCancel, setPrintedOnCancel] = useState<Record<string, string>>({});
+  const [shopFault, setShopFault] = useState(false);
   const [handoverName, setHandoverName] = useState('');
   const [handoverMethod, setHandoverMethod] = useState('Pick-up');
   const { lockedByOther } = useOrderLocks();
@@ -248,19 +254,21 @@ export function OrderDetailSheet({
   };
 
   // ---- Status change (PATCH /status): stock moves on the server in the same transaction ----
-  const changeStatus = async (to: string, cancellation_reason?: string) => {
+  const changeStatus = async (to: string, cancellation_reason?: string, extra: Record<string, unknown> = {}) => {
     if (!order) return;
     setBusy(true);
     setPendingStatus(to);
     const { ok, data } = await api<{ message?: string; shortages?: Shortage[]; error?: string }>(
       'PATCH',
       `/orders/${encodeURIComponent(order.order_id)}/status`,
-      { status: to, expected_version: order.version || undefined, ...(cancellation_reason ? { cancellation_reason } : {}) }
+      { status: to, expected_version: order.version || undefined, ...(cancellation_reason ? { cancellation_reason } : {}), ...extra }
     );
     setBusy(false);
     setPendingStatus(null);
     setConfirmCancel(false);
+    setConfirmCounts(null);
     setCancelReason('');
+    setShopFault(false);
     if (!ok && data.shortages?.length) {
       setShortage({ title: 'Not enough stock to resume', message: errorMessage(data, 'There is not enough free stock.'), shortages: data.shortages });
     } else {
@@ -273,7 +281,7 @@ export function OrderDetailSheet({
               message: [
                 data.message ?? `The order is now ${to}.`,
                 customer?.full_name ? `Customer: ${customer.full_name}.` : null,
-                to === 'Cancelled' ? 'Payments stay on record: void them in the Payments section if money is returned.' : 'The next step’s buttons are at the bottom of this order.',
+                to === 'Cancelled' ? 'Refund the suggested amount under Payments if money goes back to the customer.' : 'The next step’s buttons are at the bottom of this order.',
               ]
                 .filter(Boolean)
                 .join('\n'),
@@ -580,6 +588,8 @@ export function OrderDetailSheet({
                     <Separator />
                     <PrintDetailsSection key={`prints-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportPrints} />
                     <ConsumablesUsed detail={detail} />
+                    <Separator />
+                    <ProductionSection key={`production-${order.version}`} detail={detail} actions={actions} onResult={sectionResult} />
                   </TabsContent>
 
                   {/* Adviser consultation (second round): the order's wastage in its own tab */}
@@ -647,10 +657,16 @@ export function OrderDetailSheet({
                     const Icon = a.icon;
                     const afterDanger = i > 0 && all[i - 1].danger && !a.danger;
                     const onClick = a.danger
-                      ? () => setConfirmCancel(true)
+                      ? () => {
+                          setPrintedOnCancel(Object.fromEntries((detail?.progress?.lines ?? []).map((l) => [l.line_item_id, String(l.printed)])));
+                          setShopFault(false);
+                          setConfirmCancel(true);
+                        }
                       : a.to === 'Completed'
                         ? askComplete
-                        : () => changeStatus(a.to);
+                        : actions.status_needs_confirm?.[a.to]
+                          ? () => setConfirmCounts(a.to)
+                          : () => changeStatus(a.to);
                     return (
                       <span key={a.to} className="contents">
                         {afterDanger && <span aria-hidden className="mx-2 h-8 w-px bg-border" />}
@@ -758,19 +774,61 @@ export function OrderDetailSheet({
             <DialogTitle>Cancel this order?</DialogTitle>
             <DialogDescription>
               {order?.stock_reserved
-                ? 'The order will be marked Cancelled and its reserved materials returned to stock.'
-                : 'The order will be marked Cancelled.'}{' '}
-              Payments stay on record; void them one by one if money is returned.
+                ? 'The order will be marked Cancelled. Materials not yet printed go back to stock; pieces already made are recorded as waste.'
+                : 'The order will be marked Cancelled.'}
             </DialogDescription>
           </DialogHeader>
           <form
             className="max-w-full min-w-0 space-y-3"
             onSubmit={(e) => {
               e.preventDefault();
-              if (cancelReason.trim()) void changeStatus('Cancelled', cancelReason.trim());
+              if (!cancelReason.trim()) return;
+              const printed = order?.production_status === 'Printing'
+                ? (detail?.progress?.lines ?? []).map((l) => ({ line_item_id: l.line_item_id, quantity: Number(printedOnCancel[l.line_item_id] ?? l.printed) }))
+                : undefined;
+              void changeStatus('Cancelled', cancelReason.trim(), { ...(printed ? { printed } : {}), ...(shopFault ? { shop_fault: true } : {}) });
             }}
           >
             <RequiredNote />
+            {detail?.cancel_terms && (
+              <div className="space-y-1 rounded-md border bg-muted/30 p-3 text-sm">
+                <p>{shopFault ? "The shop's fault: nothing is kept, everything paid is refunded." : detail.cancel_terms.rule}</p>
+                <p className="tabular-nums">
+                  Paid {peso(detail.cancel_terms.paid)} · the shop keeps {peso(shopFault ? 0 : detail.cancel_terms.kept)} ·{' '}
+                  <strong>suggested refund {peso(shopFault ? detail.cancel_terms.paid : detail.cancel_terms.suggested_refund)}</strong>
+                </p>
+              </div>
+            )}
+            {order?.production_status === 'Printing' && (detail?.progress?.lines.length ?? 0) > 0 && (
+              <fieldset className="min-w-0 space-y-2">
+                <legend className="text-sm font-medium">Pieces already printed (recorded as waste)</legend>
+                {detail?.progress?.lines.map((l) => (
+                  <div key={l.line_item_id} className="flex items-center justify-between gap-3 text-sm">
+                    <Label htmlFor={`printed-${l.line_item_id}`} className="min-w-0 font-normal wrap-anywhere">
+                      {l.product_type} <span className="text-muted-foreground">(of {l.quantity})</span>
+                    </Label>
+                    <Input
+                      id={`printed-${l.line_item_id}`}
+                      type="number"
+                      min={0}
+                      max={l.quantity}
+                      step={1}
+                      inputMode="numeric"
+                      className="h-8 w-24 text-right"
+                      value={printedOnCancel[l.line_item_id] ?? ''}
+                      onChange={(e) => setPrintedOnCancel((c) => ({ ...c, [l.line_item_id]: e.target.value }))}
+                      disabled={busy}
+                    />
+                  </div>
+                ))}
+              </fieldset>
+            )}
+            {order && !['Pending', 'Delayed'].includes(order.production_status) && (
+              <label className="flex items-start gap-2 text-sm">
+                <input type="checkbox" className="mt-1" checked={shopFault} onChange={(e) => setShopFault(e.target.checked)} disabled={busy} />
+                <span>It was the shop&apos;s fault (late beyond 7 days, cannot deliver, wrong job): refund everything paid.</span>
+              </label>
+            )}
             <div className="min-w-0 space-y-1.5">
               <Label htmlFor="cancel-reason">Reason for cancelling <span aria-hidden className="text-danger">*</span>
                 <span className="sr-only">(required)</span>
@@ -813,6 +871,20 @@ export function OrderDetailSheet({
         onCancel={() => setConfirmArchive(null)}
       />
       <ConfirmDialog
+        open={Boolean(confirmCounts)}
+        title={confirmCounts === 'Pressing' ? 'Is every piece printed?' : 'Is every piece done?'}
+        message={
+          confirmCounts === 'Pressing'
+            ? `${detail?.progress?.printed ?? 0} of ${detail?.progress?.pieces ?? 0} pieces are recorded as printed. Starting pressing marks all of them printed.`
+            : `${detail?.progress?.ready ?? 0} of ${detail?.progress?.pieces ?? 0} pieces are recorded as ready. Marking the order ready marks every piece printed${detail?.progress?.needs_pressing ? ' and pressed' : ''}.`
+        }
+        confirmLabel={confirmCounts === 'Pressing' ? 'Yes, all printed: start pressing' : 'Yes, all done: mark ready'}
+        busy={busy}
+        busyLabel="Updating…"
+        onConfirm={() => confirmCounts && changeStatus(confirmCounts, undefined, { complete_counts: true })}
+        onCancel={() => setConfirmCounts(null)}
+      />
+      <ConfirmDialog
         open={confirmApprove}
         title={actions.approve_without_quote ? 'Approve this job order without a quote?' : 'Approve this job order?'}
         message={
@@ -820,7 +892,7 @@ export function OrderDetailSheet({
             ? 'The order moves to Approved and printing can start. Its materials are already reserved.'
             : 'The order moves to Approved and its materials are reserved from stock now.') +
           (actions.approve_without_quote
-            ? ' It has no quote, so no downpayment is checked. The Owner can still set its price later, before it is completed.'
+            ? ' It has no quote, so no downpayment is checked yet. The Owner sets the price, and half of it is paid, before printing starts.'
             : '')
         }
         confirmLabel={actions.approve_without_quote ? 'Approve without a quote' : 'Approve job order'}

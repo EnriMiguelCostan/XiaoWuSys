@@ -27,13 +27,15 @@ describe('Approvals (point 16) and the optional quote (point 10)', () => {
   it('allows approving without a quote, and keeps the price open until one is set', () => {
     assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Admin').approve_without_quote, true);
     assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 500 }, 'Admin').approve_without_quote, false);
-    assert.equal(quoteLocked('Printing', 0), false, 'approved without a quote: the Owner may still price it');
+    assert.equal(quoteLocked('Approved', 0), false, 'approved without a quote: the Owner may still price it');
+    assert.equal(quoteLocked('Printing', 0), true, 'migration 017: the price is final once printing starts');
     assert.equal(quoteLocked('Printing', 800), true, 'approved with a quote: frozen (the downpayment was based on it)');
     assert.equal(quoteLocked('Pending', 800), false);
     assert.equal(quoteLocked('Completed', 0), true, 'a closed order is never re-priced');
     assert.equal(quoteLocked('Cancelled', 0), true);
-    assert.equal(allowedActions({ production_status: 'Ready', total_quote_amount: 0 }, 'Owner').edit_quote, true);
-    assert.equal(allowedActions({ production_status: 'Ready', total_quote_amount: 0 }, 'Admin').edit_quote, false, 'pricing stays with the Owner');
+    assert.equal(allowedActions({ production_status: 'Approved', total_quote_amount: 0 }, 'Owner').edit_quote, true);
+    assert.equal(allowedActions({ production_status: 'Approved', total_quote_amount: 0 }, 'Admin').edit_quote, false, 'pricing stays with the Owner');
+    assert.equal(allowedActions({ production_status: 'Ready', total_quote_amount: 0 }, 'Owner').edit_quote, false);
   });
 });
 

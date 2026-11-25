@@ -220,7 +220,7 @@ describe('M6 part 3 on real PostgreSQL: waste diagnostics, voids, overheads, P&L
 
   it('voids a payment with a negative reversing entry, once, guarding the downpayment', async () => {
     await insertOrder('o-pay', 'Approved', { quote: 1000 });
-    const pay = async (amount) => (await server.request('POST', '/api/orders/o-pay/payments', { token: production, body: { amount, payment_type: 'GCash', reference_no: '1004 123 456789' } })).body.payment;
+    const pay = async (amount) => (await server.request('POST', '/api/orders/o-pay/payments', { token: production, body: { amount, payment_type: 'GCash', payer_name: 'Juan Dela Cruz', reference_no: '1004 123 456789' } })).body.payment;
     const first = await pay(600);
     const second = await pay(100);
 

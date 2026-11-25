@@ -22,6 +22,7 @@ const { rolesWith, can } = require('../services/domain/permissions');
 const { CONSUMABLE_TRIGGERS, checkRateList } = require('../services/domain/consumables');
 const { loadRates } = require('../services/consumables');
 const { refreshLocalRows } = require('../services/sync');
+const { PRINT_PRICING } = require('../services/domain/pricing');
 const { REASON_CODE_LIST, inferReasonCode, reasonLabel, replacementWarning } = require('../services/domain/wasteDiagnostics');
 const { diagnoseInCloud, escalateClusterInCloud, diagnoseLocally, shownLoss } = require('../services/waste');
 const { setMovementContext, clearMovementContext } = require('../services/stockMovements');
@@ -198,6 +199,8 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
   const has_sizes = v.bool(body.has_sizes, 'has_sizes');                          // migration 015: a garment
   const requires_pressing = v.bool(body.requires_pressing, 'requires_pressing');  // migration 016: a T-shirt (heat press)
   const selling_price = v.nonNegativeMoney(body.selling_price, 'selling_price', { required: false, defaultValue: 0 }); // PB 11
+  // migration 017: 'included' (the price is the finished piece) or 'per_area' (the blank; print areas add)
+  const print_pricing = v.oneOf(body.print_pricing, 'print_pricing', PRINT_PRICING, { required: false }) || 'included';
   if (v.failed()) return v.send(res);
 
   const item_name = cleanName(rawName);
@@ -209,7 +212,7 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
     if (supplier_id && !supplierRow) throw supplierMissing();
     const supplier = supplierRow ? supplierRow.supplier_name : (typedSupplier ? cleanName(typedSupplier) : null);
     const values = [inventory_id, item_name, cleanName(item_category), quantity_available, minimum_threshold, unit_cost,
-      cleanName(unit), supplier, selling_price, supplier_id || null, has_sizes, requires_pressing];
+      cleanName(unit), supplier, selling_price, supplier_id || null, has_sizes, requires_pressing, print_pricing];
 
     const result = await cloudFirst('cloud',
       () => withPgTransaction(req.pgPool, async (client) => {
@@ -223,8 +226,8 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
         });
         const { rows } = await client.query(
           `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, unit, supplier,
-                                        selling_price, supplier_id, has_sizes, requires_pressing)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING ${selectList('inventory_items', 'pg')}`,
+                                        selling_price, supplier_id, has_sizes, requires_pressing, print_pricing)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING ${selectList('inventory_items', 'pg')}`,
           values
         );
         await clearMovementContext(client);
@@ -237,8 +240,8 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
         if (dup) throw duplicateError(dup);
         await sqliteRun(tx,
           `INSERT INTO inventory_items (inventory_id, item_name, item_category, quantity_available, minimum_threshold, unit_cost, unit, supplier,
-                                        selling_price, supplier_id, has_sizes, requires_pressing, sync_status, last_modified)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
+                                        selling_price, supplier_id, has_sizes, requires_pressing, print_pricing, sync_status, last_modified)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_insert', ${LOCAL_NOW})`,
           values.map((x) => (x === true ? 1 : x === false ? 0 : x)));
         const record = await readLocal(tx, 'inventory_items', inventory_id);
         await auditLocal(tx, req.user, inventory_id, 'created', item_name, { item: snapshotOf(record) });
@@ -270,7 +273,7 @@ router.post('/', requireRole(EDIT_ROLES), async (req, res) => {
 //    404 not found / in bin | 409 DUPLICATE_ITEM | 409 EDIT_CONFLICT (someone else edited it first)
 // ==========================================
 const EDITABLE_FIELDS = ['item_name', 'item_category', 'minimum_threshold', 'unit_cost', 'selling_price', 'unit', 'supplier', 'supplier_id', 'has_sizes',
-  'requires_pressing'];
+  'requires_pressing', 'print_pricing'];
 
 router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
   const { inventory_id } = req.params;
@@ -297,6 +300,8 @@ router.patch('/:inventory_id', requireRole(EDIT_ROLES), async (req, res) => {
   if (body.has_sizes !== undefined) updates.has_sizes = v.bool(body.has_sizes, 'has_sizes');
   // migration 016: a T-shirt, so its orders go through the heat press (Pressing)
   if (body.requires_pressing !== undefined) updates.requires_pressing = v.bool(body.requires_pressing, 'requires_pressing');
+  // migration 017: how the item is priced on a quote
+  if (body.print_pricing !== undefined) updates.print_pricing = v.oneOf(body.print_pricing, 'print_pricing', PRINT_PRICING);
   if (body.expected_version !== undefined && body.expected_version !== null && typeof body.expected_version !== 'string') {
     v.errors.push({ field: 'expected_version', message: 'expected_version must be the string returned as "version".' });
   }
@@ -744,6 +749,16 @@ router.post('/:inventory_id/loss', requireRole(EDIT_ROLES), async (req, res) => 
     if (order_id) {
       const order = await locateRecord(req, 'order_profiles', order_id);
       if (!order.location) return res.status(404).json({ error: 'ORDER_NOT_FOUND', message: `Order ${order_id} does not exist.` });
+      // migration 017: waste is recorded on an order once printing has started (before that, a
+      // damaged piece is a Stock out: nothing was made for the order yet)
+      const { record: lossOrder } = await getRecord(req, 'order_profiles', order_id);
+      if (lossOrder && !['Printing', 'Pressing', 'Ready'].includes(lossOrder.production_status)) {
+        return res.status(409).json({
+          error: 'WASTE_NOT_IN_PRODUCTION',
+          message: `This order is ${lossOrder.production_status}. Waste is recorded on an order while it is being printed, pressed or is ready. `
+            + 'For a damaged piece before printing, use Stock out.'
+        });
+      }
       if (order.location === 'local') target = 'local';
     }
 
@@ -826,6 +841,16 @@ router.post('/losses', requireRole(EDIT_ROLES), async (req, res) => {
     if (order_id) {
       const order = await locateRecord(req, 'order_profiles', order_id);
       if (!order.location) return res.status(404).json({ error: 'ORDER_NOT_FOUND', message: 'We could not find this order.' });
+      // migration 017: waste is recorded on an order once printing has started (before that, a
+      // damaged piece is a Stock out: nothing was made for the order yet)
+      const { record: lossOrder } = await getRecord(req, 'order_profiles', order_id);
+      if (lossOrder && !['Printing', 'Pressing', 'Ready'].includes(lossOrder.production_status)) {
+        return res.status(409).json({
+          error: 'WASTE_NOT_IN_PRODUCTION',
+          message: `This order is ${lossOrder.production_status}. Waste is recorded on an order while it is being printed, pressed or is ready. `
+            + 'For a damaged piece before printing, use Stock out.'
+        });
+      }
     }
     const result = await withPgTransaction(req.pgPool, async (client) => {
       const stock = await client.query(

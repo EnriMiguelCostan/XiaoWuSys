@@ -19,6 +19,7 @@
 // Timestamps are UTC 'YYYY-MM-DD HH:MM:SS' (like the TIMESTAMP columns); the shop is UTC+8.
 // ==========================================
 const { computeQuote } = require('../../services/domain/pricing');
+const { cancellationTerms } = require('../../services/domain/orderPolicies');
 const { plannedDeductions, triggersFor } = require('../../services/domain/consumables');
 const { averageAfterAddC } = require('../../services/domain/stockDocuments');
 const { REASON_CODES } = require('../../services/domain/wasteDiagnostics');
@@ -95,19 +96,20 @@ const SUPPLIERS = [
   { key: 'pack', supplier_name: 'Bankerohan Packaging Center', contact_person: 'Grace Lim', address: 'Bankerohan, Davao City', notes: 'Plastic bags and boxes.' }
 ];
 
-// base cost / price are 2025-2026 pesos; price = what the customer pays per finished piece
+// base cost / price are 2025-2026 Davao pesos. print_pricing (migration 017): 'per_area' = price is the
+// blank and each print area adds its charge (front A4, back A3...); 'included' = the finished piece
 const SIZES = ['S', 'M', 'L', 'XL', '2XL'];
 const CATALOG = [
-  ...SIZES.map((s) => ({ key: `wtee-${s}`, item_name: `White T-Shirt (${s})`, item_category: 'Apparel', unit: 'pcs', cost: s === '2XL' ? 105 : 95, price: s === '2XL' ? 300 : 280, has_sizes: true, requires_pressing: true, min: 30, supplier: 'garments', group: 'wtee', size: s })),
-  ...['M', 'L', 'XL'].map((s) => ({ key: `btee-${s}`, item_name: `Black T-Shirt (${s})`, item_category: 'Apparel', unit: 'pcs', cost: 112, price: 320, has_sizes: true, requires_pressing: true, min: 20, supplier: 'garments', group: 'btee', size: s })),
-  ...['S', 'M', 'L', 'XL'].map((s) => ({ key: `jersey-${s}`, item_name: `Sublimation Jersey Set (${s})`, item_category: 'Sportswear', unit: 'sets', cost: 265, price: 680, has_sizes: true, requires_pressing: false, min: 15, supplier: 'jersey', group: 'jersey', size: s })),
-  ...['M', 'L', 'XL'].map((s) => ({ key: `polo-${s}`, item_name: `Polo Shirt (${s})`, item_category: 'Apparel', unit: 'pcs', cost: 185, price: 450, has_sizes: true, requires_pressing: false, min: 15, supplier: 'garments', group: 'polo', size: s })),
-  { key: 'hoodie-L', item_name: 'Hoodie (L)', item_category: 'Apparel', unit: 'pcs', cost: 330, price: 780, has_sizes: true, requires_pressing: false, min: 8, supplier: 'garments', group: 'hoodie', size: 'L' },
-  { key: 'mug', item_name: 'Sublimation Mug 11oz', item_category: 'Drinkware', unit: 'pcs', cost: 58, price: 190, has_sizes: false, requires_pressing: false, min: 30, supplier: 'mug', group: 'mug' },
-  { key: 'tote', item_name: 'Canvas Tote Bag', item_category: 'Bags', unit: 'pcs', cost: 72, price: 230, has_sizes: false, requires_pressing: false, min: 20, supplier: 'mug', group: 'tote' },
-  { key: 'lanyard', item_name: 'ID Lanyard (printed)', item_category: 'Accessories', unit: 'pcs', cost: 24, price: 85, has_sizes: false, requires_pressing: false, min: 50, supplier: 'tarp', group: 'lanyard' },
-  { key: 'tarp', item_name: 'Tarpaulin (per sq ft)', item_category: 'Signage', unit: 'sq ft', cost: 9, price: 28, has_sizes: false, requires_pressing: false, min: 200, supplier: 'tarp', group: 'tarp' },
-  { key: 'sticker', item_name: 'Vinyl Sticker Sheet (A4)', item_category: 'Signage', unit: 'sheets', cost: 19, price: 65, has_sizes: false, requires_pressing: false, min: 40, supplier: 'tarp', group: 'sticker' },
+  ...SIZES.map((s) => ({ key: `wtee-${s}`, item_name: `White T-Shirt (${s})`, item_category: 'Apparel', unit: 'pcs', cost: s === '2XL' ? 105 : 95, price: s === '2XL' ? 175 : 160, print_pricing: 'per_area', has_sizes: true, requires_pressing: true, min: 30, supplier: 'garments', group: 'wtee', size: s })),
+  ...['M', 'L', 'XL'].map((s) => ({ key: `btee-${s}`, item_name: `Black T-Shirt (${s})`, item_category: 'Apparel', unit: 'pcs', cost: 112, price: 180, print_pricing: 'per_area', has_sizes: true, requires_pressing: true, min: 20, supplier: 'garments', group: 'btee', size: s })),
+  ...['S', 'M', 'L', 'XL'].map((s) => ({ key: `jersey-${s}`, item_name: `Sublimation Jersey Set (${s})`, item_category: 'Sportswear', unit: 'sets', cost: 265, price: 550, print_pricing: 'included', has_sizes: true, requires_pressing: false, min: 15, supplier: 'jersey', group: 'jersey', size: s })),
+  ...['M', 'L', 'XL'].map((s) => ({ key: `polo-${s}`, item_name: `Polo Shirt (${s})`, item_category: 'Apparel', unit: 'pcs', cost: 185, price: 320, print_pricing: 'per_area', has_sizes: true, requires_pressing: false, min: 15, supplier: 'garments', group: 'polo', size: s })),
+  { key: 'hoodie-L', item_name: 'Hoodie (L)', item_category: 'Apparel', unit: 'pcs', cost: 330, price: 550, print_pricing: 'per_area', has_sizes: true, requires_pressing: false, min: 8, supplier: 'garments', group: 'hoodie', size: 'L' },
+  { key: 'mug', item_name: 'Sublimation Mug 11oz', item_category: 'Drinkware', unit: 'pcs', cost: 58, price: 180, print_pricing: 'included', has_sizes: false, requires_pressing: false, min: 30, supplier: 'mug', group: 'mug' },
+  { key: 'tote', item_name: 'Canvas Tote Bag', item_category: 'Bags', unit: 'pcs', cost: 72, price: 110, print_pricing: 'per_area', has_sizes: false, requires_pressing: false, min: 20, supplier: 'mug', group: 'tote' },
+  { key: 'lanyard', item_name: 'ID Lanyard (printed)', item_category: 'Accessories', unit: 'pcs', cost: 24, price: 80, print_pricing: 'included', has_sizes: false, requires_pressing: false, min: 50, supplier: 'tarp', group: 'lanyard' },
+  { key: 'tarp', item_name: 'Tarpaulin (per sq ft)', item_category: 'Signage', unit: 'sq ft', cost: 9, price: 20, print_pricing: 'included', has_sizes: false, requires_pressing: false, min: 200, supplier: 'tarp', group: 'tarp' },
+  { key: 'sticker', item_name: 'Vinyl Sticker Sheet (A4)', item_category: 'Signage', unit: 'sheets', cost: 19, price: 50, print_pricing: 'included', has_sizes: false, requires_pressing: false, min: 40, supplier: 'tarp', group: 'sticker' },
   // Consumables: taken by the usage rates, never sold on their own
   { key: 'ink', item_name: 'Sublimation Ink', item_category: 'Consumable', unit: 'ml', cost: 1.2, price: 0, has_sizes: false, requires_pressing: false, min: 1500, supplier: 'ink', consumable: true },
   { key: 'paper', item_name: 'Transfer Paper', item_category: 'Consumable', unit: 'sheets', cost: 6, price: 0, has_sizes: false, requires_pressing: false, min: 300, supplier: 'ink', consumable: true },
@@ -474,6 +476,16 @@ const generateHistory = ({ users = [], now = new Date(), start = START_DAY, seed
     const ageDays = (nowMs - o.created) / DAY;
     const branch = c.branches.length && rnd.chance(0.45) ? rnd.pick(c.branches) : null;
 
+    // The design's print areas (migration 017): the same on every blank of the order
+    const design = rnd.weighted([
+      [[{ placement: 'Front', size: 'A4' }], 45],
+      [[{ placement: 'Front', size: 'A4' }, { placement: 'Back', size: 'A3' }], 25],
+      [[{ placement: 'Left chest', size: 'Small' }, { placement: 'Back', size: 'A3' }], 15],
+      [[{ placement: 'Front', size: 'A3' }], 10],
+      [[{ placement: 'Front', size: 'A4' }, { placement: 'Back', size: 'Name' }], 5]
+    ]);
+    for (const l of lines) l.print_areas = l.item.print_pricing === 'per_area' ? JSON.stringify(design) : null;
+
     // Quote: the catalog's price at that time, volume tiers, sometimes a layout fee or a discount
     const quoted = !(ageDays < 2 && rnd.chance(0.4));
     let quote = null;
@@ -482,7 +494,8 @@ const generateHistory = ({ users = [], now = new Date(), start = START_DAY, seed
       const result = computeQuote({
         items: lines.map((l, i) => ({
           line_item_id: lineIds[i], product_type: l.item.item_name, quantity: l.quantity, inventory_id: l.item.inventory_id,
-          item_name: l.item.item_name, selling_price: Math.round(l.item.price * factorFor(year))
+          item_name: l.item.item_name, selling_price: Math.round(l.item.price * factorFor(year)),
+          print_pricing: l.item.print_pricing || 'included', print_areas: l.print_areas
         })),
         requested: {
           ...(rnd.chance(0.3) ? { labor: rnd.pick([150, 200, 300, 500]) } : {}),
@@ -557,8 +570,8 @@ const generateHistory = ({ users = [], now = new Date(), start = START_DAY, seed
         for (let b = 1; b <= n; b++) {
           const qty = b === n ? left : Math.round(pieces / n);
           left -= qty;
-          const readyAt = b === n ? plan.ready : inShopHours(plan.printing + ((plan.ready - plan.printing) * b) / n, rnd);
-          const deliveredAt = b === n ? plan.done : Math.min(inShopHours(readyAt + rnd.int(2, 36) * HOUR, rnd), plan.done - HOUR);
+          const readyAt = b === n ? plan.ready : Math.min(inShopHours(plan.printing + ((plan.ready - plan.printing) * b) / n, rnd), plan.ready);
+          const deliveredAt = b === n ? plan.done : Math.max(readyAt, Math.min(inShopHours(readyAt + rnd.int(2, 36) * HOUR, rnd), plan.done - HOUR));
           plans.push({ b, qty, readyAt, deliveredAt, plannedDay: addDaysYmd(deadlineDay, b - n) });
         }
       } else {
@@ -572,6 +585,8 @@ const generateHistory = ({ users = [], now = new Date(), start = START_DAY, seed
 
     // Payments: the downpayment (at least half), and the rest at the hand-over
     const pays = [];
+    let cancelInfo = null;
+    const cancelledFrom = cancelled ? history[history.length - 1][0] : null;
     if (quoted && happened(plan.dp)) {
       const half = Math.ceil(totalC / 2);
       const style = rnd.weighted([['half', 60], ['full', 25], ['more', 15]]);
@@ -584,7 +599,12 @@ const generateHistory = ({ users = [], now = new Date(), start = START_DAY, seed
         const partC = Math.min(totalC - dpC, Math.ceil((totalC - dpC) / 2 / 100) * 100);
         if (partC > 0) pays.push({ at: Math.min(nowMs - HOUR, plan.ready + rnd.int(1, 20) * HOUR), amountC: partC, kind: 'part' });
       }
-      if (cancelled && rnd.chance(0.6)) pays.push({ at: inShopHours(plan.cancel + rnd.int(1, 48) * HOUR, rnd), amountC: -dpC, kind: 'refund' });
+      if (cancelled) {
+        // migration 017: the cancellation fee of the stage; most clients get the suggested refund
+        cancelInfo = cancellationTerms({ status: cancelledFrom, bill: pesos(totalC), paidNet: pesos(dpC) });
+        const refundC = Math.round(cancelInfo.suggested_refund * 100);
+        if (refundC > 0 && rnd.chance(0.85)) pays.push({ at: inShopHours(plan.cancel + rnd.int(1, 48) * HOUR, rnd), amountC: -refundC, kind: 'refund' });
+      }
     }
 
     // ---------- rows ----------
@@ -603,7 +623,10 @@ const generateHistory = ({ users = [], now = new Date(), start = START_DAY, seed
       production_status: status, design_drive_link: rnd.chance(0.35) ? `https://drive.google.com/file/d/1${rnd.hex(32)}/view` : null,
       total_quote_amount: pesos(totalC), stock_reserved: reservedNow, approved_by: approvedRow ? approvedRow[3].user_id : null,
       approved_at: approvedRow ? utcText(approvedRow[2]) : null, tracking_no: null, last_edited_by: lastEditor.user_id,
-      last_edited_role: lastEditor.role, ...quoteParts, cancellation_reason: cancelled ? rnd.pick(['Event was cancelled', 'Client found a cheaper supplier', 'Budget was not approved', 'Client changed the design too late']) : null,
+      last_edited_role: lastEditor.role, ...quoteParts,
+      cancellation_fee: cancelled ? (cancelInfo ? cancelInfo.fee : 0) : null, cancelled_stage: cancelledFrom, cancel_shop_fault: false,
+      client_delay_reason: null,
+      cancellation_reason: cancelled ? rnd.pick(['Event was cancelled', 'Client found a cheaper supplier', 'Budget was not approved', 'Client changed the design too late']) : null,
       archived_at: null, archived_by: null, order_description: desc, adjustment_amount: 0, adjustment_reason: null,
       branch_id: branch ? branch.branch_id : null, sync_status: 'synced', last_modified: utcText(lastAt)
     };
@@ -613,6 +636,7 @@ const generateHistory = ({ users = [], now = new Date(), start = START_DAY, seed
       T.order_items.push({
         line_item_id: lineIds[i], order_id, inventory_id: l.item.inventory_id, product_type: l.item.item_name.slice(0, 100),
         quantity: l.quantity, size: null, custom_name: null, custom_number: null, price: priced ? priced.unit_price : 0,
+        print_areas: l.print_areas, qty_printed: 0, qty_pressed: 0, added_after_approval: false,
         unit_cost: null, sync_status: 'synced', _item: l.item, _order: order
       });
     });
@@ -667,6 +691,34 @@ const generateHistory = ({ users = [], now = new Date(), start = START_DAY, seed
         notes: d.auto ? 'Handed over when the order was completed' : null, recorded_by: who.worker().user_id, created_at: utcText(d.at),
         plan_id: d.plan_id, sync_status: 'synced'
       });
+    }
+
+    // Production progress (migration 017): what each status means, and never fewer pieces ready
+    // than were already handed over
+    {
+      const mine = T.order_items.filter((r) => r._order === order && !r._item.consumable);
+      const total = mine.reduce((s, r) => s + r.quantity, 0);
+      const delivered = deliveries.reduce((s, d) => s + d.qty, 0);
+      const fill = (rows, n, key) => {
+        let left = n;
+        for (const r of rows) { const k = Math.min(r.quantity, left); r[key] = k; left -= k; }
+      };
+      const done = ['Ready', 'Completed'].includes(status) || (status === 'Cancelled' && ['Pressing', 'Ready'].includes(cancelledFrom));
+      if (done || status === 'Pressing') fill(mine, total, 'qty_printed');
+      else if (status === 'Printing' || (status === 'Cancelled' && cancelledFrom === 'Printing')) {
+        fill(mine, Math.max(delivered, Math.round(total * (0.2 + rnd.next() * 0.6))), 'qty_printed');
+      }
+      const press = mine.filter((r) => r._item.requires_pressing);
+      for (const r of mine) {
+        if (!r._item.requires_pressing) continue;
+        r.qty_pressed = done ? r.qty_printed : status === 'Pressing' ? Math.round(r.qty_printed * rnd.next() * 0.8) : 0;
+      }
+      // pieces handed over were ready: printed (and pressed where needed)
+      if (!done && delivered > 0) {
+        const ready = mine.reduce((s, r) => s + (r._item.requires_pressing ? r.qty_pressed : r.qty_printed), 0);
+        let short = Math.max(0, delivered - ready);
+        for (const r of press) { const k = Math.min(r.qty_printed - r.qty_pressed, short); r.qty_pressed += k; short -= k; }
+      }
     }
 
     // Payments (numbers are given later, in date order)
@@ -873,7 +925,8 @@ const generateHistory = ({ users = [], now = new Date(), start = START_DAY, seed
       inventory_id: item.inventory_id, item_name: item.item_name, item_category: item.item_category, quantity_available: item.onHand,
       quantity_reserved: item.reserved, minimum_threshold: item.min, unit_cost: pesos(item.costC), unit: item.unit,
       supplier: item.supplier_row.supplier_name, supplier_id: item.supplier_row.supplier_id, selling_price: item.price,
-      has_sizes: item.has_sizes, requires_pressing: item.requires_pressing, deleted_at: null, deleted_by: null, purged_at: null,
+      has_sizes: item.has_sizes, requires_pressing: item.requires_pressing, print_pricing: item.print_pricing || 'included',
+      deleted_at: null, deleted_by: null, purged_at: null,
       sync_status: 'synced'
     });
   }

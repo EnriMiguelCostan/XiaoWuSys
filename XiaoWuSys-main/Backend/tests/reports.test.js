@@ -21,7 +21,7 @@ describe('Dashboard and exports', () => {
       token: owner,
       body: { customer_id: customerId, production_deadline: shopDate(2), total_quote_amount: 3000, required_items: [{ inventory_id: items['Custom Shirt'], quantity_needed: 20 }] }
     });
-    await t.request('POST', `/api/orders/${o.body.order_id}/payments`, { token: owner, body: { amount: 1500, payment_type: 'Cash' } });
+    await t.request('POST', `/api/orders/${o.body.order_id}/payments`, { token: owner, body: { amount: 1500, payment_type: 'Cash', payer_name: 'Juan Dela Cruz' } });
   });
   after(async () => { await t.close(); });
 
