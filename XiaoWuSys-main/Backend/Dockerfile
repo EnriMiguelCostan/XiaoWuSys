@@ -2,7 +2,7 @@
 #   docker build -t xiaowusys-backend ./Backend
 # Secrets (DATABASE_URL, JWT_SECRET, ...) are never baked in: pass them at run time
 # (docker compose reads Backend/.env). The SQLite cache lives on the /data volume.
-FROM node:22-bookworm-slim
+FROM node:22-trixie-slim
 
 WORKDIR /app/Backend
 
