@@ -27,32 +27,38 @@ describe('Who may do what (rules only)', () => {
     assert.deepEqual(allowedActions(pending, 'Owner'), {
       approve: true, statuses: ['Cancelled'], edit_deadline: true, edit_quote: true, generate_quote: true, apply_discount: true,
       link_design: true, add_items: true, record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true,
-      print_quote: true, void_payment: true, log_loss: true, archive_order: false, restore_order: false,
+      print_quote: true, void_payment: true, log_loss: false, archive_order: false, restore_order: false,
       // migration 015
       edit_description: true, add_print_details: true, record_delivery: false, max_delivery: 0, complete_blocked_reason: null,
       complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: true, edit_payment: true, adjust_price: false,
       // migration 016
-      approve_without_quote: false, plan_deliveries: true, manage_design_files: true
+      approve_without_quote: false, plan_deliveries: true, manage_design_files: true,
+      // migration 017
+      cancel: true, update_progress: false, max_adjustment: 0, status_needs_confirm: {}
     });
     assert.deepEqual(allowedActions(pending, 'Admin'), {
-      approve: true, statuses: [], edit_deadline: true, edit_quote: false, generate_quote: false, apply_discount: false,
+      approve: true, statuses: ['Cancelled'], edit_deadline: true, edit_quote: false, generate_quote: false, apply_discount: false,
       link_design: true, add_items: true, record_payment: true, max_payment: 1500, payment_blocked_reason: null, print_receipt: true,
-      print_quote: true, void_payment: false, log_loss: true, archive_order: false, restore_order: false,
+      print_quote: true, void_payment: false, log_loss: false, archive_order: false, restore_order: false,
       // migration 015
       edit_description: true, add_print_details: true, record_delivery: false, max_delivery: 0, complete_blocked_reason: null,
       complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: true, edit_payment: true, adjust_price: false,
       // migration 016
-      approve_without_quote: false, plan_deliveries: true, manage_design_files: true
+      approve_without_quote: false, plan_deliveries: true, manage_design_files: true,
+      // migration 017: an Admin may cancel; a price cut only up to the late-delivery suggestion (none here)
+      cancel: true, update_progress: false, max_adjustment: 0, status_needs_confirm: {}
     });
     assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Owner').print_quote, false, 'no quotation to print yet');
     assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Admin').approve_without_quote, true, 'the quote is optional');
     assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Staff').approve_without_quote, false);
-    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Staff').statuses, ['Pressing', 'Ready', 'Completed'], 'no Cancel for Production');
-    assert.deepEqual(allowedActions({ production_status: 'Delayed' }, 'Staff').statuses, ['Pending']);
+    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Staff').statuses, ['Pressing', 'Ready'], 'no Cancel after approval, no Completed before Ready');
+    assert.deepEqual(allowedActions({ production_status: 'Delayed' }, 'Staff').statuses, ['Pending', 'Cancelled'], 'not approved yet: anyone may cancel');
     const approved = allowedActions({ production_status: 'Approved', total_quote_amount: 900 }, 'Owner');
     assert.deepEqual([approved.edit_quote, approved.generate_quote, approved.apply_discount], [false, false, false], 'the quote is frozen after approval');
     const unpriced = allowedActions({ production_status: 'Printing', total_quote_amount: 0 }, 'Owner');
-    assert.deepEqual([unpriced.edit_quote, unpriced.generate_quote], [true, true], 'approved without a quote: the price can still be set');
+    assert.deepEqual([unpriced.edit_quote, unpriced.generate_quote], [false, false], 'migration 017: the price is final once printing starts');
+    const approvedUnpriced = allowedActions({ production_status: 'Approved', total_quote_amount: 0 }, 'Owner');
+    assert.deepEqual([approvedUnpriced.edit_quote, approvedUnpriced.generate_quote], [true, true], 'approved without a quote: the price can still be set before printing');
     const closed = allowedActions({ production_status: 'Cancelled' }, 'Owner');
     assert.deepEqual([closed.statuses, closed.edit_deadline, closed.record_payment, closed.log_loss, closed.void_payment],
       [[], false, false, false, true], 'a cancelled order can still have its payments voided (refunds)');
@@ -132,24 +138,24 @@ describe('Owner-only rules and order screens (API)', () => {
     assert.equal((await t.request('GET', '/api/auth/me')).status, 401);
   });
 
-  it('shows the Owner the price and cancel buttons, and hides them from the Admin (who may approve)', async () => {
+  it('shows the Owner the price and cancel buttons, and the Admin the approve and cancel buttons', async () => {
     const owner = await t.request('GET', `/api/orders/${pendingId}`, { token: t.tokens.owner });
     assert.equal(owner.status, 200, owner.text);
     assert.deepEqual([owner.body.allowed_actions.approve, owner.body.allowed_actions.edit_quote, owner.body.allowed_actions.statuses],
       [true, true, ['Cancelled']]);
     const admin = await t.request('GET', `/api/orders/${pendingId}`, { token: t.tokens.admin });
     assert.deepEqual([admin.body.allowed_actions.approve, admin.body.allowed_actions.edit_quote, admin.body.allowed_actions.statuses],
-      [true, false, []]);
+      [true, false, ['Cancelled']]);
     assert.equal(admin.body.allowed_actions.edit_deadline, true);
     const list = await t.request('GET', '/api/orders', { token: t.tokens.admin });
     assert.ok(Array.isArray(list.body.capabilities) && !list.body.capabilities.includes('set_quote'));
   });
 
-  it('blocks the Admin from cancelling, and the server says why', async () => {
+  it('lets the Admin cancel (the change itself needs the cloud), and keeps "shop\u2019s fault" for managers', async () => {
     const r = await t.request('PATCH', `/api/orders/${delayedId}/status`, { token: t.tokens.admin, body: { status: 'Cancelled' } });
-    assert.equal(r.status, 403);
-    assert.equal(r.body.error, 'VOID_OWNER_ONLY');
-    assert.equal(r.body.message, 'Only the Owner can cancel an order. Ask the Owner to cancel it.');
+    assert.equal(r.status, 503, 'allowed: only the cloud is missing here');
+    const fault = await t.request('PATCH', `/api/orders/${delayedId}/status`, { token: t.tokens.staff, body: { status: 'Cancelled', shop_fault: true } });
+    assert.deepEqual([fault.status, fault.body.error], [403, 'CANCEL_NEEDS_MANAGER']);
     const resume = await t.request('PATCH', `/api/orders/${delayedId}/status`, { token: t.tokens.admin, body: { status: 'Pending' } });
     assert.equal(resume.status, 503, 'Resume is still allowed for the Admin (it only needs the cloud)');
   });

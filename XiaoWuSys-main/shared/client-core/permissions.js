@@ -14,7 +14,9 @@ export const NO_ORDER_ACTIONS = Object.freeze({
   edit_description: false, add_print_details: false, record_delivery: false, max_delivery: 0, complete_blocked_reason: null,
   complete_with_balance: false, refund_payment: false, max_refund: 0, verify_payment: false, edit_payment: false, adjust_price: false,
   // migration 016
-  approve_without_quote: false, plan_deliveries: false, manage_design_files: false
+  approve_without_quote: false, plan_deliveries: false, manage_design_files: false,
+  // migration 017
+  cancel: false, update_progress: false, max_adjustment: 0, add_items_needs_deadline_check: false, status_needs_confirm: {}
 });
 
 export const orderActions = (detail) => ({ ...NO_ORDER_ACTIONS, ...(detail && detail.allowed_actions) });
@@ -22,10 +24,10 @@ export const orderActions = (detail) => ({ ...NO_ORDER_ACTIONS, ...(detail && de
 // What each role may do, in plain words for the Accounts screen. Display text only, keyed by the
 // role names the server sends in "assignable_roles"; it never decides who may do what.
 export const ROLE_HELP = Object.freeze({
-  Owner: 'Everything, including quotes, discounts, cancelling orders and managing Owners',
-  Admin: 'Approves job orders and manages non-Owner accounts; no quotes, discounts or cancelling orders',
-  Staff: 'Creates orders (the Owner or an Admin approves them), payments, waste, deliveries and stock in / out',
-  Production: 'Creates orders (the Owner or an Admin approves them), payments, waste, deliveries and stock in / out'
+  Owner: 'Everything, including quotes, discounts, refunds and price cuts beyond the shop policy, and managing Owners',
+  Admin: 'Approves job orders, cancels them, adds items after approval, refunds and late-delivery price cuts up to the shop policy, manages non-Owner accounts; no quotes or discounts',
+  Staff: 'Creates orders (the Owner or an Admin approves them) and cancels them before approval, payments, production progress, waste, deliveries and stock in / out',
+  Production: 'Creates orders (the Owner or an Admin approves them) and cancels them before approval, payments, production progress, waste, deliveries and stock in / out'
 });
 
 /** Plain-words description of a role from the server, or '' for a role this version doesn't know. */

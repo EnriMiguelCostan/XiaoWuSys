@@ -39,6 +39,8 @@ const LOCAL_SYNC_COLUMNS = ['dirty_fields', 'cloud_last_modified', 'sync_conflic
 //   migration 016: inventory_items.requires_pressing (T-shirts); customers: the contact person's own
 //     number / email / social media; order_profiles.branch_id; order_deliveries.plan_id;
 //     material_loss.print_detail_id (the print line a loss ruined)
+//   migration 017: inventory_items.print_pricing; order_items progress / print areas / add-ons;
+//     order_profiles cancellation fee, stage, shop fault and the client's delay reason
 const TABLE_EXTRA_COLUMNS = {
   payments: [['received_by', 'TEXT'], ['receipt_no', 'TEXT'], ['voids_payment_id', 'TEXT'], ['void_reason', 'TEXT'],
              ['payer_name', 'TEXT'], ['reference_no', 'TEXT'], ['bank_name', 'TEXT'], ['account_name', 'TEXT'], ['cheque_no', 'TEXT'],
@@ -48,19 +50,23 @@ const TABLE_EXTRA_COLUMNS = {
                   ['is_statistical_anomaly', 'INTEGER DEFAULT 0'], ['loss_batch_id', 'TEXT'], ['print_detail_id', 'TEXT']],
   inventory_items: [['deleted_at', 'TEXT'], ['deleted_by', 'TEXT'], ['purged_at', 'TEXT'],
                     ['unit', "TEXT NOT NULL DEFAULT 'pcs'"], ['supplier', 'TEXT'], ['selling_price', 'REAL NOT NULL DEFAULT 0'],
-                    ['supplier_id', 'TEXT'], ['has_sizes', 'INTEGER DEFAULT 0'], ['requires_pressing', 'INTEGER DEFAULT 0']],
+                    ['supplier_id', 'TEXT'], ['has_sizes', 'INTEGER DEFAULT 0'], ['requires_pressing', 'INTEGER DEFAULT 0'],
+                    ['print_pricing', "TEXT DEFAULT 'included'"]],
   users: [['is_active', 'INTEGER NOT NULL DEFAULT 1'], ['tokens_valid_after', 'TEXT'], ['removed_at', 'TEXT'], ['removed_by', 'TEXT']],
   order_profiles: [['stock_reserved', 'INTEGER NOT NULL DEFAULT 0'], ['approved_by', 'TEXT'], ['approved_at', 'TEXT'],
                    ['tracking_no', 'TEXT'], ['last_edited_by', 'TEXT'], ['last_edited_role', 'TEXT'],
                    ['subtotal_amount', 'REAL NOT NULL DEFAULT 0'], ['discount_amount', 'REAL NOT NULL DEFAULT 0'],
                    ['discount_reason', 'TEXT'], ['cancellation_reason', 'TEXT'], ['archived_at', 'TEXT'], ['archived_by', 'TEXT'],
                    ['order_description', 'TEXT'], ['labor_amount', 'REAL DEFAULT 0'], ['incidental_amount', 'REAL DEFAULT 0'],
-                   ['adjustment_amount', 'REAL DEFAULT 0'], ['adjustment_reason', 'TEXT'], ['branch_id', 'TEXT']],
+                   ['adjustment_amount', 'REAL DEFAULT 0'], ['adjustment_reason', 'TEXT'], ['branch_id', 'TEXT'],
+                   ['cancellation_fee', 'REAL'], ['cancelled_stage', 'TEXT'], ['cancel_shop_fault', 'INTEGER DEFAULT 0'],
+                   ['client_delay_reason', 'TEXT']],
   customers: [['archived_at', 'TEXT'], ['archived_by', 'TEXT'], ['customer_type', "TEXT DEFAULT 'Individual'"],
               ['contact_person', 'TEXT'], ['email', 'TEXT'], ['address', 'TEXT'], ['social_media', 'TEXT'], ['notes', 'TEXT'],
               ['contact_person_number', 'TEXT'], ['contact_person_email', 'TEXT'], ['contact_person_social', 'TEXT']],
   order_deliveries: [['plan_id', 'TEXT']],
-  order_items: [['unit_cost', 'REAL']],
+  order_items: [['unit_cost', 'REAL'], ['qty_printed', 'INTEGER DEFAULT 0'], ['qty_pressed', 'INTEGER DEFAULT 0'],
+                ['print_areas', 'TEXT'], ['added_after_approval', 'INTEGER DEFAULT 0']],
   order_consumables_log: [['unit_cost', 'REAL']]
 };
 

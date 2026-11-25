@@ -27,9 +27,13 @@ const REASON_CODES = {
   heat_press_scorch: { label: 'Heat press scorch / temperature spike', category: 'Machine Failure' },
   printer_head_banding: { label: 'Printer nozzle clog / banding / inkblot', category: 'Machine Failure' },
   supplier_defect: { label: 'Defective blank / pinhole / stain from supplier', category: 'Product Defect' },
-  damaged_in_storage: { label: 'Damaged or lost in storage / handling', category: 'Human Error' }
+  damaged_in_storage: { label: 'Damaged or lost in storage / handling', category: 'Human Error' },
+  // migration 017: written by the system when an order is cancelled after printing (not a mistake)
+  cancelled_after_printing: { label: 'Printed for an order that was cancelled', category: null }
 };
-const REASON_CODE_LIST = Object.keys(REASON_CODES);
+// The codes a person may choose (the system writes cancelled_after_printing itself)
+const SYSTEM_CODES = ['cancelled_after_printing'];
+const REASON_CODE_LIST = Object.keys(REASON_CODES).filter((c) => !SYSTEM_CODES.includes(c));
 const HUMAN_CODES = REASON_CODE_LIST.filter((c) => REASON_CODES[c].category === 'Human Error');
 
 const CLUSTER_STAGES = ['Printing', 'Pressing'];

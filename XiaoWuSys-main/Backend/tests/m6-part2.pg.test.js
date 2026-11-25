@@ -55,7 +55,10 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
         [`${id}-l${++n}`, id, inventory_id, product_type, quantity]);
     }
   };
-  const setStatus = (id, status, token = production) => server.request('PATCH', `/api/orders/${id}/status`, { token, body: { status } });
+  // migration 017: Pressing / Ready need every piece printed / ready; these tests confirm "all done"
+  const setStatus = (id, status, token = production) => server.request('PATCH', `/api/orders/${id}/status`, {
+    token, body: { status, ...(['Pressing', 'Ready'].includes(status) ? { complete_counts: true } : {}) }
+  });
   const quote = (id, body = {}, token = owner) => server.request('POST', `/api/orders/${id}/quote`, { token, body });
 
   before(async () => {
@@ -200,6 +203,8 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     assert.equal(retry.status, 409, 'a repeated request is refused by the lifecycle');
     assert.deepEqual([(await stockOf('i-ink')).a, (await stockOf('i-paper')).a], [96, 35], 'and takes nothing');
 
+    const ready = await setStatus('o-press', 'Ready', admin);
+    assert.deepEqual([ready.status, ready.body.consumables_deducted], [200, []], 'Ready takes nothing after pressing');
     const done = await setStatus('o-press', 'Completed', admin);
     assert.equal(done.status, 200, done.text);
     assert.deepEqual(done.body.consumables_deducted.map((c) => [c.item_name, c.trigger_status, c.quantity_deducted]), [['Thread', 'Completed', 1]],
@@ -223,12 +228,18 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     assert.match(detail.body.consumables_deducted[0].deducted_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/);
   });
 
-  it('takes both kinds at once when an order skips Pressing', async () => {
+  it('takes the Pressing rates at Ready and the Completed ones at the end when an order skips Pressing', async () => {
+    await pool.query("UPDATE inventory_items SET requires_pressing = FALSE WHERE inventory_id = 'i-shirt-s'");
     await insertOrder('o-skip', 'Printing', [['i-shirt-s', 20]]);
+    const ready = await setStatus('o-skip', 'Ready');
+    assert.equal(ready.status, 200, ready.text);
+    assert.deepEqual(ready.body.consumables_deducted.map((c) => [c.trigger_status, c.consumable_inventory_id, c.quantity_deducted]),
+      [['Pressing', 'i-ink', 5], ['Pressing', 'i-paper', 20]]);
     const r = await setStatus('o-skip', 'Completed');
     assert.equal(r.status, 200, r.text);
     assert.deepEqual(r.body.consumables_deducted.map((c) => [c.trigger_status, c.consumable_inventory_id, c.quantity_deducted]),
-      [['Pressing', 'i-ink', 5], ['Pressing', 'i-paper', 20], ['Completed', 'i-thread', 2]]);
+      [['Completed', 'i-thread', 2]]);
+    await pool.query("UPDATE inventory_items SET requires_pressing = TRUE WHERE inventory_id = 'i-shirt-s'");
     await insertOrder('o-cancel', 'Printing', [['i-shirt-s', 20]]);
     assert.equal((await setStatus('o-cancel', 'Cancelled', owner)).body.consumables_deducted.length, 0, 'a cancelled order uses nothing');
   });
@@ -297,8 +308,8 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
 
     const preview = await quote('o-quote', { dry_run: true });
     assert.equal(preview.status, 200, preview.text);
-    assert.deepEqual([preview.body.dry_run, preview.body.calculation.tier.percent_off, preview.body.calculation.subtotal_amount], [true, 5, 11970]);
-    assert.deepEqual(preview.body.calculation.lines.map((l) => [l.unit_price, l.line_total]), [[190, 5700], [209, 6270]]);
+    assert.deepEqual([preview.body.dry_run, preview.body.calculation.tier.percent_off, preview.body.calculation.subtotal_amount], [true, 10, 11340], 'migration 017: 60 pieces = 10% off');
+    assert.deepEqual(preview.body.calculation.lines.map((l) => [l.unit_price, l.line_total]), [[180, 5400], [198, 5940]]);
     const untouched = (await pool.query("SELECT subtotal_amount::text AS s, total_quote_amount::text AS t FROM order_profiles WHERE order_id = 'o-quote'")).rows[0];
     assert.deepEqual(untouched, { s: '0.00', t: '0.00' }, 'a preview saves nothing');
     assert.deepEqual(await audits('o-quote'), []);
@@ -311,28 +322,28 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     const saved = await quote('o-quote', { discount_percent: 10, discount_reason: 'Loyal school customer' });
     assert.equal(saved.status, 200, saved.text);
     assert.deepEqual(saved.body.quote, {
-      has_quote: true, subtotal_amount: 11970, labor_amount: 0, incidental_amount: 0, gross_amount: 11970, adjustment_amount: 0, adjustment_reason: null, discount_amount: 1197, discount_reason: 'Loyal school customer', total_quote_amount: 10773
+      has_quote: true, subtotal_amount: 11340, labor_amount: 0, incidental_amount: 0, gross_amount: 11340, adjustment_amount: 0, adjustment_reason: null, discount_amount: 1134, discount_reason: 'Loyal school customer', total_quote_amount: 10206
     });
-    assert.equal(saved.body.message, 'Quote saved: ₱10,773.00 after a ₱1,197.00 discount.');
+    assert.equal(saved.body.message, 'Quote saved: ₱10,206.00 after a ₱1,134.00 discount.');
     const prices = (await pool.query("SELECT price::text AS p FROM order_items WHERE order_id = 'o-quote' ORDER BY line_item_id")).rows.map((r) => r.p);
-    assert.deepEqual(prices, ['190.00', '209.00'], 'each item keeps its unit price');
+    assert.deepEqual(prices, ['180.00', '198.00'], 'each item keeps its unit price');
     let trail = await audits('o-quote');
     assert.equal(trail.length, 1);
     assert.deepEqual([trail[0].action, trail[0].performed_by, trail[0].performed_role], ['discount_applied', 'u-owner', 'Owner']);
     assert.deepEqual([trail[0].details.before.total_quote_amount, trail[0].details.after.total_quote_amount, trail[0].details.discount_percent, trail[0].details.tier.percent_off],
-      [0, 10773, 10, 5]);
+      [0, 10206, 10, 10]);
     assert.deepEqual(server.orderEvents.updated.at(-1).order_id, 'o-quote', 'every screen hears about the new price');
 
-    // More pieces: the 10% tier, and the discount amount is kept
+    // More pieces: the 15% tier, and the discount amount is kept
     const added = await server.request('POST', '/api/orders/o-quote/items/bulk', {
       token: production, body: { items: [{ product_type: 'Jersey', quantity: 40, inventory_id: 'i-shirt-s', size: 'S' }] }
     });
     assert.equal(added.status, 201, added.text);
     const repriced = await quote('o-quote', {});
     assert.deepEqual([repriced.body.calculation.tier.percent_off, repriced.body.calculation.subtotal_amount, repriced.body.quote.discount_amount,
-      repriced.body.quote.total_quote_amount], [10, 30 * 180 + 30 * 198 + 40 * 180, 1197, 18540 - 1197]);
+      repriced.body.quote.total_quote_amount], [15, 30 * 170 + 30 * 187 + 40 * 170, 1134, 17510 - 1134]);
     const removed = await quote('o-quote', { discount_amount: 0 });
-    assert.deepEqual([removed.body.quote.discount_amount, removed.body.quote.discount_reason, removed.body.quote.total_quote_amount], [0, null, 18540]);
+    assert.deepEqual([removed.body.quote.discount_amount, removed.body.quote.discount_reason, removed.body.quote.total_quote_amount], [0, null, 17510]);
     trail = await audits('o-quote');
     assert.deepEqual(trail.map((a) => a.action), ['discount_applied', 'discount_applied', 'quote_generated']);
 
@@ -348,9 +359,9 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     const frozen = await quote('o-quote', { discount_amount: 10, discount_reason: 'late request' });
     assert.deepEqual([frozen.status, frozen.body.error], [409, 'QUOTE_LOCKED']);
     const detail = await server.request('GET', '/api/orders/o-quote', { token: owner });
-    assert.deepEqual([detail.body.quote.total_quote_amount, detail.body.allowed_actions.generate_quote, detail.body.allowed_actions.print_quote], [18540, false, true]);
+    assert.deepEqual([detail.body.quote.total_quote_amount, detail.body.allowed_actions.generate_quote, detail.body.allowed_actions.print_quote], [17510, false, true]);
     assert.deepEqual(detail.body.quote.lines.map((l) => [l.quantity, l.unit_price, l.line_total]).sort((a, b) => a[2] - b[2]),
-      [[30, 180, 5400], [30, 198, 5940], [40, 180, 7200]], 'the quotation lines add up to the subtotal');
+      [[30, 170, 5100], [30, 187, 5610], [40, 170, 6800]], 'the quotation lines add up to the subtotal');
   });
 
   it('audits a quote the Owner types in by hand, in the same transaction', async () => {

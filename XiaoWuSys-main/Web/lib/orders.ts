@@ -83,6 +83,11 @@ export interface Order {
   deadline_flag?: DeadlineFlag | string | null;
   /** PB 23: why the Owner cancelled the order (null when none was given) */
   cancellation_reason?: string | null;
+  /** migration 017: the fee kept on cancelling, the stage, the shop's fault; the client's delay */
+  cancellation_fee?: number | null;
+  cancelled_stage?: string | null;
+  cancel_shop_fault?: boolean;
+  client_delay_reason?: string | null;
   /** PB 23 / D2: archived (hidden from the list, read-only until restored, kept forever). UTC. */
   archived_at?: string | null;
   archived_by?: string | null;
@@ -192,6 +197,10 @@ export interface OrderOptions {
   delivery_methods: string[];
   garment_sizes: string[];
   print_limits: { print_type: number; name: number; number_digits: number; quantity: number; notes: number; bulk_rows: number };
+  /** migration 017 (absent on an older server) */
+  print_sizes?: { size: string; label: string; price: number }[];
+  print_placements?: string[];
+  volume_tiers?: { min_quantity: number; percent_off: number; label: string }[];
 }
 
 /** PB 14: one status change, oldest first in OrderDetail.status_history */
@@ -230,6 +239,11 @@ export interface OrderItem {
   /** migration 016: a T-shirt, so the order goes through Pressing */
   requires_pressing?: boolean;
   is_consumable?: boolean;
+  /** migration 017: JSON list of print areas; pieces printed / pressed; added to an approved order */
+  print_areas?: string | null;
+  qty_printed?: number;
+  qty_pressed?: number;
+  added_after_approval?: boolean;
 }
 
 /** PB 11 / PB 12: the quote as the server shows it (GET /api/orders/:id "quote"). The three
@@ -264,7 +278,7 @@ export interface QuoteBreakdown {
 export interface QuoteCalculation {
   total_quantity: number;
   tier: { min_quantity: number; percent_off: number; label: string };
-  lines: (QuoteLine & { selling_price: number })[];
+  lines: (QuoteLine & { selling_price: number; print_pricing?: 'included' | 'per_area'; print_areas?: PrintArea[]; print_charge?: number })[];
   subtotal_amount: number;
   labor_amount?: number;
   incidental_amount?: number;
@@ -274,6 +288,9 @@ export interface QuoteCalculation {
   discount_percent: number | null;
   discount_reason: string | null;
   total_quote_amount: number;
+  /** migration 017: what the blanks cost the shop; never-blocking warnings (big discount, below cost) */
+  cost_amount?: number;
+  warnings?: { code: string; message: string }[];
 }
 
 /** PB 15: what the order's status changes took from stock (GET /api/orders/:id) */
@@ -410,6 +427,59 @@ export interface OrderDetail {
   design_files?: DesignFile[];
   /** false: the cloud cannot be reached, so the design files cannot be listed right now */
   design_files_available?: boolean;
+  /** migration 017 (absent on an older server) */
+  progress?: ProductionProgress;
+  cancel_terms?: CancelTerms;
+  late_cut?: LateCut;
+}
+
+/** Migration 017: pieces printed / pressed / ready per item (consumables left out) */
+export interface ProgressLine {
+  line_item_id: string;
+  product_type: string;
+  size?: string | null;
+  quantity: number;
+  needs_pressing: boolean;
+  printed: number;
+  pressed: number;
+  ready: number;
+}
+export interface ProductionProgress {
+  lines: ProgressLine[];
+  pieces: number;
+  printed: number;
+  pressed: number;
+  ready: number;
+  press_pieces: number;
+  all_printed: boolean;
+  all_ready: boolean;
+  needs_pressing: boolean;
+}
+/** Migration 017: what the shop keeps if the order is cancelled now (or kept, once cancelled) */
+export interface CancelTerms {
+  stage: string | null;
+  rule: string | null;
+  fee: number;
+  kept: number;
+  paid: number;
+  suggested_refund: number;
+  shop_fault: boolean;
+}
+/** Migration 017: the late-delivery price cut the shop policy suggests */
+export interface LateCut {
+  applies: boolean;
+  client_caused: boolean;
+  days_late: number;
+  percent: number;
+  amount: number;
+  full_refund_eligible: boolean;
+  batches: { batch_no: number; planned_date: string; done_day: string; days_late: number; percent: number; amount: number }[];
+  note: string;
+}
+/** Migration 017: a print area on an order line (per-area items) */
+export interface PrintArea {
+  placement: string;
+  size: string;
 }
 
 /** GET /api/orders */

@@ -52,7 +52,7 @@ const SYNC_TABLES = [
     // supplier_id / has_sizes (migration 015): the usual supplier, and whether it is a garment
     // requires_pressing (migration 016): a T-shirt, so its orders go through the heat press
     columns: ['inventory_id', 'item_name', 'item_category', 'quantity_available', 'quantity_reserved', 'minimum_threshold', 'unit_cost',
-              'unit', 'supplier', 'deleted_at', 'deleted_by', 'purged_at', 'selling_price', 'supplier_id', 'has_sizes', 'requires_pressing'],
+              'unit', 'supplier', 'deleted_at', 'deleted_by', 'purged_at', 'selling_price', 'supplier_id', 'has_sizes', 'requires_pressing', 'print_pricing'],
     // M9: keep the locally reduced stock while an offline loss for this item is still unsynced
     refreshGuard: ` AND NOT EXISTS (SELECT 1 FROM material_loss ml
                       WHERE ml.inventory_id = excluded.inventory_id
@@ -88,18 +88,21 @@ const SYNC_TABLES = [
     columns: ['order_id', 'customer_id', 'date_created', 'production_deadline', 'production_status', 'design_drive_link', 'total_quote_amount',
               'stock_reserved', 'approved_by', 'approved_at', 'tracking_no', 'last_edited_by', 'last_edited_role',
               'subtotal_amount', 'discount_amount', 'discount_reason', 'cancellation_reason', 'archived_at', 'archived_by',
-              'order_description', 'labor_amount', 'incidental_amount', 'adjustment_amount', 'adjustment_reason', 'branch_id'],
+              'order_description', 'labor_amount', 'incidental_amount', 'adjustment_amount', 'adjustment_reason', 'branch_id',
+              'cancellation_fee', 'cancelled_stage', 'cancel_shop_fault', 'client_delay_reason'],
     // Given by the cloud database (migration 007 trigger): never pushed, copied back after a push.
     // archived_at / archived_by (migration 013): archiving needs the cloud, so a push never clears them.
     // labor_amount / incidental_amount / adjustment_* (migration 015): set only by the Owner, online
-    cloudOwned: ['tracking_no', 'archived_at', 'archived_by', 'labor_amount', 'incidental_amount', 'adjustment_amount', 'adjustment_reason']
+    cloudOwned: ['tracking_no', 'archived_at', 'archived_by', 'labor_amount', 'incidental_amount', 'adjustment_amount', 'adjustment_reason',
+                 'cancellation_fee', 'cancelled_stage', 'cancel_shop_fault', 'client_delay_reason']
   },
   {
     table: 'order_items',
     id: 'line_item_id',
     // unit_cost (migration 013): set in the cloud when the order is Completed; never pushed
-    columns: ['line_item_id', 'order_id', 'inventory_id', 'product_type', 'quantity', 'size', 'custom_name', 'custom_number', 'price', 'unit_cost'],
-    cloudOwned: ['unit_cost']
+    columns: ['line_item_id', 'order_id', 'inventory_id', 'product_type', 'quantity', 'size', 'custom_name', 'custom_number', 'price', 'unit_cost',
+              'qty_printed', 'qty_pressed', 'print_areas', 'added_after_approval'],
+    cloudOwned: ['unit_cost', 'qty_printed', 'qty_pressed', 'added_after_approval']
   },
   {
     // Migration 015: print details (sizes / names / numbers). Added online or offline (pushed

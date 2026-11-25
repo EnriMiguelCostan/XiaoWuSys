@@ -234,7 +234,7 @@ export function QuoteSection({
           <FormProblem message={problem} />
           <div className="grid gap-3 sm:grid-cols-[10rem_auto_10rem]">
             <Field id="labor-input" label="Labor and services (₱)" error={fieldErrors.labor_amount}>
-              <Input id="labor-input" type="number" min={0} max={MONEY_INPUT_MAX} step="0.01" inputMode="decimal" placeholder="0.00" value={labor}
+              <Input id="labor-input" type="number" min={0} max={MONEY_INPUT_MAX} step="any" inputMode="decimal" placeholder="0.00" value={labor}
                 onChange={(e) => { setLabor(e.target.value); setPreview(null); }} />
             </Field>
             <div className="flex flex-col gap-1.5">
@@ -247,7 +247,7 @@ export function QuoteSection({
             </div>
             <Field id="incidental-input" label={incidentalMode === 'percent' ? 'Incidental (%)' : 'Incidental (₱)'}
               error={fieldErrors.incidental_amount || fieldErrors.incidental_percent} hint={incidentalMode === 'percent' ? 'Of materials + labor' : undefined}>
-              <Input id="incidental-input" type="number" min={0} step="0.01" inputMode="decimal" placeholder="0" value={incidental}
+              <Input id="incidental-input" type="number" min={0} step="any" inputMode="decimal" placeholder="0" value={incidental}
                 onChange={(e) => { setIncidental(e.target.value); setPreview(null); }} />
             </Field>
           </div>
@@ -281,7 +281,7 @@ export function QuoteSection({
                       type="number"
                       min={0}
                       max={mode === 'percent' ? DISCOUNT_LIMITS.percentMax : MONEY_INPUT_MAX}
-                      step="0.01"
+                      step="any"
                       placeholder={mode === 'percent' ? 'e.g. 10' : 'e.g. 150'}
                       inputMode="decimal"
                       value={value}
@@ -338,6 +338,14 @@ export function QuoteSection({
                         <TableCell className="min-w-32 whitespace-normal wrap-anywhere">
                           {l.product_type}
                           {l.size ? <span className="text-muted-foreground"> · {l.size}</span> : null}
+                          {l.print_pricing === 'per_area' && (
+                            <span className="block text-xs text-muted-foreground">
+                              Blank {peso(l.selling_price)}
+                              {l.print_areas?.length
+                                ? ` + ${l.print_areas.map((a) => `${a.placement} ${a.size}`).join(', ')} (${peso(l.print_charge ?? 0)} before the bulk price)`
+                                : ' · no print areas chosen'}
+                            </span>
+                          )}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">{l.quantity.toLocaleString()}</TableCell>
                         <TableCell className="text-right tabular-nums">{peso(l.unit_price)}</TableCell>
@@ -348,7 +356,14 @@ export function QuoteSection({
                 </Table>
               </div>
               <Totals quote={preview} />
-              <p className="text-xs text-muted-foreground">Nothing is saved until you press Save quote.</p>
+              {preview.warnings?.map((w) => (
+                <p key={w.code} className={cn('rounded-md border p-2 text-sm', TONE_CLASSES.warning.banner)}>
+                  {w.message}
+                </p>
+              ))}
+              <p className="text-xs text-muted-foreground">
+                The discount comes off the work (items and labor) before the incidental charges are added. Nothing is saved until you press Save quote.
+              </p>
             </div>
           )}
 
@@ -382,7 +397,21 @@ export function PriceCutPanel({ detail, actions, onResult }: { detail: OrderDeta
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [delayReason, setDelayReason] = useState(detail.order.client_delay_reason ?? '');
+  const late = detail.late_cut;
   if (!actions.adjust_price) return null;
+
+  // migration 017: the delay was the client's doing (late design, payment, changes): no cut suggested
+  const saveDelay = async (reasonValue: string | null) => {
+    setBusy(true);
+    const { ok, data } = await api<{ message?: string }>('PATCH', `/orders/${encodeURIComponent(detail.order.order_id)}/client-delay`, { reason: reasonValue });
+    setBusy(false);
+    if (!ok) {
+      setProblem(bannerText(data, [], "The client's delay was not saved."));
+      return;
+    }
+    onResult({ type: 'success', title: reasonValue ? 'Delay marked as the client’s' : 'Client delay cleared', message: data.message ?? 'Saved.' }, true);
+  };
 
   const save = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -410,6 +439,13 @@ export function PriceCutPanel({ detail, actions, onResult }: { detail: OrderDeta
 
   return (
     <div className="space-y-2">
+      {late && (late.days_late > 0 || late.client_caused) && (
+        <p className="rounded-md border bg-muted/30 p-3 text-sm">
+          <strong>Late delivery (shop policy):</strong> {late.note}{' '}
+          {late.applies && <>Suggested price cut: <strong>{peso(late.amount)}</strong> ({late.percent}% of the bill: 1 day of grace, then 2% a day, at most 10%).</>}
+          {late.full_refund_eligible && ' The order is 7 days late or more: the client may also cancel for a full refund (the shop’s fault).'}
+        </p>
+      )}
       {!open ? (
         <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
           <BadgePercent aria-hidden /> {current ? 'Change the price cut' : 'Cut the price (late delivery, error)'}
@@ -418,11 +454,25 @@ export function PriceCutPanel({ detail, actions, onResult }: { detail: OrderDeta
         <form onSubmit={save} className="space-y-3 rounded-md border bg-muted/30 p-3">
           <p className="text-xs text-muted-foreground">
             The whole price cut so far (₱0 removes it). The downpayment already checked stays valid. If the customer paid more than the new bill, refund the difference under Payments.
+            {actions.max_adjustment > 0 && ` You can give up to ${peso(actions.max_adjustment)}.`}
           </p>
+          {late?.applies && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setAmount(String(late.amount));
+                if (!reason.trim()) setReason(`Delivered ${late.days_late} days late`);
+              }}
+            >
+              Use the suggested {peso(late.amount)}
+            </Button>
+          )}
           <FormProblem message={problem} />
           <div className="grid gap-3 sm:grid-cols-[10rem_1fr]">
             <Field id="cut-value" label="Price cut (₱)" error={fieldErrors.adjustment_amount}>
-              <Input id="cut-value" type="number" min={0} max={MONEY_INPUT_MAX} step="0.01" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
+              <Input id="cut-value" type="number" min={0} max={MONEY_INPUT_MAX} step="any" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
             </Field>
             <Field id="cut-reason" label="Reason *" error={fieldErrors.adjustment_reason}>
               <Input id="cut-reason" maxLength={500} placeholder="e.g. Delivered 3 days late" value={reason} onChange={(e) => setReason(e.target.value)} />
@@ -435,6 +485,27 @@ export function PriceCutPanel({ detail, actions, onResult }: { detail: OrderDeta
             <Button type="submit" size="sm" busy={busy} disabled={busy}>
               {busy ? 'Saving…' : 'Save price cut'}
             </Button>
+          </div>
+          <div className="space-y-2 border-t pt-3">
+            <Field id="client-delay" label="The client caused the delay (no late-delivery cut)">
+              <Input
+                id="client-delay"
+                maxLength={300}
+                placeholder="e.g. Design approved 4 days late"
+                value={delayReason}
+                onChange={(e) => setDelayReason(e.target.value)}
+              />
+            </Field>
+            <div className="flex justify-end gap-2">
+              {detail.order.client_delay_reason && (
+                <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => void saveDelay(null)}>
+                  Clear
+                </Button>
+              )}
+              <Button type="button" variant="outline" size="sm" disabled={busy || !delayReason.trim()} onClick={() => void saveDelay(delayReason.trim())}>
+                Save the client&apos;s delay
+              </Button>
+            </div>
           </div>
         </form>
       )}

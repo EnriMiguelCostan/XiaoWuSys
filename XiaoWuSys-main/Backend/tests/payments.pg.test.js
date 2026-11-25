@@ -31,7 +31,7 @@ describe('Payments and receipt numbers on real PostgreSQL', { skip }, () => {
     `INSERT INTO order_profiles (order_id, customer_id, production_deadline, production_status, total_quote_amount)
      VALUES ($1, 'c-1', '2030-12-31 00:00:00', $2, $3)`, [id, status, quote]);
   const pay = (orderId, amount, token = production) =>
-    server.request('POST', `/api/orders/${orderId}/payments`, { token, body: { amount, payment_type: 'Cash' } });
+    server.request('POST', `/api/orders/${orderId}/payments`, { token, body: { amount, payment_type: 'Cash', payer_name: 'Juan Dela Cruz' } });
 
   before(async () => {
     const { Pool } = require('pg'); // only needed when this suite runs

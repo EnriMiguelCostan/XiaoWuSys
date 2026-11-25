@@ -251,12 +251,12 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     const quote = await call('POST', `/api/orders/${ids.order}/quote`, owner, { labor_amount: 500, incidental_percent: 5 });
     assert.equal(quote.status, 200, quote.text);
     const q = quote.body.calculation;
-    assert.deepEqual([q.subtotal_amount, q.labor_amount, q.incidental_amount, q.gross_amount, q.total_quote_amount], [31500, 500, 1600, 33600, 33600],
-      '140 x ₱225 (10% bulk), + ₱500 labor, + 5% of ₱32,000');
-    assert.deepEqual([quote.body.quote.labor_amount, quote.body.quote.incidental_amount], [500, 1600]);
+    assert.deepEqual([q.subtotal_amount, q.labor_amount, q.incidental_amount, q.gross_amount, q.total_quote_amount], [29750, 500, 1512.5, 31762.5, 31762.5],
+      '140 x ₱212.50 (15% bulk, migration 017), + ₱500 labor, + 5% of ₱30,250');
+    assert.deepEqual([quote.body.quote.labor_amount, quote.body.quote.incidental_amount], [500, 1512.5]);
     assert.equal((await call('POST', `/api/orders/${ids.order}/quote`, owner, { incidental_amount: 10, incidental_percent: 1 })).status, 400);
 
-    const noBank = await call('POST', `/api/orders/${ids.order}/payments`, staff, { amount: 16800, payment_type: 'Bank Transfer', reference_no: 'FT-1' });
+    const noBank = await call('POST', `/api/orders/${ids.order}/payments`, staff, { amount: 16800, payment_type: 'Bank Transfer', payer_name: 'Juan Dela Cruz', reference_no: 'FT-1' });
     assert.deepEqual([noBank.status, noBank.body.details[0].field], [400, 'bank_name']);
     const paid = await call('POST', `/api/orders/${ids.order}/payments`, staff, {
       amount: 16800, payment_type: 'Bank Transfer', bank_name: 'BDO', reference_no: 'FT-20261120-01', account_name: 'Agdao NHS PTA',
@@ -267,7 +267,7 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.deepEqual([paid.body.payment.bank_name, paid.body.payment.payer_name, paid.body.payment.payment_date.slice(0, 10)],
       ['BDO', 'Mrs. Lopez', localDateTime(new Date(Date.now() - 3 * 86400000)).slice(0, 10)], 'paid three days ago (14:30 Manila = 06:30 UTC)');
     assert.ok(paid.body.payment.recorded_at, 'recorded now');
-    const cashExtra = await call('POST', `/api/orders/${ids.order}/payments`, staff, { amount: 1, payment_type: 'Cash', bank_name: 'ignored' });
+    const cashExtra = await call('POST', `/api/orders/${ids.order}/payments`, staff, { amount: 1, payment_type: 'Cash', payer_name: 'Juan Dela Cruz', bank_name: 'ignored' });
     assert.equal(cashExtra.status, 201);
     assert.equal(cashExtra.body.payment.bank_name, null, 'details a method does not use are not saved');
     await pool.query('DELETE FROM payments WHERE payment_id = $1', [cashExtra.body.payment.payment_id]);
@@ -277,7 +277,8 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.equal(approve.status, 200, approve.text);
     assert.equal((await call('PATCH', `/api/orders/${ids.order}/status`, staff, { status: 'Printing' })).status, 200);
     const printing = await call('GET', `/api/orders/${ids.order}`, staff);
-    assert.deepEqual(printing.body.allowed_actions.statuses, ['Pressing', 'Ready', 'Completed'], 'T-shirts are pressed (migration 016)');
+    assert.deepEqual(printing.body.allowed_actions.statuses, ['Pressing'], 'T-shirts are pressed before Ready (migration 017)');
+    assert.deepEqual([printing.body.progress.pieces, printing.body.progress.printed, printing.body.progress.needs_pressing], [140, 0, true]);
     assert.equal(printing.body.needs_pressing, true);
   });
 
@@ -287,19 +288,28 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.equal(mug.status, 201, mug.text);
     ids.mugOrder = mug.body.order_id;
     assert.equal((await call('POST', `/api/orders/${ids.mugOrder}/quote`, owner, {})).status, 200);
-    assert.equal((await call('POST', `/api/orders/${ids.mugOrder}/payments`, staff, { amount: 600, payment_type: 'Cash' })).status, 201);
+    assert.equal((await call('POST', `/api/orders/${ids.mugOrder}/payments`, staff, { amount: 600, payment_type: 'Cash', payer_name: 'Juan Dela Cruz' })).status, 201);
     const d = await call('GET', `/api/orders/${ids.mugOrder}`, owner);
     assert.equal((await call('POST', `/api/orders/${ids.mugOrder}/approve`, owner, { expected_version: d.body.order.version })).status, 200);
     assert.equal((await call('PATCH', `/api/orders/${ids.mugOrder}/status`, staff, { status: 'Printing' })).status, 200);
     const shown = await call('GET', `/api/orders/${ids.mugOrder}`, staff);
-    assert.deepEqual([shown.body.has_garments, shown.body.needs_pressing, shown.body.allowed_actions.statuses], [false, false, ['Ready', 'Completed']]);
+    assert.deepEqual([shown.body.has_garments, shown.body.needs_pressing, shown.body.allowed_actions.statuses], [false, false, ['Ready']]);
     const pressed = await call('PATCH', `/api/orders/${ids.mugOrder}/status`, staff, { status: 'Pressing' });
     assert.deepEqual([pressed.status, pressed.body.error], [409, 'PRESSING_NOT_APPLICABLE']);
   });
 
   it('hands an order over in batches, and completes it only when it is all delivered and paid', async () => {
     const batch = (quantity, extra = {}) => call('POST', `/api/orders/${ids.order}/deliveries`, staff, { quantity, method: 'Pick-up', received_by_name: 'Mr. Cruz', ...extra });
+    // migration 017: only finished pieces are handed over
+    const notReady = await batch(10);
+    assert.deepEqual([notReady.status, notReady.body.error], [409, 'PIECES_NOT_READY']);
+    const progress = await call('POST', `/api/orders/${ids.order}/progress`, staff, { lines: [{ line_item_id: (await call('GET', `/api/orders/${ids.order}`, staff)).body.items[0].line_item_id, printed: 120, pressed: 100 }] });
+    assert.equal(progress.status, 200, progress.text);
+    assert.deepEqual([progress.body.progress.printed, progress.body.progress.pressed, progress.body.progress.ready], [120, 100, 100]);
     assert.equal((await batch(100, { delivered_at: pastLocal(1, 16) })).status, 201);
+    assert.equal((await batch(1)).body.error, 'PIECES_NOT_READY', '100 ready, 100 handed over');
+    assert.equal((await call('PATCH', `/api/orders/${ids.order}/status`, staff, { status: 'Pressing', complete_counts: true })).status, 200);
+    assert.equal((await call('PATCH', `/api/orders/${ids.order}/status`, staff, { status: 'Ready', complete_counts: true })).status, 200);
     const tooMany = await batch(50);
     assert.deepEqual([tooMany.status, tooMany.body.error, tooMany.body.remaining], [409, 'DELIVERY_EXCEEDS_REMAINING', 40]);
     assert.equal((await call('POST', `/api/orders/${ids.order}/deliveries`, production, { quantity: 50 })).body.error, 'DELIVERY_EXCEEDS_REMAINING',
@@ -311,7 +321,7 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.match(d.body.allowed_actions.complete_blocked_reason, /still unpaid.*40 of 140 pieces/);
     assert.deepEqual([d.body.fulfillment.pieces_delivered, d.body.fulfillment.pieces_remaining, d.body.allowed_actions.max_delivery], [100, 40, 40]);
 
-    assert.equal((await call('POST', `/api/orders/${ids.order}/payments`, staff, { amount: 16800, payment_type: 'Cash' })).status, 201);
+    assert.equal((await call('POST', `/api/orders/${ids.order}/payments`, staff, { amount: 14962.5, payment_type: 'Cash', payer_name: 'Mrs. Lopez' })).status, 201);
     const stillShort = await call('PATCH', `/api/orders/${ids.order}/status`, staff, { status: 'Completed' });
     assert.deepEqual(stillShort.body.missing.map((m) => m.code), ['PIECES_NOT_DELIVERED']);
     const last = await batch(40, { method: 'Courier', notes: 'LBC tracking 123' });
@@ -325,6 +335,7 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.equal((await call('POST', `/api/orders/${ids.order}/deliveries`, staff, { quantity: 1 })).body.error, 'DELIVERY_NOT_ALLOWED');
 
     // One pick-up, no batches recorded: completing records the hand-over of every piece
+    assert.equal((await call('PATCH', `/api/orders/${ids.mugOrder}/status`, staff, { status: 'Ready', complete_counts: true })).status, 200);
     const mugDone = await call('PATCH', `/api/orders/${ids.mugOrder}/status`, staff, { status: 'Completed', handover: { received_by_name: 'Juan', method: 'Pick-up' } });
     assert.equal(mugDone.status, 200, mugDone.text);
     assert.deepEqual(await one_("SELECT batch_no, quantity, received_by_name FROM order_deliveries WHERE order_id = $1", [ids.mugOrder]),
@@ -355,14 +366,14 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     const refund = (order, amount, token = owner, extra = {}) => call('POST', `/api/orders/${order}/refunds`, token,
       { amount, refund_reason: 'Late delivery (price cut)', payment_type: 'Cash', ...extra });
     assert.deepEqual((await refund(ids.order, 100)).body.error, 'REFUND_NOT_ALLOWED', 'fully paid, nothing above the bill');
-    assert.equal((await refund(ids.order, 100, admin)).status, 403, 'money back is the Owner’s decision');
+    assert.equal((await refund(ids.order, 100, staff)).status, 403, 'money back is for the Owner or an Admin');
     const cut = await call('POST', `/api/orders/${ids.order}/price-adjustment`, owner, { adjustment_amount: 1000, adjustment_reason: 'Delivered 2 days late' });
     assert.equal(cut.status, 200, cut.text);
-    assert.deepEqual([cut.body.order.total_quote_amount, cut.body.totals.overpaid_by], [32600, 1000]);
+    assert.deepEqual([cut.body.order.total_quote_amount, cut.body.totals.overpaid_by], [30762.5, 1000]);
     assert.match(cut.body.message, /refund it/);
     assert.equal((await call('POST', `/api/orders/${ids.order}/price-adjustment`, owner, { adjustment_amount: 50 })).status, 400, 'a reason is required');
     assert.deepEqual([(await refund(ids.order, 1500)).body.error, (await refund(ids.order, 1500)).body.max_refund], ['REFUND_EXCEEDS_PAID', 1000]);
-    const back = await refund(ids.order, 1000);
+    const back = await refund(ids.order, 1000, admin);
     assert.equal(back.status, 201, back.text);
     assert.deepEqual([back.body.payment.amount, back.body.payment.is_refund, back.body.totals.payment_status, back.body.totals.total_refunded],
       [-1000, true, 'Fully Paid', 1000]);
@@ -371,7 +382,7 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     // A cancelled order: everything paid may go back
     const lost = await call('POST', '/api/orders', staff, { customer_id: 'c-2', production_deadline: shopDate(5), required_items: [{ inventory_id: 'i-mug', quantity_needed: 2 }] });
     assert.equal((await call('POST', `/api/orders/${lost.body.order_id}/quote`, owner, {})).status, 200);
-    assert.equal((await call('POST', `/api/orders/${lost.body.order_id}/payments`, staff, { amount: 120, payment_type: 'Cash' })).status, 201);
+    assert.equal((await call('POST', `/api/orders/${lost.body.order_id}/payments`, staff, { amount: 120, payment_type: 'Cash', payer_name: 'Juan Dela Cruz' })).status, 201);
     assert.equal((await call('PATCH', `/api/orders/${lost.body.order_id}/status`, owner, { status: 'Cancelled', cancellation_reason: 'Customer changed mind' })).status, 200);
     assert.equal((await refund(lost.body.order_id, 120, owner, { refund_reason: 'Order cancelled' })).status, 201);
     assert.equal((await refund(lost.body.order_id, 1, owner, { refund_reason: 'Order cancelled' })).body.error, 'NOTHING_TO_REFUND');
@@ -388,7 +399,7 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.equal(p.status, 200, p.text);
     assert.deepEqual([p.body.customer.customer_type, p.body.customer.contact_person], ['School', 'Mrs. Lopez']);
     assert.deepEqual([p.body.totals.order_count, p.body.totals.open_orders], [2, 1], 'the old Pending order and the completed one');
-    assert.equal(p.body.totals.total_billed, 32600);
+    assert.equal(p.body.totals.total_billed, 30762.5);
     assert.equal(p.body.allowed_actions.edit, true, 'Production edits like Staff');
     assert.equal(p.body.allowed_actions.archive, false, 'archiving stays with the Owner / Admin');
   });

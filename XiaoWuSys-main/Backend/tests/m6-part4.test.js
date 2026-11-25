@@ -60,7 +60,7 @@ describe('M6 part 4 offline: archived orders and customers', () => {
       [true, false, false]);
     assert.match(detail.body.allowed_actions.payment_blocked_reason, /archived/);
     const attempts = [
-      ['POST', `/api/orders/${orderId}/payments`, { amount: 10, payment_type: 'Cash' }],
+      ['POST', `/api/orders/${orderId}/payments`, { amount: 10, payment_type: 'Cash', payer_name: 'Juan Dela Cruz' }],
       ['PATCH', `/api/orders/${orderId}/details`, { production_deadline: shopDate(20) }],
       ['PATCH', `/api/orders/${orderId}/design`, { design_drive_link: 'https://drive.google.com/file/d/abc' }],
       ['POST', `/api/orders/${orderId}/items`, { product_type: 'Mug', quantity: 1 }],

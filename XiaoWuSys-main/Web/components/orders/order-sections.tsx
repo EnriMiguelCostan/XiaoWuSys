@@ -17,6 +17,7 @@ import { Field, FormProblem } from '@/components/forms/form-bits';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { JumpToSection, ORDER_SECTION, type OrderSectionKey } from '@/components/orders/jump-to-section';
+import { parseAreas, PrintAreasEditor } from '@/components/orders/print-areas-editor';
 import { DeadlineBadge, OrderStatusBadge } from '@/components/orders/status-badges';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -28,7 +29,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { useApi } from '@/hooks/use-api';
 import { errorMessage } from '@/lib/api';
 import { toNumberInput } from '@/lib/inventory';
-import type { Customer, OrderDetail } from '@/lib/orders';
+import type { Customer, OrderDetail, PrintArea } from '@/lib/orders';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
 import { MONEY_INPUT_MAX, TEXT_MAX } from '@/lib/input-limits';
@@ -263,7 +264,7 @@ export function DetailsEditor({
         )}
         {actions.edit_quote && (
           <Field id="edit-price" label="Quote (₱)">
-            <Input id="edit-price" type="number" min={0} max={MONEY_INPUT_MAX} step="0.01" inputMode="decimal" value={form.quote} onChange={(e) => setForm({ ...form, quote: e.target.value })} />
+            <Input id="edit-price" type="number" min={0} max={MONEY_INPUT_MAX} step="any" inputMode="decimal" value={form.quote} onChange={(e) => setForm({ ...form, quote: e.target.value })} />
           </Field>
         )}
       </div>
@@ -388,6 +389,13 @@ export function MaterialsSection({
   const [qty, setQty] = useState('');
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
+  // migration 017: print areas of a per-area item, and the deadline decision for an add-on
+  const [areas, setAreas] = useState<PrintArea[]>([]);
+  const [needsDeadline, setNeedsDeadline] = useState(false);
+  const [newDeadline, setNewDeadline] = useState('');
+  const [keepReason, setKeepReason] = useState('');
+  const chosen = snapshot?.items.find((i) => i.inventory_id === itemId);
+  const approved = !['Pending', 'Delayed'].includes(detail.order.production_status);
 
   const add = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -403,19 +411,27 @@ export function MaterialsSection({
       return;
     }
     setBusy(true);
-    const { ok, data } = await api<{ message?: string }>('POST', orderPath(detail, 'items'), {
+    const { ok, data } = await api<{ message?: string; error?: string }>('POST', orderPath(detail, 'items'), {
       inventory_id: item.inventory_id,
       product_type: item.item_name.slice(0, 100),
       quantity,
+      ...(item.print_pricing === 'per_area' && areas.length ? { print_areas: areas } : {}),
+      ...(newDeadline ? { new_deadline: newDeadline } : {}),
+      ...(keepReason.trim() ? { keep_deadline_reason: keepReason.trim() } : {}),
     });
     setBusy(false);
     if (!ok) {
+      if (data.error === 'ADD_ON_NEEDS_DEADLINE') setNeedsDeadline(true);
       setProblem(errorMessage(data, 'The material was not added.'));
       return;
     }
     setAdding(false);
     setItemId('');
     setQty('');
+    setAreas([]);
+    setNeedsDeadline(false);
+    setNewDeadline('');
+    setKeepReason('');
     onResult({ type: 'success', title: 'Material added', message: data.message ?? 'The material was added to this order.' }, true);
   };
 
@@ -462,7 +478,17 @@ export function MaterialsSection({
                           consumable
                         </Badge>
                       )}
+                      {it.added_after_approval && (
+                        <Badge variant="outline" className={TONE_CLASSES.warning.badge}>
+                          added after approval
+                        </Badge>
+                      )}
                     </span>
+                    {parseAreas(it.print_areas).length > 0 && (
+                      <span className="block text-xs text-muted-foreground">
+                        Prints: {parseAreas(it.print_areas).map((a) => `${a.placement} ${a.size}`).join(', ')}
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell className="hidden sm:table-cell">{it.item_category ?? '—'}</TableCell>
                   <TableCell className="text-right tabular-nums">
@@ -496,6 +522,23 @@ export function MaterialsSection({
               <Input id="add-material-qty" type="number" min={1} step={1} inputMode="numeric" value={qty} onChange={(e) => setQty(e.target.value)} />
             </Field>
           </div>
+          {chosen?.print_pricing === 'per_area' && <PrintAreasEditor id="add-material-prints" value={areas} onChange={setAreas} disabled={busy} />}
+          {approved && (
+            <p className={cn('rounded-md border p-2 text-xs', TONE_CLASSES.warning.banner)}>
+              The job order is already approved: the new item is priced on its own and added to the bill. Close to the deadline (3 days or
+              less) or for more than 25% extra pieces, set a later deadline or write why the deadline still holds.
+            </p>
+          )}
+          {needsDeadline && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field id="add-on-deadline" label="New deadline">
+                <DateInput id="add-on-deadline" min={todayInManila()} value={newDeadline} onChange={(e) => setNewDeadline(e.target.value)} />
+              </Field>
+              <Field id="add-on-keep" label="Or: why the deadline still holds">
+                <Input id="add-on-keep" maxLength={300} placeholder="e.g. Same design, 10 pieces: 2 hours of work" value={keepReason} onChange={(e) => setKeepReason(e.target.value)} />
+              </Field>
+            </div>
+          )}
           <p className="text-xs text-muted-foreground">
             {detail.order.stock_reserved ? 'This order holds its stock, so the new material is reserved now.' : 'It is reserved when the order is approved.'}
           </p>

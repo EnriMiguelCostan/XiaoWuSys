@@ -45,6 +45,7 @@ import {
   type RequiredItem,
 } from '@/components/orders/create-order-panels';
 import { ShortageTable } from '@/components/orders/shortage-table';
+import { PrintAreasEditor } from '@/components/orders/print-areas-editor';
 import { DESIGN_FILE_ACCEPT, DESIGN_FILE_MAX_MB, fileSize, uploadDesignFiles } from '@/components/orders/design-files-section';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -69,7 +70,7 @@ import { useInventorySnapshot } from '@/hooks/use-inventory-snapshot';
 import { useSession } from '@/hooks/use-session';
 import { errorMessage } from '@/lib/api';
 import { toNumberInput, type InventoryItem } from '@/lib/inventory';
-import type { CustomerBranch, Order, OrderItem, Shortage } from '@/lib/orders';
+import type { CustomerBranch, Order, OrderItem, PrintArea, Shortage } from '@/lib/orders';
 import { lookFor, STOCK_STATUS, TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
 import { MONEY_INPUT_MAX, TEXT_MAX, WHOLE_NUMBER_MAX } from '@/lib/input-limits';
@@ -78,12 +79,14 @@ interface Line {
   key: number;
   inventory_id: string;
   quantity: string;
+  /** migration 017: print areas of a per-area item (blank + each print) */
+  print_areas?: PrintArea[];
 }
 
 interface OrderPayload {
   customer_id: string;
   production_deadline: string;
-  required_items: { inventory_id: string; quantity_needed: number }[];
+  required_items: { inventory_id: string; quantity_needed: number; print_areas?: PrintArea[] }[];
   total_quote_amount?: number;
   order_description?: string;
   /** migration 016 */
@@ -207,8 +210,12 @@ export function CreateOrderScreen() {
     () =>
       lines
         .filter((l) => l.inventory_id && /^\d+$/.test(l.quantity) && Number(l.quantity) > 0)
-        .map((l) => ({ inventory_id: l.inventory_id, quantity_needed: Number(l.quantity) })),
-    [lines]
+        .map((l) => ({
+          inventory_id: l.inventory_id,
+          quantity_needed: Number(l.quantity),
+          ...(materialById.get(l.inventory_id)?.print_pricing === 'per_area' && l.print_areas?.length ? { print_areas: l.print_areas } : {}),
+        })),
+    [lines, materialById]
   );
   const stockCheck = useStockCheck(readyItems);
   const shortageById = useMemo(
@@ -390,7 +397,10 @@ export function CreateOrderScreen() {
     const whoName = addingCustomer ? newCustomer.full_name.trim() : customers.find((c) => c.customer_id === customerId)?.full_name ?? 'the customer';
 
     // Input checks only (format, not business rules)
-    const required_items = lines.map((l) => ({ inventory_id: l.inventory_id, quantity_needed: Number(l.quantity) }));
+    const required_items = lines.map((l) => {
+      const perArea = materialById.get(l.inventory_id)?.print_pricing === 'per_area';
+      return { inventory_id: l.inventory_id, quantity_needed: Number(l.quantity), ...(perArea && l.print_areas?.length ? { print_areas: l.print_areas } : {}) };
+    });
     if (required_items.some((i) => !i.inventory_id)) {
       setProblem('Choose a material on every line, or remove the empty line.');
       return;
@@ -813,6 +823,15 @@ export function CreateOrderScreen() {
                               <Trash2 aria-hidden />
                             </Button>
                           </div>
+                          {m?.print_pricing === 'per_area' && (
+                            <div className="mt-2">
+                              <PrintAreasEditor
+                                id={`line-prints-${line.key}`}
+                                value={line.print_areas ?? []}
+                                onChange={(next) => setLine(line.key, { print_areas: next })}
+                              />
+                            </div>
+                          )}
                           {m && look && (
                             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                               <span>{m.item_category}</span>
@@ -908,7 +927,7 @@ export function CreateOrderScreen() {
                 {priceMode === 'catalog' ? (
                   <>
                     <Field id="order-labor" label="Labor / services (₱)" hint="Printing, pressing, layout work…">
-                      <Input id="order-labor" type="number" min={0} max={MONEY_INPUT_MAX} step="0.01" inputMode="decimal" placeholder="0.00" value={labor} onChange={(e) => setLabor(e.target.value)} />
+                      <Input id="order-labor" type="number" min={0} max={MONEY_INPUT_MAX} step="any" inputMode="decimal" placeholder="0.00" value={labor} onChange={(e) => setLabor(e.target.value)} />
                     </Field>
                     <Field id="order-incidental" label={incidentalMode === 'percent' ? 'Incidental charges (%)' : 'Incidental charges (₱)'} hint="Delivery, rush, ink, wear and tear…">
                       <div className="flex gap-2">
@@ -916,7 +935,7 @@ export function CreateOrderScreen() {
                           id="order-incidental"
                           type="number"
                           min={0}
-                          step="0.01"
+                          step="any"
                           inputMode="decimal"
                           placeholder={incidentalMode === 'percent' ? '0' : '0.00'}
                           value={incidental}
@@ -933,7 +952,7 @@ export function CreateOrderScreen() {
                   </>
                 ) : (
                   <Field id="order-price" label="Quote (₱)" hint="One price for the whole order." className="sm:col-span-2">
-                    <Input id="order-price" type="number" min={0} max={MONEY_INPUT_MAX} step="0.01" inputMode="decimal" placeholder="0.00" value={quote} onChange={(e) => setQuote(e.target.value)} />
+                    <Input id="order-price" type="number" min={0} max={MONEY_INPUT_MAX} step="any" inputMode="decimal" placeholder="0.00" value={quote} onChange={(e) => setQuote(e.target.value)} />
                   </Field>
                 )}
               </CardContent>

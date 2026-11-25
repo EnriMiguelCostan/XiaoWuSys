@@ -10,8 +10,8 @@
 // Migration 015: every method (Cash, GCash, Maya, PayPal, bank transfer, cheque, card, other)
 // shows the details the server says it needs (GET /api/orders/options), who paid, and the date
 // it was paid (it may be earlier than today). Owner / Admin verify non-cash payments and correct
-// a payment's details (allowed_actions.verify_payment / edit_payment); the Owner refunds
-// (allowed_actions.refund_payment, up to max_refund).
+// a payment's details (allowed_actions.verify_payment / edit_payment); the Owner or an Admin refunds
+// (allowed_actions.refund_payment, up to max_refund: an Admin up to the shop policy's suggestion).
 import { useState } from 'react';
 import { Ban, BadgeCheck, Pencil, Printer, Undo2, TriangleAlert, Wallet } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
@@ -71,6 +71,7 @@ function MethodFields({
             id={`${idPrefix}-${f.name}`}
             type={f.type === 'date' ? 'date' : 'text'}
             maxLength={f.max ?? undefined}
+            required={Boolean(f.required) && !forceOptional}
             value={values[f.name] ?? ''}
             onChange={(e) => onChange(f.name, e.target.value)}
           />
@@ -190,6 +191,14 @@ export function PaymentsSection({
         )}
       </div>
 
+      {order.production_status === 'Cancelled' && detail.cancel_terms && (
+        <p className="rounded-md border bg-muted/30 p-3 text-sm">
+          {detail.cancel_terms.shop_fault
+            ? "Cancelled through the shop's fault: everything paid is refunded."
+            : `Cancelled while ${detail.cancel_terms.stage ?? 'open'}: the shop keeps ${peso(detail.cancel_terms.kept)} (cancellation fee ${peso(detail.cancel_terms.fee)}).`}{' '}
+          <strong>Suggested refund: {peso(detail.cancel_terms.suggested_refund)}.</strong> An Admin refunds up to the suggestion; only the Owner can give back more.
+        </p>
+      )}
       {totals.payment_status === 'Overpaid' && (
         <p className={cn('flex gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.danger.banner)}>
           <TriangleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
@@ -333,7 +342,7 @@ export function PaymentsSection({
                 id="payment-value"
                 type="number"
                 min="0.01"
-                step="0.01"
+                step="any"
                 max={actions.max_payment || MONEY_INPUT_MAX}
                 inputMode="decimal"
                 required
@@ -573,7 +582,7 @@ function RefundDialog({
           <RequiredNote />
           <div className="grid gap-3 sm:grid-cols-2">
             <Field id="rf-value" label="Amount (₱) *" error={errors.amount}>
-              <Input id="rf-value" type="number" min="0.01" step="0.01" max={max} inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
+              <Input id="rf-value" type="number" min="0.01" step="any" max={max} inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
             </Field>
             <Field id="rf-reason" label="Why *" error={errors.refund_reason}>
               <Select value={reason} onValueChange={setReason}>
