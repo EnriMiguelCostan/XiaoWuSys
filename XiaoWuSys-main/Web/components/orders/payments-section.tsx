@@ -15,6 +15,7 @@
 import { useState } from 'react';
 import { Ban, BadgeCheck, Pencil, Printer, Undo2, TriangleAlert, Wallet } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
+import { DateInput, DateTimeInput } from '@/components/forms/date-input';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
 import { JumpToSection, ORDER_SECTION } from '@/components/orders/jump-to-section';
 import { PaymentStatusBadge } from '@/components/orders/status-badges';
@@ -73,15 +74,19 @@ function MethodFields({
         const label = requireNames && f.name === 'payer_name' ? 'Received by (name)' : f.label;
         return (
         <Field key={f.name} id={`${idPrefix}-${f.name}`} label={`${label}${needed ? ' *' : ''}`} error={errors[f.name]} hint={requireNames && f.name === 'payer_name' ? 'Who the money was given back to.' : (f.hint ?? undefined)}>
+          {f.type === 'date' ? (
+            <DateInput id={`${idPrefix}-${f.name}`} required={needed} value={values[f.name] ?? ''} onChange={(e) => onChange(f.name, e.target.value)} />
+          ) : (
           <Input
             id={`${idPrefix}-${f.name}`}
-            type={f.type === 'date' ? 'date' : 'text'}
+            type="text"
             maxLength={f.max ?? undefined}
             placeholder={f.placeholder ?? undefined}
             required={needed}
             value={values[f.name] ?? ''}
             onChange={(e) => onChange(f.name, e.target.value)}
           />
+          )}
         </Field>
         );
       })}
@@ -374,7 +379,7 @@ export function PaymentsSection({
               </Select>
             </Field>
             <Field id="pay-when" label="Date and time paid" error={fieldErrors.payment_date} hint="Leave empty for now. Earlier is fine, later is not.">
-              <Input id="pay-when" type="datetime-local" max={nowForInput()} value={paidAt} onChange={(e) => setPaidAt(e.target.value)} />
+              <DateTimeInput id="pay-when" max={nowForInput()} value={paidAt} onChange={(e) => setPaidAt(e.target.value)} />
             </Field>
           </div>
           <MethodFields method={method} values={details} errors={fieldErrors} idPrefix="pay" onChange={(name, value) => setDetails((d) => ({ ...d, [name]: value }))} />
@@ -487,7 +492,7 @@ function CorrectPaymentDialog({
   };
 
   return (
-    <Dialog open onOpenChange={(next) => !next && !busy && onClose()}>
+    <Dialog page open onOpenChange={(next) => !next && !busy && onClose()}>
       <DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Correct payment {payment.receipt_no ?? ''}</DialogTitle>
@@ -512,7 +517,7 @@ function CorrectPaymentDialog({
               </Select>
             </Field>
             <Field id="fix-when" label="Date and time paid *" error={errors.payment_date}>
-              <Input id="fix-when" type="datetime-local" max={nowForInput()} value={paidAt} onChange={(e) => setPaidAt(e.target.value)} />
+              <DateTimeInput id="fix-when" max={nowForInput()} value={paidAt} onChange={(e) => setPaidAt(e.target.value)} />
             </Field>
           </div>
           <MethodFields method={method} values={values} errors={errors} idPrefix="fix" forceOptional={Boolean(payment.is_refund)}
@@ -579,7 +584,7 @@ function RefundDialog({
   };
 
   return (
-    <Dialog open onOpenChange={(next) => !next && !busy && onClose()}>
+    <Dialog page open onOpenChange={(next) => !next && !busy && onClose()}>
       <DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Refund the customer</DialogTitle>

@@ -445,7 +445,7 @@ function CreateAccountDialog({ roles, onClose, onResult, onDone }: AccountDialog
   };
 
   return (
-    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
+    <Dialog page open onOpenChange={(open) => !open && !busy && onClose()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">

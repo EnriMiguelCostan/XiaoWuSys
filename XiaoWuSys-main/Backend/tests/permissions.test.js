@@ -51,7 +51,7 @@ describe('Who may do what (rules only)', () => {
     assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Owner').print_quote, false, 'no quotation to print yet');
     assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Admin').approve_without_quote, true, 'the quote is optional');
     assert.equal(allowedActions({ production_status: 'Pending', total_quote_amount: 0 }, 'Staff').approve_without_quote, false);
-    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Staff').statuses, ['Pressing', 'Ready'], 'no Cancel after approval, no Completed before Ready');
+    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Staff').statuses, ['Ready'], 'no Cancel after approval, no Completed before Ready, Pressing counted per item');
     assert.deepEqual(allowedActions({ production_status: 'Delayed' }, 'Staff').statuses, ['Pending', 'Cancelled'], 'not approved yet: anyone may cancel');
     const approved = allowedActions({ production_status: 'Approved', total_quote_amount: 900 }, 'Owner');
     assert.deepEqual([approved.edit_quote, approved.generate_quote, approved.apply_discount], [false, false, false], 'the quote is frozen after approval');

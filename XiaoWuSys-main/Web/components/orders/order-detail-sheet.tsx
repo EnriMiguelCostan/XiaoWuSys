@@ -84,7 +84,7 @@ import { cn } from '@/lib/utils';
 
 // Label and icon per status button. WHICH buttons appear: allowed_actions.statuses.
 const STATUS_ACTION: Record<string, { label: string; icon: typeof Printer; danger?: boolean }> = {
-  Printing: { label: 'Start printing', icon: Printer },
+  Printing: { label: 'Start production (printing / pressing)', icon: Printer },
   Pressing: { label: 'Start pressing', icon: Flame },
   Ready: { label: 'Mark ready (every piece done)', icon: PackageCheck },
   Completed: { label: 'Mark completed (handed over and paid)', icon: CircleCheck },
@@ -457,7 +457,7 @@ export function OrderDetailSheet({
 
   return (
     <>
-      <Dialog
+      <Dialog page
         open={open}
         onOpenChange={(next) => {
           if (next || busy) return;
@@ -952,7 +952,7 @@ function CompletionChecklist({ detail }: { detail: OrderDetail }) {
     <section className="space-y-2 rounded-md border bg-card p-3" aria-labelledby="completion-title">
       <h3 id="completion-title" className="text-sm font-semibold">Before it can be completed</h3>
       <ul className="space-y-1.5 text-sm">
-        <CheckRow ok={producedOk} text="Printing has started" />
+        <CheckRow ok={producedOk} text="Every piece is done (the order is Ready)" />
         <CheckRow ok={paidOk} text={paidOk ? 'Nothing left to pay' : `${peso(c.balance_due)} still to pay`} />
         <CheckRow
           ok={deliveredOk}

@@ -4,6 +4,7 @@
 // values this version does not know show nothing.
 import { Badge } from '@/components/ui/badge';
 import { DEADLINE_FLAG, DELIVERY_STATUS, lookFor, ORDER_STATUS, PAYMENT_STATUS, TONE_CLASSES } from '@/lib/ui-tokens';
+import { statusLabel } from '@/lib/orders';
 import { cn } from '@/lib/utils';
 
 function StateBadge({ value, look, count }: { value: string; look: ReturnType<typeof lookFor>; count?: number }) {
@@ -11,7 +12,7 @@ function StateBadge({ value, look, count }: { value: string; look: ReturnType<ty
   return (
     <Badge variant="outline" className={cn('gap-1', count !== undefined && 'h-6 px-2.5', TONE_CLASSES[look.tone].badge)}>
       <Icon className="size-3" aria-hidden />
-      {value}
+      {statusLabel(value)}
       {/* Dashboard "Orders by status": the count sits inside the pill, on its right */}
       {count !== undefined && <strong className="ml-1.5 font-semibold tabular-nums">{count.toLocaleString()}</strong>}
     </Badge>

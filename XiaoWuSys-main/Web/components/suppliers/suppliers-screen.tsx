@@ -226,7 +226,7 @@ function SupplierProfileSheet({
   };
 
   return (
-    <Sheet open={Boolean(supplierId)} onOpenChange={(next) => !next && onClose()}>
+    <Sheet page open={Boolean(supplierId)} onOpenChange={(next) => !next && onClose()}>
       <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-2xl">
         <SheetHeader className="border-b pr-12">
           <SheetTitle>{s?.supplier_name ?? 'Supplier'}</SheetTitle>

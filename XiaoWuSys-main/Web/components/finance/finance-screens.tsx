@@ -16,6 +16,7 @@ import { ChevronLeft, ChevronRight, FileSpreadsheet, Plus, Receipt, Recycle, Sca
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { can } from '@xiaowu/client-core/permissions';
 import { OverheadsCard, PnlCard } from '@/components/dashboard/finance-sections';
+import { DateInput } from '@/components/forms/date-input';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { bannerText, Field, fieldErrorsMap, FormProblem } from '@/components/forms/form-bits';
 import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@/components/forms/bounded-select';
@@ -197,7 +198,7 @@ function PaymentsMonthDialog({ month, onClose }: { month: string | null; onClose
   const shown = answer && answer.month === month ? answer : null;
   const d = shown?.detail;
   return (
-    <Dialog open={Boolean(month)} onOpenChange={(open) => !open && onClose()}>
+    <Dialog page open={Boolean(month)} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-5xl">
         <DialogHeader>
           <DialogTitle>Payments · {month ? monthLabel(month) : ''}</DialogTitle>
@@ -588,10 +589,10 @@ export function WasteScreen() {
         {preset === 'custom' && (
           <>
             <Field id="waste-from" label="From" className="w-40">
-              <Input id="waste-from" type="date" value={period.from} max={period.to} onChange={(e) => e.target.value && setPeriod((p) => ({ ...p, from: e.target.value }))} />
+              <DateInput id="waste-from" value={period.from} max={period.to} onChange={(e) => e.target.value && setPeriod((p) => ({ ...p, from: e.target.value }))} />
             </Field>
             <Field id="waste-to" label="To" className="w-40">
-              <Input id="waste-to" type="date" value={period.to} min={period.from} onChange={(e) => e.target.value && setPeriod((p) => ({ ...p, to: e.target.value }))} />
+              <DateInput id="waste-to" value={period.to} min={period.from} onChange={(e) => e.target.value && setPeriod((p) => ({ ...p, to: e.target.value }))} />
             </Field>
           </>
         )}
@@ -734,7 +735,7 @@ function BulkWasteDialog({ onClose, onDone }: { onClose: () => void; onDone: (r:
   };
 
   return (
-    <Dialog open onOpenChange={(next) => !next && !busy && onClose()}>
+    <Dialog page open onOpenChange={(next) => !next && !busy && onClose()}>
       <DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Record waste</DialogTitle>

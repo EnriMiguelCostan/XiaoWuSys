@@ -256,7 +256,7 @@ function ClientProfileSheet({
   };
 
   return (
-    <Sheet open={Boolean(customerId)} onOpenChange={(next) => !next && onClose()}>
+    <Sheet page open={Boolean(customerId)} onOpenChange={(next) => !next && onClose()}>
       <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-4xl">
         <SheetHeader className="border-b pr-12">
           <SheetTitle>{c?.full_name ?? 'Client'}</SheetTitle>
@@ -538,7 +538,7 @@ export function ClientFormDialog({
   };
 
   return (
-    <Dialog open onOpenChange={(next) => !next && !busy && onClose()}>
+    <Dialog page open onOpenChange={(next) => !next && !busy && onClose()}>
       <DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{customer ? `Edit ${customer.full_name}` : 'Add a client'}</DialogTitle>
@@ -680,7 +680,7 @@ function BranchFormDialog({
   };
 
   return (
-    <Dialog open onOpenChange={(next) => !next && !busy && onClose()}>
+    <Dialog page open onOpenChange={(next) => !next && !busy && onClose()}>
       <DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>{branch ? `Edit ${branch.branch_name}` : 'Add a branch'}</DialogTitle>

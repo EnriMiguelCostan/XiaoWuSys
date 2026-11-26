@@ -9,13 +9,13 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { ArrowDownToLine, ArrowUpFromLine, History } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
+import { DateInput } from '@/components/forms/date-input';
 import { Field } from '@/components/forms/form-bits';
 import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@/components/forms/bounded-select';
 import { LoadProblem, PageHeader } from '@/components/layout/page-header';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -129,10 +129,10 @@ export function StockCardScreen() {
             </Select>
           </Field>
           <Field id="card-from" label="From" className="w-40">
-            <Input id="card-from" type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} />
+            <DateInput id="card-from" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} />
           </Field>
           <Field id="card-to" label="To" className="w-40">
-            <Input id="card-to" type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} />
+            <DateInput id="card-to" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} />
           </Field>
         </CardContent>
       </Card>

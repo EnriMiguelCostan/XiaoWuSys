@@ -14,6 +14,7 @@ import {
   ArrowDownToLine, ArrowUpFromLine, Ban, ClipboardCheck, Pencil, Plus, Printer, Search, Trash2, Truck,
 } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
+import { DateInput, DateTimeInput } from '@/components/forms/date-input';
 import { ResultDialog, type ResultMessage } from '@/components/feedback/result-dialog';
 import { bannerText, Field, fieldErrorsMap, FormProblem, RequiredNote } from '@/components/forms/form-bits';
 import { BoundedSelectContent, BoundedSelectItem, BoundedSelectTrigger } from '@/components/forms/bounded-select';
@@ -166,10 +167,10 @@ export function StockDocumentsScreen({ type }: { type: StockDocumentType }) {
             </div>
           </Field>
           <Field id="doc-from" label="From" className="w-40">
-            <Input id="doc-from" type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} />
+            <DateInput id="doc-from" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} />
           </Field>
           <Field id="doc-to" label="To" className="w-40">
-            <Input id="doc-to" type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} />
+            <DateInput id="doc-to" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} />
           </Field>
           {(search || from || to) && (
             <Button variant="ghost" onClick={() => { setSearch(''); setFrom(''); setTo(''); }}>
@@ -323,7 +324,7 @@ function DocumentDialog({
   };
 
   return (
-    <Dialog open onOpenChange={(next) => !next && !busy && onClose()}>
+    <Dialog page open onOpenChange={(next) => !next && !busy && onClose()}>
       <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle className="flex flex-wrap items-center gap-2">
@@ -557,7 +558,7 @@ function DocumentFormDialog({
   const lineError = (i: number, field: string) => fieldErrors[`lines[${i}].${field}`];
 
   return (
-    <Dialog open onOpenChange={(next) => !next && !busy && onClose()}>
+    <Dialog page open onOpenChange={(next) => !next && !busy && onClose()}>
       <DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>{editing ? `Correct ${editing.document.document_no}` : PAGE[type].record}</DialogTitle>
@@ -575,7 +576,7 @@ function DocumentFormDialog({
           <RequiredNote />
           <div className="grid gap-4 sm:grid-cols-2">
             <Field id="doc-when" label={type === 'stock_in' ? 'Date and time received *' : type === 'stock_out' ? 'Date and time taken out *' : 'Date and time counted *'} error={fieldErrors.occurred_at} hint="Can be earlier than today, never later.">
-              <Input id="doc-when" type="datetime-local" required max={nowForInput()} value={occurredAt} onChange={(e) => setOccurredAt(e.target.value)} />
+              <DateTimeInput id="doc-when" required max={nowForInput()} value={occurredAt} onChange={(e) => setOccurredAt(e.target.value)} />
             </Field>
             {type === 'stock_out' && (
               <Field id="doc-reason" label="Why did it leave? *" error={fieldErrors.reason}>

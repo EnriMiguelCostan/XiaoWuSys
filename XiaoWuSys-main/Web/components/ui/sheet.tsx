@@ -7,9 +7,15 @@ import { Dialog as SheetPrimitive } from "radix-ui"
 import { Button } from "@/components/ui/button"
 import { isToastTarget } from "@/lib/toast"
 import { XIcon } from "lucide-react"
+import { SUB_PAGE_FRAME, SubPageBody, SubPageContext } from "@/components/ui/sub-page"
 
-function Sheet({ ...props }: React.ComponentProps<typeof SheetPrimitive.Root>) {
-  return <SheetPrimitive.Root data-slot="sheet" {...props} />
+/** page: open as a full sub page (components/ui/sub-page.tsx) instead of a side panel */
+function Sheet({ page = false, ...props }: React.ComponentProps<typeof SheetPrimitive.Root> & { page?: boolean }) {
+  return (
+    <SubPageContext.Provider value={page}>
+      <SheetPrimitive.Root data-slot="sheet" modal={!page} {...props} />
+    </SubPageContext.Provider>
+  )
 }
 
 function SheetTrigger({
@@ -59,6 +65,25 @@ function SheetContent({
   side?: "top" | "right" | "bottom" | "left"
   showCloseButton?: boolean
 }) {
+  const page = React.useContext(SubPageContext)
+  if (page) {
+    return (
+      <SheetPortal>
+        <SheetPrimitive.Content
+          data-slot="sheet-content"
+          data-page=""
+          className={SUB_PAGE_FRAME}
+          onInteractOutside={(event) => {
+            event.preventDefault()
+            onInteractOutside?.(event)
+          }}
+          {...props}
+        >
+          <SubPageBody close={<SheetPrimitive.Close data-slot="sheet-close" asChild />}>{children}</SubPageBody>
+        </SheetPrimitive.Content>
+      </SheetPortal>
+    )
+  }
   return (
     <SheetPortal>
       <SheetOverlay />

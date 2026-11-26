@@ -18,7 +18,7 @@ import { formatDateTime } from '@xiaowu/client-core/format';
 import type { OrderActions } from '@xiaowu/client-core/permissions';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
 import type { ResultMessage } from '@/components/feedback/result-dialog';
-import { DateInput } from '@/components/forms/date-input';
+import { DateInput, DateTimeInput } from '@/components/forms/date-input';
 import { bannerText, Field, fieldErrorsMap, FormProblem } from '@/components/forms/form-bits';
 import { ORDER_SECTION } from '@/components/orders/jump-to-section';
 import { DeliveryStatusBadge } from '@/components/orders/status-badges';
@@ -440,7 +440,7 @@ export function DeliveriesSection({ detail, actions, onResult }: { detail: Order
                 <Input id="dl-qty" type="number" min={1} step={1} inputMode="numeric" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} />
               </Field>
               <Field id="dl-when" label="When *" error={errors.delivered_at} className="sm:col-span-2">
-                <Input id="dl-when" type="datetime-local" max={nowForInput()} value={form.delivered_at} onChange={(e) => setForm({ ...form, delivered_at: e.target.value })} />
+                <DateTimeInput id="dl-when" max={nowForInput()} value={form.delivered_at} onChange={(e) => setForm({ ...form, delivered_at: e.target.value })} />
               </Field>
               <Field id="dl-how" label="How" error={errors.method}>
                 <Select value={form.method} onValueChange={(v) => setForm({ ...form, method: v })}>

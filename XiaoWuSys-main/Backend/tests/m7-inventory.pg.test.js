@@ -277,12 +277,12 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.equal(approve.status, 200, approve.text);
     assert.equal((await call('PATCH', `/api/orders/${ids.order}/status`, staff, { status: 'Printing' })).status, 200);
     const printing = await call('GET', `/api/orders/${ids.order}`, staff);
-    assert.deepEqual(printing.body.allowed_actions.statuses, ['Pressing'], 'T-shirts are pressed before Ready (migration 017)');
+    assert.deepEqual(printing.body.allowed_actions.statuses, ['Ready'], 'migration 019: T-shirts are pressed within production, counted per item');
     assert.deepEqual([printing.body.progress.pieces, printing.body.progress.printed, printing.body.progress.needs_pressing], [140, 0, true]);
     assert.equal(printing.body.needs_pressing, true);
   });
 
-  it('offers Pressing only for T-shirts', async () => {
+  it('never offers Pressing as a status (migration 019)', async () => {
     assert.equal((await call('PATCH', '/api/inventory/i-mug', staff, { selling_price: 120 })).status, 200);
     const mug = await call('POST', '/api/orders', staff, { customer_id: 'c-2', production_deadline: shopDate(5), required_items: [{ inventory_id: 'i-mug', quantity_needed: 5 }] });
     assert.equal(mug.status, 201, mug.text);
@@ -295,7 +295,7 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     const shown = await call('GET', `/api/orders/${ids.mugOrder}`, staff);
     assert.deepEqual([shown.body.has_garments, shown.body.needs_pressing, shown.body.allowed_actions.statuses], [false, false, ['Ready']]);
     const pressed = await call('PATCH', `/api/orders/${ids.mugOrder}/status`, staff, { status: 'Pressing' });
-    assert.deepEqual([pressed.status, pressed.body.error], [409, 'PRESSING_NOT_APPLICABLE']);
+    assert.deepEqual([pressed.status, pressed.body.error], [409, 'INVALID_STATUS_TRANSITION']);
   });
 
   it('hands an order over in batches, and completes it only when it is all delivered and paid', async () => {
@@ -308,7 +308,6 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
     assert.deepEqual([progress.body.progress.printed, progress.body.progress.pressed, progress.body.progress.ready], [120, 100, 100]);
     assert.equal((await batch(100, { delivered_at: pastLocal(1, 16) })).status, 201);
     assert.equal((await batch(1)).body.error, 'PIECES_NOT_READY', '100 ready, 100 handed over');
-    assert.equal((await call('PATCH', `/api/orders/${ids.order}/status`, staff, { status: 'Pressing', complete_counts: true })).status, 200);
     assert.equal((await call('PATCH', `/api/orders/${ids.order}/status`, staff, { status: 'Ready', complete_counts: true })).status, 200);
     const tooMany = await batch(50);
     assert.deepEqual([tooMany.status, tooMany.body.error, tooMany.body.remaining], [409, 'DELIVERY_EXCEEDS_REMAINING', 40]);

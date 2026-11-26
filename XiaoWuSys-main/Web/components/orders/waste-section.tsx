@@ -258,7 +258,7 @@ function LogLossDialog({
   };
 
   return (
-    <Dialog open onOpenChange={(next) => !next && !busy && onClose()}>
+    <Dialog page open onOpenChange={(next) => !next && !busy && onClose()}>
       <DialogContent className="min-w-0 sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Log misprint / material loss</DialogTitle>

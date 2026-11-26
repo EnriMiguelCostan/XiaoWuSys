@@ -6,7 +6,9 @@ export type ProductionStatus = 'Pending' | 'Approved' | 'Printing' | 'Pressing' 
 
 /** The server's PRODUCTION_STATUSES, for the status filter. Migration 016 adds 'Ready'
  *  (production done, waiting to be picked up or delivered). */
-export const ORDER_STATUSES: ProductionStatus[] = ['Pending', 'Approved', 'Printing', 'Pressing', 'Ready', 'Completed', 'Delayed', 'Cancelled'];
+export const ORDER_STATUSES: ProductionStatus[] = ['Pending', 'Approved', 'Printing', 'Ready', 'Completed', 'Delayed', 'Cancelled'];
+/** November 2026 (migration 019): printing and pressing are one step, shown as "In production" */
+export const statusLabel = (status: string) => (status === 'Printing' || status === 'Pressing' ? 'In production' : status);
 
 /** Migration 016: GET /api/orders "delivery_status", decided by the server */
 export type DeliveryStatus = 'Not delivered' | 'Partly delivered' | 'Delivered';

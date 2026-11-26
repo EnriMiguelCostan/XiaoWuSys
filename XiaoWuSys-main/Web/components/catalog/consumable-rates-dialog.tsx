@@ -108,7 +108,7 @@ export function ConsumableRatesDialog({
   };
 
   return (
-    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
+    <Dialog page open onOpenChange={(open) => !open && !busy && onClose()}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-start gap-2">
