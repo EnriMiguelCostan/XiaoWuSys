@@ -9,7 +9,7 @@
 //   - days outside min..max are greyed out; a typed date outside them is moved to the nearest end
 //   - onChange is called like a normal input's: (e) => e.target.value is 'YYYY-MM-DD' (or '')
 // DateTimeInput: the same, with a time (HH:MM) next to it, for 'YYYY-MM-DDTHH:MM' values.
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Popover } from 'radix-ui';
 import { CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -146,7 +146,12 @@ export function DateInput({ value = '', min, max, onChange, onBlur, disabled, cl
   const ceiling = typeof max === 'string' && max < LATEST_DATE ? max : LATEST_DATE;
   const [text, setText] = useState(toUs(value));
   const [open, setOpen] = useState(false);
-  useEffect(() => setText(toUs(value)), [value]);
+  // A new value from the page (another pick, a reset): show it (React's "adjust state on change")
+  const [shown, setShown] = useState(value);
+  if (shown !== value) {
+    setShown(value);
+    setText(toUs(value));
+  }
 
   const commit = (iso: string) => {
     const clamped = iso && iso < floor ? floor : iso && iso > ceiling ? ceiling : iso;
