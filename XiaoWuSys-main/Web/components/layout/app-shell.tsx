@@ -14,6 +14,8 @@ import { SideNav } from '@/components/layout/side-nav';
 import { OrderLocksProvider } from '@/components/providers/order-locks-provider';
 import { SocketProvider } from '@/components/providers/socket-provider';
 import { SubPageSlotContext } from '@/components/ui/sub-page';
+import { useSidebarCollapsed } from '@/lib/sidebar';
+import { cn } from '@/lib/utils';
 import { useSession } from '@/hooks/use-session';
 
 function FullPageWait({ text }: { text: string }) {
@@ -49,6 +51,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const shellRef = useShellOffset();
   const router = useRouter();
   const [subPageSlot, setSubPageSlot] = useState<HTMLDivElement | null>(null);
+  const [sidebarCollapsed] = useSidebarCollapsed();
 
   // Every login lands on the Dashboard (HOME_PATH), so no ?next= is carried to /login
   useEffect(() => {
@@ -78,7 +81,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <SideNav />
             {/* data-sub-page-slot: where a sub page renders. While it holds one, the page is hidden and
                 the sub page takes its place (components/ui/sub-page.tsx, globals.css "Sub pages") */}
-            <main data-page-area className="mx-auto w-full max-w-7xl min-w-0 flex-1 px-4 py-6">
+            {/* The page widens by the space the menu gives up when it is collapsed (15rem to 4rem) */}
+            <main
+              data-page-area
+              className={cn('mx-auto w-full min-w-0 flex-1 px-4 py-6 transition-[max-width] duration-200 motion-reduce:transition-none', sidebarCollapsed ? 'lg:max-w-[91rem] max-w-7xl' : 'max-w-7xl')}
+            >
               <SubPageSlotContext.Provider value={subPageSlot}>
                 <div data-page-main>{children}</div>
               </SubPageSlotContext.Provider>

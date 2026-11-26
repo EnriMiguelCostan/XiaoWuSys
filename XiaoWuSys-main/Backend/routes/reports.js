@@ -29,6 +29,7 @@ const { loadAllLosses } = require('../services/waste');
 const { wasteSummary } = require('../services/domain/wasteReport');
 const { computePnl, defaultPeriod, shopDayOf, OVERHEAD_CATEGORIES } = require('../services/domain/pnl');
 const { writeAudit, writeAuditLocal } = require('../services/auditLog');
+const { paymentsOverview, receivedBreakdown } = require('../services/domain/paymentsOverview');
 
 const READ_ROLES = rolesWith('view_orders');
 const FINANCE_ROLES = ['Owner', 'Admin'];
@@ -681,11 +682,40 @@ router.get('/payments', requireRole(FINANCE_ROLES), async (req, res) => {
         billed: toPesos(billedC),
         collected_on_those: toPesos(collectedC),
         progress_percent: billedC > 0 ? Math.min(100, Math.round((collectedC / billedC) * 100)) : null,
-        orders_created: created.length
+        orders_created: created.length,
+        // Which orders this month's money was for (they add up to received)
+        received_breakdown: receivedBreakdown({ payments: data.payments, ordersById, dayOf: shopDayOf, month })
       }
     });
   } catch (err) {
     sendDbError(res, err, 'building the payments report');
+  }
+});
+
+// GET /api/reports/payments/overview?year=YYYY (default this year)   Owner, Admin
+//   -> { source, current_month, current_year, year,
+//        months: [{ month, received, refunded, voided, net, payments, orders, billed, net_bar, orders_bar }] (Jan-Dec),
+//        year_totals: { year, received, refunded, voided, net, payments, orders, billed },
+//        years: [{ year, ... same, net_bar, orders_bar }] (first year with data to this year),
+//        all_totals: every year together }
+//   (services/domain/paymentsOverview.js; the bars are 0-100 against the tallest in their list)
+router.get('/payments/overview', requireRole(FINANCE_ROLES), async (req, res) => {
+  const now = localDateTime(new Date());
+  const currentYear = now.slice(0, 4);
+  const year = req.query.year === undefined || req.query.year === '' ? currentYear : req.query.year;
+  if (typeof year !== 'string' || !/^\d{4}$/.test(year) || year < '2018' || year > '2034') {
+    return res.status(400).json({ error: 'VALIDATION_FAILED', message: 'Year must look like 2026.', details: [{ field: 'year', message: 'Year must look like 2026.' }] });
+  }
+  try {
+    const data = await loadAll(req);
+    res.status(200).json({
+      source: data.source,
+      current_month: now.slice(0, 7),
+      current_year: currentYear,
+      ...paymentsOverview({ payments: data.payments, orders: data.orders, dayOf: shopDayOf, year, currentYear })
+    });
+  } catch (err) {
+    sendDbError(res, err, 'building the payments overview');
   }
 });
 

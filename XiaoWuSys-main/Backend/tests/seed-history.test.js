@@ -86,6 +86,17 @@ describe('Demo history (2020 to today)', () => {
     }
   });
 
+  it('gives every stock in, stock out and count its value, as routes/stock.js does', () => {
+    const lines = new Map();
+    for (const l of T.stock_document_lines) lines.set(l.document_id, [...(lines.get(l.document_id) || []), l]);
+    for (const d of T.stock_documents) {
+      const own = lines.get(d.document_id) || [];
+      const expected = own.reduce((s, l) => s + (d.document_type === 'stock_count' ? Math.abs(l.quantity - l.system_quantity) : l.quantity) * c(l.unit_cost), 0);
+      assert.equal(c(d.total_cost), expected, d.document_no);
+    }
+    assert.ok(T.stock_documents.some((d) => d.document_type === 'stock_out' && c(d.total_cost) > 0), 'stock out has a value');
+  });
+
   it('moves every order through allowed steps, in time order, with T-shirts only being pressed', () => {
     const itemById = new Map(T.inventory_items.map((i) => [i.inventory_id, i]));
     const byOrder = new Map();
