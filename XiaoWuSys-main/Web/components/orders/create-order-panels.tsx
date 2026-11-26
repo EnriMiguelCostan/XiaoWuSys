@@ -144,7 +144,7 @@ export function ClientSnapshot({
               return (
                 <li key={o.order_id} className="flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs">
                   <div className="min-w-0 flex-1">
-                    <Link href={`/orders?order=${encodeURIComponent(o.order_id)}`} className="font-mono text-primary underline-offset-4 hover:underline">
+                    <Link href={`/orders/${encodeURIComponent(o.order_id)}`} className="font-mono text-primary underline-offset-4 hover:underline">
                       {orderNumber(o)}
                     </Link>
                     <span className="ml-1 text-muted-foreground">{formatDateTime(o.date_created, { withTime: false, utc: true })}</span>

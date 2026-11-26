@@ -48,6 +48,7 @@ import {
 import { toast } from '@/lib/toast';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
+import { useSubPath } from '@/lib/sub-route';
 
 const PAGE = {
   stock_in: {
@@ -73,6 +74,12 @@ const PAGE = {
   },
 } as const;
 
+const PAGE_PATH: Record<StockDocumentType, string> = {
+  stock_in: '/inventory/stock-in',
+  stock_out: '/inventory/stock-out',
+  stock_count: '/inventory/stock-count',
+};
+
 const STATUS_TONE: Record<string, keyof typeof TONE_CLASSES> = { Recorded: 'success', Corrected: 'info', Voided: 'danger' };
 const NO_SUPPLIER = '__none__';
 
@@ -97,8 +104,9 @@ export function StockDocumentsScreen({ type }: { type: StockDocumentType }) {
   const [to, setTo] = useState('');
   const [limit, setLimit] = useState(50);
   const [tick, setTick] = useState(0);
-  const [openId, setOpenId] = useState<string | null>(null);
-  const [form, setForm] = useState<{ editing: StockDocumentDetail | null } | null>(null);
+  // Own pages (lib/sub-route.ts): <base>/new, <base>/<record id>, <base>/<record id>/edit
+  const [sub, go] = useSubPath(PAGE_PATH[type]);
+  const [editTarget, setEditTarget] = useState<StockDocumentDetail | null>(null);
   const [result, setResult] = useState<ResultMessage | null>(null);
   const reload = useCallback(() => setTick((t) => t + 1), []);
 
@@ -127,13 +135,19 @@ export function StockDocumentsScreen({ type }: { type: StockDocumentType }) {
   }, [api, type, search, from, to, limit, tick]);
 
   const canRecord = Boolean(options?.can_record[type]);
-  // A link such as /inventory/stock-in?new=1&supplier=SUP-… opens the form at once (until closed)
+  // A link such as /inventory/stock-in/new?supplier=SUP-… opens the form at once. Older links
+  // with ?new=1 still do, until the form is closed.
   const [linkFormClosed, setLinkFormClosed] = useState(false);
-  const fromLink = params.get('new') === '1' && canRecord && !linkFormClosed;
-  const shownForm = form ?? (fromLink ? { editing: null } : null);
+  const fromOldLink = params.get('new') === '1' && !linkFormClosed;
+  // Editing needs the record as its detail page showed it; after a reload the detail page shows
+  const editId = sub?.[1] === 'edit' && editTarget?.document.document_id === sub[0] ? sub[0] : null;
+  const openId = sub && sub[0] !== 'new' && !editId ? sub[0] : null;
+  const setOpenId = (id: string | null) => go(id ? [id] : null);
+  const shownForm =
+    sub?.[0] === 'new' || fromOldLink ? (canRecord ? { editing: null } : null) : editId ? { editing: editTarget } : null;
   const closeForm = () => {
-    setForm(null);
     setLinkFormClosed(true);
+    if (sub) go(null);
   };
   const Icon = page.icon;
 
@@ -145,7 +159,7 @@ export function StockDocumentsScreen({ type }: { type: StockDocumentType }) {
         description={page.description}
         actions={
           canRecord && (
-            <Button onClick={() => setForm({ editing: null })}>
+            <Button onClick={() => go(['new'])}>
               <Plus aria-hidden /> {page.record}
             </Button>
           )
@@ -250,8 +264,8 @@ export function StockDocumentsScreen({ type }: { type: StockDocumentType }) {
           options={options}
           onClose={() => setOpenId(null)}
           onEdit={(detail) => {
-            setOpenId(null);
-            setForm({ editing: detail });
+            setEditTarget(detail);
+            go([detail.document.document_id, 'edit']);
           }}
           onChanged={(r) => {
             setResult(r);

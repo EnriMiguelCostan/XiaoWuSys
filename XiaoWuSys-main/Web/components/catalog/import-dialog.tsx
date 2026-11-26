@@ -190,7 +190,7 @@ export function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone:
   };
 
   return (
-    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
+    <Dialog page open onOpenChange={(open) => !open && !busy && onClose()}>
       <DialogContent className="flex max-h-[90dvh] flex-col sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Import from Excel / Google Sheets</DialogTitle>

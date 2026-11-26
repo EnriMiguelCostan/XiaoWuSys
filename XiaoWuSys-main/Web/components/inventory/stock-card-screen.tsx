@@ -83,12 +83,12 @@ export function StockCardScreen() {
           item && (
             <>
               <Button variant="outline" asChild>
-                <Link href={`/inventory/stock-in?new=1&item=${encodeURIComponent(item.inventory_id)}`}>
+                <Link href={`/inventory/stock-in/new?item=${encodeURIComponent(item.inventory_id)}`}>
                   <ArrowDownToLine aria-hidden /> Stock in
                 </Link>
               </Button>
               <Button variant="outline" asChild>
-                <Link href={`/inventory/stock-out?new=1&item=${encodeURIComponent(item.inventory_id)}`}>
+                <Link href={`/inventory/stock-out/new?item=${encodeURIComponent(item.inventory_id)}`}>
                   <ArrowUpFromLine aria-hidden /> Stock out
                 </Link>
               </Button>

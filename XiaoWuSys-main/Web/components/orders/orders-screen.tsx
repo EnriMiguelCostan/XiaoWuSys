@@ -1,11 +1,12 @@
 'use client';
 
 // Orders list (ported from OrdersPage.jsx). Sorting, filtering and paging all run on the
-// server (GET /api/orders), so they are correct across pages. The detail opens as a side
-// sheet addressed by ?order=<order_id>, so an order can be linked and the Back button closes it.
+// server (GET /api/orders), so they are correct across pages. An order opens as its own page at
+// /orders/<order_id> (lib/sub-route.ts), so it can be linked and the Back button closes it.
+// Older links with ?order=<order_id> still open it.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import { Archive, ArchiveRestore, ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, ClipboardList, CloudOff, PlusCircle, RefreshCw, Search, X } from 'lucide-react';
 import { formatDateTime, formatMobile, peso } from '@xiaowu/client-core/format';
 import { orderNumber } from '@xiaowu/client-core/orders';
@@ -39,6 +40,7 @@ import {
 } from '@/lib/orders';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
+import { useSubPath } from '@/lib/sub-route';
 import { TEXT_MAX } from '@/lib/input-limits';
 
 const PAGE_SIZE = 20;
@@ -112,10 +114,10 @@ export function OrdersScreen() {
   const { user } = useSession();
   const { syncGeneration } = useConnection();
   const { customers, byId: customerById, reload: reloadCustomers } = useCustomers();
-  const router = useRouter();
-  const pathname = usePathname();
   const searchParams = useSearchParams();
-  const openId = searchParams.get('order');
+  const [sub, go] = useSubPath('/orders');
+  const legacyId = searchParams.get('order');
+  const openId = sub?.[0] ?? legacyId;
 
   const [status, setStatus] = useState(ALL);
   const [customerId, setCustomerId] = useState(ALL);
@@ -279,17 +281,9 @@ export function OrdersScreen() {
   const sortValue = `${sort.key}:${sort.dir}`;
   const sortIsPreset = ORDER_SORT_OPTIONS.some((o) => o.key === sort.key && o.dir === sort.dir);
 
-  const openOrder = (id: string) => {
-    const params = new URLSearchParams(searchParams.toString());
-    params.set('order', id);
-    router.push(`${pathname}?${params}`, { scroll: false });
-  };
-  const closeOrder = () => {
-    const params = new URLSearchParams(searchParams.toString());
-    params.delete('order');
-    const rest = params.toString();
-    router.push(rest ? `${pathname}?${rest}` : pathname, { scroll: false });
-  };
+  const openOrder = (id: string) => go([id]);
+  // An old ?order= link: drop the query so the list shows again
+  const closeOrder = () => (sub ? go(null) : window.history.replaceState(null, '', '/orders'));
 
   // Owner / Admin: bring an archived order back to the everyday list (the server re-checks)
   const canUnarchive = can(user, 'manage_accounts');

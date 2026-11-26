@@ -132,7 +132,7 @@ export function RecycleBinSheet({
   };
 
   return (
-    <Sheet open={open} onOpenChange={(next) => !emptying && onOpenChange(next)}>
+    <Sheet page open={open} onOpenChange={(next) => !emptying && onOpenChange(next)}>
       <SheetContent side="right" className="w-full gap-0 sm:max-w-xl">
         <SheetHeader className="border-b">
           <SheetTitle className="flex items-center gap-2">

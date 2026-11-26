@@ -6,6 +6,7 @@
 // allowed_actions). "Record stock in" opens the Stock in form with this supplier chosen.
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useSubPath } from '@/lib/sub-route';
 import { Archive, ArchiveRestore, ArrowLeft, ArrowDownToLine, Mail, MapPin, Pencil, Phone, Plus, Search, Truck, UserRound } from 'lucide-react';
 import { formatDateTime, peso } from '@xiaowu/client-core/format';
 import { ConfirmDialog } from '@/components/feedback/confirm-dialog';
@@ -47,8 +48,9 @@ export function SuppliersScreen() {
   const [search, setSearch] = useState('');
   const [showArchived, setShowArchived] = useState(false);
   const [tick, setTick] = useState(0);
-  const [openId, setOpenId] = useState<string | null>(null);
-  const [editing, setEditing] = useState<Supplier | null | 'new'>(null);
+  // Own pages (lib/sub-route.ts): /suppliers/new, /suppliers/<id>, /suppliers/<id>/edit
+  const [sub, go] = useSubPath('/suppliers');
+  const [editTarget, setEditTarget] = useState<Supplier | null>(null);
   const [result, setResult] = useState<ResultMessage | null>(null);
   const reload = useCallback(() => setTick((t) => t + 1), []);
 
@@ -69,6 +71,14 @@ export function SuppliersScreen() {
     };
   }, [api, search, showArchived, tick]);
 
+  const openId = sub && sub[0] !== 'new' ? sub[0] : null;
+  const setOpenId = (id: string | null) => go(id ? [id] : null);
+  const editId = sub?.[1] === 'edit' ? sub[0] : null;
+  const editingSupplier =
+    editId === null ? null : editTarget?.supplier_id === editId ? editTarget : (list?.suppliers.find((s) => s.supplier_id === editId) ?? null);
+  const editing: Supplier | 'new' | null = sub?.[0] === 'new' ? 'new' : editingSupplier;
+  const closeEditing = () => go(null);
+
   return (
     <div className="space-y-5">
       <PageHeader
@@ -77,7 +87,7 @@ export function SuppliersScreen() {
         description="Who the shop buys from: contacts, the items they supply, and every delivery received from them."
         actions={
           list?.can_add && (
-            <Button onClick={() => setEditing('new')}>
+            <Button onClick={() => go(['new'])}>
               <Plus aria-hidden /> Add supplier
             </Button>
           )
@@ -154,7 +164,10 @@ export function SuppliersScreen() {
         supplierId={openId}
         tick={tick}
         onClose={() => setOpenId(null)}
-        onEdit={(s) => setEditing(s)}
+        onEdit={(s) => {
+          setEditTarget(s);
+          go([s.supplier_id, 'edit']);
+        }}
         onChanged={(r) => {
           setResult(r);
           reload();
@@ -163,9 +176,9 @@ export function SuppliersScreen() {
       {editing && (
         <SupplierFormDialog
           supplier={editing === 'new' ? null : editing}
-          onClose={() => setEditing(null)}
+          onClose={closeEditing}
           onSaved={(_, message) => {
-            setEditing(null);
+            closeEditing();
             setResult({ type: 'success', title: 'Supplier saved', message });
             reload();
           }}
@@ -235,7 +248,7 @@ function SupplierProfileSheet({
             <div className="flex flex-wrap gap-2 pt-1">
               {shown.allowed_actions.record_stock_in && (
                 <Button size="sm" asChild>
-                  <Link href={`/inventory/stock-in?new=1&supplier=${encodeURIComponent(shown.supplier.supplier_id)}`}>
+                  <Link href={`/inventory/stock-in/new?supplier=${encodeURIComponent(shown.supplier.supplier_id)}`}>
                     <ArrowDownToLine aria-hidden /> Record stock in
                   </Link>
                 </Button>

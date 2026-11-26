@@ -300,7 +300,7 @@ export function DashboardScreen() {
                       <TableCell className="pr-4 text-right">
                         {/* One click to record the delivery when it arrives */}
                         <Button variant="ghost" size="sm" asChild>
-                          <Link href={`/inventory/stock-in?new=1&item=${encodeURIComponent(r.inventory_id)}`}>Receive</Link>
+                          <Link href={`/inventory/stock-in/new?item=${encodeURIComponent(r.inventory_id)}`}>Receive</Link>
                         </Button>
                       </TableCell>
                     </TableRow>

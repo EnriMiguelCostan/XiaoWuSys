@@ -220,3 +220,12 @@
     animation: xws-logo-pulse 1.6s ease-in-out infinite;
   }
 }
+/* Sub pages (components/ui/sub-page.tsx): while the page slot holds a sub page, the page it was
+   opened from is hidden and the sub page takes its place. Only the newest one shows when one sub
+   page opened another (a payment from an order); Back reveals the one before. */
+[data-page-area]:has(> [data-sub-page-slot] [data-page]) > [data-page-main] {
+  display: none;
+}
+[data-sub-page-slot] > :not(:last-child) {
+  display: none;
+}

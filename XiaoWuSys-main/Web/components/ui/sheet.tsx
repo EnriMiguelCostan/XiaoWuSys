@@ -7,7 +7,7 @@ import { Dialog as SheetPrimitive } from "radix-ui"
 import { Button } from "@/components/ui/button"
 import { isToastTarget } from "@/lib/toast"
 import { XIcon } from "lucide-react"
-import { SUB_PAGE_FRAME, SubPageBody, SubPageContext } from "@/components/ui/sub-page"
+import { SUB_PAGE_FRAME, SubPageBody, SubPageContext, SubPageSlotContext } from "@/components/ui/sub-page"
 
 /** page: open as a full sub page (components/ui/sub-page.tsx) instead of a side panel */
 function Sheet({ page = false, ...props }: React.ComponentProps<typeof SheetPrimitive.Root> & { page?: boolean }) {
@@ -66,9 +66,12 @@ function SheetContent({
   showCloseButton?: boolean
 }) {
   const page = React.useContext(SubPageContext)
+  const slot = React.useContext(SubPageSlotContext)
   if (page) {
+    // Rendered into AppShell's page slot, so it takes the page's place (components/ui/sub-page.tsx)
+    if (!slot) return null
     return (
-      <SheetPortal>
+      <SheetPortal container={slot}>
         <SheetPrimitive.Content
           data-slot="sheet-content"
           data-page=""
