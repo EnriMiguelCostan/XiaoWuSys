@@ -38,8 +38,8 @@ describe('Batch 3 rules (no database)', () => {
     assert.deepEqual([item.stock_value, item.quantity_available_net, item.stock_status], [100.05, 2, 'low_stock']);
   });
 
-  it('makes Pressing an optional step between Printing and Ready, and Completed only from Ready', () => {
-    assert.deepEqual(STATUS_TRANSITIONS.Printing, ['Pressing', 'Ready', 'Cancelled']);
+  it('goes from production (printing and pressing) to Ready, and Completed only from Ready', () => {
+    assert.deepEqual(STATUS_TRANSITIONS.Printing, ['Ready', 'Cancelled'], 'migration 019: Pressing is counted per item');
     assert.deepEqual(STATUS_TRANSITIONS.Pressing, ['Ready', 'Cancelled']);
     assert.deepEqual(STATUS_TRANSITIONS.Ready, ['Completed', 'Cancelled']); // migration 016
     assert.ok(canTransition('Printing', 'Ready') && !canTransition('Printing', 'Completed'), 'migration 017: tarpaulins skip pressing, but are Ready first');
@@ -51,8 +51,8 @@ describe('Batch 3 rules (no database)', () => {
     assert.equal(allowedActions({ production_status: 'Pressing', total_quote_amount: 500 }, 'Owner').edit_quote, false);
     // migration 016: Pressing is only offered when the order has a T-shirt
     assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Staff', null, { needs_pressing: false, has_garments: true }).statuses,
-      ['Ready'], 'a jersey order skips the heat press');
-    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Staff', null, { needs_pressing: true }).statuses, ['Pressing'], 'T-shirts are pressed before Ready');
+      ['Ready'], 'a jersey order is never pressed');
+    assert.deepEqual(allowedActions({ production_status: 'Printing' }, 'Staff', null, { needs_pressing: true }).statuses, ['Ready'], 'T-shirts are pressed within production');
   });
 
   it('flags deadlines by shop-time calendar days', () => {

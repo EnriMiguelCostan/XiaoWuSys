@@ -107,12 +107,12 @@ describe('Production progress per item', () => {
 describe('Status buttons follow the progress', () => {
   const ctx = (progress, extra = {}) => ({ needs_pressing: progress.needs_pressing, progress, ...extra });
 
-  it('presses T-shirts before Ready, and completes only from Ready', () => {
-    assert.deepEqual(STATUS_TRANSITIONS.Printing, ['Pressing', 'Ready', 'Cancelled']);
-    assert.deepEqual(STATUS_TRANSITIONS.Pressing, ['Ready', 'Cancelled']);
+  it('goes from production to Ready once every piece is printed and pressed, and completes only from Ready', () => {
+    assert.deepEqual(STATUS_TRANSITIONS.Printing, ['Ready', 'Cancelled']);
+    assert.deepEqual(STATUS_TRANSITIONS.Pressing, ['Ready', 'Cancelled'], 'orders saved as Pressing before migration 019');
     const shirts = allowedActions({ production_status: 'Printing' }, 'Staff', null, ctx({ needs_pressing: true, all_printed: false, all_ready: false, ready: 0 }));
-    assert.deepEqual(shirts.statuses, ['Pressing'], 'Staff cannot cancel an approved order; no Ready before pressing');
-    assert.equal(shirts.status_needs_confirm.Pressing, true, 'not everything is printed yet: ask first');
+    assert.deepEqual(shirts.statuses, ['Ready'], 'Staff cannot cancel an approved order');
+    assert.equal(shirts.status_needs_confirm.Ready, true, 'not everything is printed and pressed yet: ask first');
     const mugs = allowedActions({ production_status: 'Printing' }, 'Admin', null, ctx({ needs_pressing: false, all_printed: true, all_ready: true, ready: 5 }));
     assert.deepEqual(mugs.statuses, ['Ready', 'Cancelled']);
     assert.equal(mugs.status_needs_confirm.Ready, false);

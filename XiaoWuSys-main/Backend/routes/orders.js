@@ -999,14 +999,11 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
         }
       }
       if (status === 'Ready') {
-        if (from === 'Printing' && progress.needs_pressing) {
-          throw new Rejected(409, { error: 'PRESSING_REQUIRED', message: 'This order has T-shirts: they go through Pressing before the order is Ready.' });
-        }
         if (!progress.all_ready) {
           if (!complete_counts) {
             throw new Rejected(409, {
               error: 'NOT_ALL_READY',
-              message: `${progress.ready} of ${progress.pieces} pieces are ready. Record the rest first (or confirm that all are done).`,
+              message: `${progress.ready} of ${progress.pieces} pieces are ready (printed${progress.needs_pressing ? ', and pressed for T-shirts' : ''}). Record the rest first (or confirm that all are done).`,
               progress
             });
           }

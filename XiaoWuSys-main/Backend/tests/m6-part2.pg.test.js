@@ -183,12 +183,12 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     assert.deepEqual([notSynced.status, notSynced.body.error], [409, 'ITEM_NOT_SYNCED']);
   });
 
-  it('takes the Pressing consumables once when pressing starts, and the Completed ones at the end', async () => {
+  it('takes the Pressing consumables once when production ends (migration 019), and the Completed ones at the end', async () => {
     // Migration 016: only T-shirts are heat-pressed; these blanks are switched on in the Catalog
     await pool.query("UPDATE inventory_items SET requires_pressing = TRUE WHERE inventory_id IN ('i-shirt-s', 'i-shirt-l')");
     await insertOrder('o-press', 'Printing', [['i-shirt-s', 10], ['i-shirt-l', 5], [null, 3, 'Name print']]);
     const pushesBefore = server.pushes.length;
-    const pressing = await setStatus('o-press', 'Pressing');
+    const pressing = await setStatus('o-press', 'Ready');
     assert.equal(pressing.status, 200, pressing.text);
     assert.deepEqual(pressing.body.consumables_deducted.map((c) => [c.item_name, c.trigger_status, c.needed, c.quantity_deducted, c.shortfall]), [
       ['Sublimation Ink', 'Pressing', 4, 4, 0], // 10 x 0.25 + 5 x 0.3
@@ -197,14 +197,12 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     assert.match(pressing.body.message, /Consumables used: 4 ml Sublimation Ink, 15 sheet Transfer Paper\./);
     assert.deepEqual([(await stockOf('i-ink')).a, (await stockOf('i-paper')).a, (await stockOf('i-thread')).a], [96, 35, 10]);
     const pushed = server.pushes.slice(pushesBefore);
-    assert.deepEqual(pushed.map((p) => [p.ids, p.reason]), [[['i-ink', 'i-paper'], 'order_pressing']], 'the low-stock warning hears about the consumables');
+    assert.deepEqual(pushed.map((p) => [p.ids, p.reason]), [[['i-ink', 'i-paper'], 'order_ready']], 'the low-stock warning hears about the consumables');
 
-    const retry = await setStatus('o-press', 'Pressing');
+    const retry = await setStatus('o-press', 'Ready');
     assert.equal(retry.status, 409, 'a repeated request is refused by the lifecycle');
     assert.deepEqual([(await stockOf('i-ink')).a, (await stockOf('i-paper')).a], [96, 35], 'and takes nothing');
 
-    const ready = await setStatus('o-press', 'Ready', admin);
-    assert.deepEqual([ready.status, ready.body.consumables_deducted], [200, []], 'Ready takes nothing after pressing');
     const done = await setStatus('o-press', 'Completed', admin);
     assert.equal(done.status, 200, done.text);
     assert.deepEqual(done.body.consumables_deducted.map((c) => [c.item_name, c.trigger_status, c.quantity_deducted]), [['Thread', 'Completed', 1]],
@@ -247,9 +245,9 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
   it('never blocks the change on an estimate: stock stops at 0 and the shortfall is recorded', async () => {
     await setStock('i-paper', 3);
     await insertOrder('o-short', 'Printing', [['i-shirt-l', 10]]);
-    const r = await setStatus('o-short', 'Pressing');
+    const r = await setStatus('o-short', 'Ready');
     assert.equal(r.status, 200, r.text);
-    assert.equal(r.body.order.production_status, 'Pressing');
+    assert.equal(r.body.order.production_status, 'Ready');
     const paper = r.body.consumables_deducted.find((c) => c.consumable_inventory_id === 'i-paper');
     assert.deepEqual([paper.needed, paper.quantity_deducted, paper.shortfall], [10, 3, 7]);
     assert.match(r.body.message, /Not enough on hand for Transfer Paper \(short by 7\): the stock is now 0\./);
@@ -261,7 +259,7 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
 
     // Nothing on hand at all: still recorded once, so a later step never takes it again
     await insertOrder('o-empty', 'Printing', [['i-shirt-l', 2]]);
-    const empty = await setStatus('o-empty', 'Pressing');
+    const empty = await setStatus('o-empty', 'Ready');
     const none = empty.body.consumables_deducted.find((c) => c.consumable_inventory_id === 'i-paper');
     assert.deepEqual([empty.status, none.quantity_deducted, none.shortfall], [200, 0, 2]);
     assert.deepEqual((await logOf('o-empty')).find((l) => l.consumable_inventory_id === 'i-paper'),
@@ -277,7 +275,7 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     await pool.query(`CREATE TRIGGER trg_test_fail_history BEFORE INSERT ON order_status_history
                       FOR EACH ROW EXECUTE FUNCTION test_fail_history()`);
     try {
-      const r = await setStatus('o-fail', 'Pressing');
+      const r = await setStatus('o-fail', 'Ready');
       assert.ok(r.status >= 500, r.text);
     } finally {
       await pool.query('DROP TRIGGER trg_test_fail_history ON order_status_history');
@@ -288,14 +286,14 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     assert.deepEqual(await trailOf('o-fail'), [], 'no trail rows');
     assert.equal((await pool.query("SELECT production_status FROM order_profiles WHERE order_id = 'o-fail'")).rows[0].production_status, 'Printing');
     // ...and the real change afterwards takes them exactly once
-    assert.equal((await setStatus('o-fail', 'Pressing')).status, 200);
+    assert.equal((await setStatus('o-fail', 'Ready')).status, 200);
     assert.equal((await logOf('o-fail')).length, 2);
   });
 
   it('takes the consumables once when two screens start pressing at the same moment', async () => {
     await insertOrder('o-race', 'Printing', [['i-shirt-s', 12]]);
     const inkBefore = (await stockOf('i-ink')).a;
-    const results = await Promise.all([setStatus('o-race', 'Pressing'), setStatus('o-race', 'Pressing', admin)]);
+    const results = await Promise.all([setStatus('o-race', 'Ready'), setStatus('o-race', 'Ready', admin)]);
     assert.deepEqual(results.map((r) => r.status).sort(), [200, 409]);
     assert.equal((await stockOf('i-ink')).a, inkBefore - 3, '12 x 0.25 once');
     assert.equal((await logOf('o-race')).length, 2);

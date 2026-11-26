@@ -12,7 +12,7 @@ export const MOBILE_PATTERN = /^0\d{10}$/;
 export const peso = (n) =>
   `₱${Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-// 'YYYY-MM-DDTHH:MM:SS' -> 'Oct 8, 2026, 2:15 PM'
+// 'YYYY-MM-DDTHH:MM:SS' -> '10/08/2026, 2:15 PM'
 // utc: true for server-generated times (date_created, deleted_at, payment_date: NOW() in UTC);
 // false for wall-clock values typed by users (production_deadline, Asia/Manila).
 export const formatDateTime = (value, { withTime = true, utc = false } = {}) => {
@@ -20,9 +20,10 @@ export const formatDateTime = (value, { withTime = true, utc = false } = {}) => 
   const text = String(value).replace(' ', 'T');
   const d = new Date(utc && !/[zZ]|[+-]\d{2}:\d{2}$/.test(text) ? `${text}Z` : text);
   if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString('en-PH', withTime
-    ? { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }
-    : { year: 'numeric', month: 'short', day: 'numeric' });
+  // MM/DD/YYYY (November 2026: the shop reads dates month first)
+  return d.toLocaleString('en-US', withTime
+    ? { year: 'numeric', month: '2-digit', day: '2-digit', hour: 'numeric', minute: '2-digit' }
+    : { year: 'numeric', month: '2-digit', day: '2-digit' });
 };
 
 // HCI (Miller's law, chunking): '09171234567' -> '0917 123 4567', three groups a person can read

@@ -4,7 +4,7 @@
 // Builds a believable history for the XiaoMei printing shop from START_DAY to today, for a
 // demo / defense database: suppliers, a catalog with selling prices and usage rates, clients
 // (with branches), 20-40 orders a month with their whole life (quote, downpayment, approval,
-// Printing -> Pressing (T-shirts) -> Ready -> Completed, delivery batches, final payment),
+// Printing (printing and pressing, counted per item) -> Ready -> Completed, delivery batches, final payment),
 // cancellations with refunds, delayed orders, stock in / stock out / yearly stock counts,
 // consumables taken by the usage rates, misprints and other waste, and monthly overheads.
 //
@@ -554,7 +554,8 @@ const generateHistory = ({ users = [], now = new Date(), start = START_DAY, seed
     const approver = who.manager();
     if (happened(plan.approve)) { history.push([status, 'Approved', plan.approve, approver]); status = 'Approved'; }
     if (happened(plan.printing)) { history.push([status, 'Printing', plan.printing, who.production()]); status = 'Printing'; }
-    if (happened(plan.pressing)) { history.push([status, 'Pressing', plan.pressing, who.production()]); status = 'Pressing'; }
+    // migration 019: pressing is part of the production step (counted per item), not a status
+    const pressingStarted = status === 'Printing' && happened(plan.pressing);
     if (happened(plan.ready)) { history.push([status, 'Ready', plan.ready, who.production()]); status = 'Ready'; }
     const cancelled = cancel && happened(plan.cancel);
     if (cancelled) { history.push([status, 'Cancelled', plan.cancel, who.owner()]); status = 'Cancelled'; }
@@ -703,15 +704,15 @@ const generateHistory = ({ users = [], now = new Date(), start = START_DAY, seed
         let left = n;
         for (const r of rows) { const k = Math.min(r.quantity, left); r[key] = k; left -= k; }
       };
-      const done = ['Ready', 'Completed'].includes(status) || (status === 'Cancelled' && ['Pressing', 'Ready'].includes(cancelledFrom));
-      if (done || status === 'Pressing') fill(mine, total, 'qty_printed');
+      const done = ['Ready', 'Completed'].includes(status) || (status === 'Cancelled' && cancelledFrom === 'Ready');
+      if (done || pressingStarted) fill(mine, total, 'qty_printed');
       else if (status === 'Printing' || (status === 'Cancelled' && cancelledFrom === 'Printing')) {
         fill(mine, Math.max(delivered, Math.round(total * (0.2 + rnd.next() * 0.6))), 'qty_printed');
       }
       const press = mine.filter((r) => r._item.requires_pressing);
       for (const r of mine) {
         if (!r._item.requires_pressing) continue;
-        r.qty_pressed = done ? r.qty_printed : status === 'Pressing' ? Math.round(r.qty_printed * rnd.next() * 0.8) : 0;
+        r.qty_pressed = done ? r.qty_printed : pressingStarted ? Math.round(r.qty_printed * rnd.next() * 0.8) : 0;
       }
       // pieces handed over were ready: printed (and pressed where needed)
       if (!done && delivered > 0) {

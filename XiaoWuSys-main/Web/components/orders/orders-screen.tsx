@@ -31,6 +31,7 @@ import {
   DEFAULT_ORDER_SORT,
   ORDER_SORT_OPTIONS,
   ORDER_STATUSES,
+  statusLabel,
   SORT_FIRST_DIR,
   type OrderList,
   type OrderSort,
@@ -341,7 +342,7 @@ export function OrdersScreen() {
               <SelectItem value={ALL}>All statuses</SelectItem>
               {ORDER_STATUSES.map((s) => (
                 <SelectItem key={s} value={s}>
-                  {s}
+                  {statusLabel(s)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -523,15 +524,15 @@ export function OrdersScreen() {
                   </TableCell>
                   <TableCell className="hidden lg:table-cell">{formatDateTime(o.date_created, { utc: true })}</TableCell>
                   <TableCell className="hidden sm:table-cell">
-                    <span className="flex flex-wrap items-center gap-2">
-                      {formatDateTime(o.production_deadline, { withTime: false })}
-                      <DeadlineBadge flag={o.deadline_flag} />
-                    </span>
+                    {/* the badge on its own line, so it never widens the column */}
+                    <span className="block">{formatDateTime(o.production_deadline, { withTime: false })}</span>
+                    <DeadlineBadge flag={o.deadline_flag} className="mt-1" />
                   </TableCell>
                   <TableCell>
+                    <div className="flex flex-col items-start gap-1.5">
                     <OrderStatusBadge status={o.production_status} />
                     {o.archived_at && (
-                      <Badge variant="outline" className={cn('ml-1', TONE_CLASSES.muted.badge)}>
+                      <Badge variant="outline" className={TONE_CLASSES.muted.badge}>
                         Archived
                       </Badge>
                     )}
@@ -539,7 +540,7 @@ export function OrdersScreen() {
                       <Button
                         variant="outline"
                         size="sm"
-                        className="ml-2 px-2 text-xs"
+                        className="px-2 text-xs"
                         disabled={unarchiving !== null}
                         onClick={(e) => {
                           e.stopPropagation(); // do not open the order
@@ -549,11 +550,14 @@ export function OrdersScreen() {
                         <ArchiveRestore aria-hidden /> {unarchiving === o.order_id ? 'Unarchiving…' : 'Unarchive'}
                       </Button>
                     )}
+                    </div>
                   </TableCell>
                   <TableCell className="hidden xl:table-cell">
                     {o.delivery_status ? (
                       <>
-                        <DeliveryStatusBadge status={o.delivery_status} />
+                        <span className="block">
+                          <DeliveryStatusBadge status={o.delivery_status} />
+                        </span>
                         {(o.pieces_ordered ?? 0) > 0 && (
                           <span className="block text-xs text-muted-foreground tabular-nums">
                             {(o.pieces_delivered ?? 0).toLocaleString()} of {(o.pieces_ordered ?? 0).toLocaleString()} pcs
@@ -569,7 +573,9 @@ export function OrdersScreen() {
                     {o.payment_status ? (
                       <>
                         <span className="block tabular-nums">{peso(o.remaining ?? 0)}</span>
-                        <PaymentStatusBadge status={o.payment_status} />
+                        <span className="mt-1 block">
+                          <PaymentStatusBadge status={o.payment_status} />
+                        </span>
                         {/* adviser point 5: down payment made or fully paid, at a glance */}
                         {(o.total_paid ?? 0) > 0 && (
                           <span className="block text-xs text-muted-foreground tabular-nums">Paid {peso(o.total_paid ?? 0)}</span>

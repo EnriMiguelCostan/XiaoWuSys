@@ -63,7 +63,7 @@ export function SupplierFormDialog({
   };
 
   return (
-    <Dialog open onOpenChange={(next) => !next && !busy && onClose()}>
+    <Dialog page open onOpenChange={(next) => !next && !busy && onClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{supplier ? `Edit ${supplier.supplier_name}` : 'Add a supplier'}</DialogTitle>

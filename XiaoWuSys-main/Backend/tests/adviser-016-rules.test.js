@@ -48,11 +48,10 @@ describe('Order statuses (point 13) and pressing for T-shirts only (point 15)', 
     assert.equal(ready.ready, true, 'a Ready order can be completed');
   });
 
-  it('offers Pressing only when the order has a T-shirt', () => {
+  it('never offers Pressing as a status: it is counted per item (migration 019)', () => {
     const shirts = allowedActions({ production_status: 'Printing' }, 'Staff', null, { needs_pressing: true, has_garments: true });
     const jerseys = allowedActions({ production_status: 'Printing' }, 'Staff', null, { needs_pressing: false, has_garments: true });
-    assert.ok(shirts.statuses.includes('Pressing'));
-    assert.ok(!jerseys.statuses.includes('Pressing'));
+    assert.deepEqual([shirts.statuses, jerseys.statuses], [['Ready'], ['Ready']]);
   });
 
   it('takes the consumables once, whichever way the order reaches Completed', () => {

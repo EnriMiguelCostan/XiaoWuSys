@@ -82,9 +82,7 @@ export function ProductionSection({ detail, actions, onResult }: { detail: Order
       </div>
       <p className="text-xs text-muted-foreground">
         Counts only go up: a spoiled piece is recorded as waste, not taken off. A piece is pressed only after it is printed. A piece is ready once it is printed{progress.needs_pressing ? ', and pressed for the items marked “Pressed”' : ''}. Only ready pieces can be handed over.
-        {progress.needs_pressing
-          ? ' The order goes to Pressing once everything is printed, and to Ready once everything is pressed.'
-          : ' The order goes to Ready once everything is printed.'}
+        {' The order is In production until every piece is ready, then it is marked Ready.'}
       </p>
       <form onSubmit={save} className="space-y-3">
         <FormProblem message={problem} />

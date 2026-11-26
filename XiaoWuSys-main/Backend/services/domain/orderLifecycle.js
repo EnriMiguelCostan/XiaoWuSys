@@ -3,6 +3,8 @@
 //
 //   Pending  -> Cancelled             (Pending -> Approved only through Approve: Owner or Admin)
 //   Approved -> Printing | Cancelled
+//   (November 2026, migration 019: Printing and Pressing are one status, shown as "In production";
+//    the lines below describe migration 017, before the merge)
 //   Printing -> Pressing | Ready | Cancelled   (migration 017: Pressing when the order has an item
 //                                       that needs the heat press, and only once everything is
 //                                       printed; Ready straight from Printing only when nothing
@@ -23,7 +25,9 @@ const { localDateTime } = require('../../utils/validation');
 const STATUS_TRANSITIONS = {
   Pending: ['Cancelled'],
   Approved: ['Printing', 'Cancelled'],
-  Printing: ['Pressing', 'Ready', 'Cancelled'],
+  // November 2026: printing and pressing are one step ("In production"); what is printed and
+  // pressed is counted per item. Pressing stays only for orders saved before (it moves on to Ready).
+  Printing: ['Ready', 'Cancelled'],
   Pressing: ['Ready', 'Cancelled'],
   Ready: ['Completed', 'Cancelled'],
   Delayed: ['Pending', 'Cancelled'],
@@ -218,8 +222,7 @@ const allowedActions = (order, role, summary = null, context = {}) => {
     .filter((to) => can(role, capabilityForTransition(to, status)))
     // Pressing is the heat press for T-shirts (migration 016): everything else skips it, and an
     // order with such an item is pressed before it is Ready (migration 017)
-    .filter((to) => to !== 'Pressing' || pressing !== false)
-    .filter((to) => !(to === 'Ready' && status === 'Printing' && pressing === true));
+    .filter((to) => to !== 'Pressing' || pressing !== false);
   const completion = context.completion || null;
   const fulfillment = context.fulfillment || null;
   const completeBlocked = statuses.includes('Completed') && completion && !completion.ready
@@ -275,7 +278,6 @@ const allowedActions = (order, role, summary = null, context = {}) => {
     cancel: statuses.includes('Cancelled'),
     update_progress: ['Printing', 'Pressing'].includes(status) && can(role, 'change_status'),
     status_needs_confirm: progress ? {
-      Pressing: statuses.includes('Pressing') && !progress.all_printed,
       Ready: statuses.includes('Ready') && !progress.all_ready
     } : {}
   };

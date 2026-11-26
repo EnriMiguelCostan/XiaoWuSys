@@ -7,11 +7,18 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 import { Button } from "@/components/ui/button"
 import { isToastTarget } from "@/lib/toast"
 import { XIcon } from "lucide-react"
+import { SUB_PAGE_FRAME, SubPageBody, SubPageContext } from "@/components/ui/sub-page"
 
+/** page: open as a full sub page (components/ui/sub-page.tsx) instead of a pop-up */
 function Dialog({
+  page = false,
   ...props
-}: React.ComponentProps<typeof DialogPrimitive.Root>) {
-  return <DialogPrimitive.Root data-slot="dialog" {...props} />
+}: React.ComponentProps<typeof DialogPrimitive.Root> & { page?: boolean }) {
+  return (
+    <SubPageContext.Provider value={page}>
+      <DialogPrimitive.Root data-slot="dialog" modal={!page} {...props} />
+    </SubPageContext.Provider>
+  )
 }
 
 function DialogTrigger({
@@ -68,6 +75,30 @@ function DialogContent({
    */
   dismissible?: boolean
 }) {
+  const page = React.useContext(SubPageContext)
+  if (page) {
+    return (
+      <DialogPortal>
+        <DialogPrimitive.Content
+          data-slot="dialog-content"
+          data-page=""
+          className={SUB_PAGE_FRAME}
+          onInteractOutside={(event) => {
+            // A sub page closes only with Back (or by leaving the page)
+            event.preventDefault()
+            onInteractOutside?.(event)
+          }}
+          onEscapeKeyDown={(event) => {
+            if (!dismissible) event.preventDefault()
+            onEscapeKeyDown?.(event)
+          }}
+          {...props}
+        >
+          <SubPageBody close={<DialogPrimitive.Close data-slot="dialog-close" asChild />}>{children}</SubPageBody>
+        </DialogPrimitive.Content>
+      </DialogPortal>
+    )
+  }
   return (
     <DialogPortal>
       <DialogOverlay className={overlayClassName} />

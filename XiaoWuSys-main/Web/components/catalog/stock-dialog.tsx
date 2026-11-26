@@ -93,7 +93,7 @@ export function LossDialog({
   };
 
   return (
-    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
+    <Dialog page open onOpenChange={(open) => !open && !busy && onClose()}>
       <DialogContent className="min-w-0 sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Record loss</DialogTitle>

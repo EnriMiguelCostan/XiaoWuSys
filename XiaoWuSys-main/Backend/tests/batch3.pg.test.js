@@ -99,7 +99,7 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
     assert.deepEqual(kept.rows[0], { a: 1, h: 1 });
   });
 
-  it('writes one history row per approval and status change, through Pressing and Ready to Completed', async () => {
+  it('writes one history row per approval and status change, through Ready to Completed', async () => {
     server = await startPgTestServer(pool);
     owner = server.tokenFor('u-owner', 'Owner');
     admin = server.tokenFor('u-admin', 'Admin');
@@ -122,22 +122,21 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
     const eventsBefore = server.orderEvents.updated.length;
     assert.equal((await setStatus('o-shirts', 'Printing')).status, 200);
     const afterPrinting = await detail('o-shirts', production);
-    assert.deepEqual(afterPrinting.body.allowed_actions.statuses, ['Pressing'], 'migration 017: a shirt is pressed before Ready; Staff cannot cancel an approved order');
-    assert.equal(afterPrinting.body.allowed_actions.status_needs_confirm.Pressing, true, 'nothing recorded as printed yet: the screen asks first');
-    const notPrinted = await setStatus('o-shirts', 'Pressing');
-    assert.deepEqual([notPrinted.status, notPrinted.body.error], [409, 'PRINTING_NOT_FINISHED']);
+    assert.deepEqual(afterPrinting.body.allowed_actions.statuses, ['Ready'], 'migration 019: printing and pressing are one step; Staff cannot cancel an approved order');
+    assert.equal(afterPrinting.body.allowed_actions.status_needs_confirm.Ready, true, 'nothing recorded as printed / pressed yet: the screen asks first');
+    const notDone = await setStatus('o-shirts', 'Ready');
+    assert.deepEqual([notDone.status, notDone.body.error], [409, 'NOT_ALL_READY']);
+    const pressingStatus = await setStatus('o-shirts', 'Pressing');
+    assert.deepEqual([pressingStatus.status, pressingStatus.body.error], [409, 'INVALID_STATUS_TRANSITION'], 'Pressing is no longer a status');
 
     const skipBack = await setStatus('o-shirts', 'Approved');
     assert.equal(skipBack.status, 409);
-    const pressing = await setStatus('o-shirts', 'Pressing', production, { complete_counts: true });
-    assert.equal(pressing.status, 200, pressing.text);
-    assert.deepEqual([pressing.body.order.production_status, pressing.body.stock_changes], ['Pressing', []], 'pressing moves no stock');
-    const backwards = await setStatus('o-shirts', 'Printing');
-    assert.deepEqual([backwards.status, backwards.body.error, backwards.body.allowed], [409, 'INVALID_STATUS_TRANSITION', ['Ready', 'Cancelled']]);
     const tooSoon = await setStatus('o-shirts', 'Completed', admin);
     assert.deepEqual([tooSoon.status, tooSoon.body.error], [409, 'INVALID_STATUS_TRANSITION'], 'Completed only from Ready');
     const ready = await setStatus('o-shirts', 'Ready', production, { complete_counts: true });
     assert.equal(ready.status, 200, ready.text);
+    const backwards = await setStatus('o-shirts', 'Printing');
+    assert.deepEqual([backwards.status, backwards.body.error, backwards.body.allowed], [409, 'INVALID_STATUS_TRANSITION', ['Completed', 'Cancelled']]);
     // Migration 015: an order is completed only once nothing is left to pay
     const unpaid = await setStatus('o-shirts', 'Completed', admin);
     assert.deepEqual([unpaid.status, unpaid.body.error, unpaid.body.missing.map((m) => m.code)], [409, 'COMPLETION_REQUIREMENTS_NOT_MET', ['BALANCE_DUE']]);
@@ -149,16 +148,15 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
     assert.deepEqual(await history('o-shirts'), [
       { from_status: 'Pending', to_status: 'Approved', changed_by: 'u-owner', changed_role: 'Owner' },
       { from_status: 'Approved', to_status: 'Printing', changed_by: 'u-production', changed_role: 'Staff' },
-      { from_status: 'Printing', to_status: 'Pressing', changed_by: 'u-production', changed_role: 'Staff' },
-      { from_status: 'Pressing', to_status: 'Ready', changed_by: 'u-production', changed_role: 'Staff' },
+      { from_status: 'Printing', to_status: 'Ready', changed_by: 'u-production', changed_role: 'Staff' },
       { from_status: 'Ready', to_status: 'Completed', changed_by: 'u-admin', changed_role: 'Admin' }
     ], 'the refused moves wrote nothing');
-    assert.deepEqual(server.orderEvents.updated.slice(eventsBefore).map((o) => o.production_status), ['Printing', 'Pressing', 'Ready', 'Completed']);
+    assert.deepEqual(server.orderEvents.updated.slice(eventsBefore).map((o) => o.production_status), ['Printing', 'Ready', 'Completed']);
 
     const shown = await detail('o-shirts', staff);
     assert.deepEqual(shown.body.status_history.map((h) => [h.from_status, h.to_status, h.changed_by_name, h.changed_role]), [
       ['Pending', 'Approved', 'owner', 'Owner'], ['Approved', 'Printing', 'staff', 'Staff'],
-      ['Printing', 'Pressing', 'staff', 'Staff'], ['Pressing', 'Ready', 'staff', 'Staff'], ['Ready', 'Completed', 'admin', 'Admin']
+      ['Printing', 'Ready', 'staff', 'Staff'], ['Ready', 'Completed', 'admin', 'Admin']
     ]);
     assert.match(shown.body.status_history[0].changed_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/);
     assert.ok(!('changed_by' in shown.body.status_history[0]), 'names, not account ids');
@@ -203,7 +201,7 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
       heard.length = 0;
 
       await writer.query('BEGIN');
-      await writer.query("UPDATE order_profiles SET production_status = 'Pressing' WHERE order_id = 'o-live'");
+      await writer.query("UPDATE order_profiles SET production_status = 'Ready' WHERE order_id = 'o-live'");
       await listener.query('SELECT 1');
       await new Promise((r) => setTimeout(r, 150));
       assert.deepEqual(heard, [], 'nothing is announced while the change can still be rolled back');
@@ -212,18 +210,18 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
       await new Promise((r) => setTimeout(r, 150));
       assert.deepEqual(heard, [], 'a rolled-back change is never announced');
 
-      const done = await setStatus('o-live', 'Pressing', production, { complete_counts: true });
+      const done = await setStatus('o-live', 'Ready', production, { complete_counts: true });
       assert.equal(done.status, 200, done.text);
       await listener.query('SELECT 1');
       await new Promise((r) => setTimeout(r, 150));
       const mine = heard.filter((n) => n.order_id === 'o-live');
       assert.equal(mine.length, 1);
       assert.deepEqual(mine[0], {
-        order_id: 'o-live', op: 'UPDATE', tracking_no: done.body.order.tracking_no, production_status: 'Pressing', version: done.body.order.version
+        order_id: 'o-live', op: 'UPDATE', tracking_no: done.body.order.tracking_no, production_status: 'Ready', version: done.body.order.version
       }, 'the same version text the API returns, so a screen can tell it already has it');
 
       heard.length = 0;
-      await pool.query("UPDATE order_profiles SET production_status = 'Pressing' WHERE order_id = 'o-live'"); // same values
+      await pool.query("UPDATE order_profiles SET production_status = 'Ready' WHERE order_id = 'o-live'"); // same values
       await listener.query('SELECT 1');
       await new Promise((r) => setTimeout(r, 150));
       assert.deepEqual(heard, [], 'a write that changes nothing is not announced');
@@ -319,7 +317,7 @@ describe('Batch 3 on real PostgreSQL: override, Pressing, history, rank sync', {
     await insertOrder('o-status', { status: 'Printing', editor: ['u-production', 'Staff'] });
     const stale = (await detail('o-status')).body.order.version;
     await pool.query("UPDATE order_profiles SET design_drive_link = 'https://drive.google.com/file/d/x/view' WHERE order_id = 'o-status'");
-    const r = await setStatus('o-status', 'Pressing', owner, { expected_version: stale, override: true });
+    const r = await setStatus('o-status', 'Ready', owner, { expected_version: stale, override: true });
     assert.deepEqual([r.status, r.body.error, r.body.can_override], [409, 'EDIT_CONFLICT', false]);
     assert.deepEqual(await history('o-status'), []);
   });

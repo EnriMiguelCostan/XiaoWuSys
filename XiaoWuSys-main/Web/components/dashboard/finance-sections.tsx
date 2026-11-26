@@ -159,7 +159,8 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
   const [removing, setRemoving] = useState<OverheadExpense | null>(null);
   const [viewing, setViewing] = useState<OverheadExpense | null>(null);
   const [busy, setBusy] = useState(false);
-  // New expense form
+  // New expense form (opens as its own sub page)
+  const [recording, setRecording] = useState(false);
   const [day, setDay] = useState('');
   const [category, setCategory] = useState('');
   const [description, setDescription] = useState('');
@@ -225,6 +226,7 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
     setFieldErrors({});
     setDescription('');
     setPesos('');
+    setRecording(false);
     onResult({ type: 'success', title: 'Expense recorded', message: res.message ?? 'Expense recorded.' });
     reload();
   };
@@ -323,7 +325,16 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
               <strong className="tabular-nums">{peso(data.total)}</strong>
             </p>
 
-            <form onSubmit={add} noValidate className="space-y-4 rounded-md border bg-muted/30 p-3" aria-label="Record an expense">
+            <div className="flex justify-end">
+              <Button onClick={() => setRecording(true)}>Record expense</Button>
+            </div>
+            <Dialog page open={recording} onOpenChange={(open) => !open && !busy && setRecording(false)}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Record an expense</DialogTitle>
+                  <DialogDescription>Rent, electricity, water, internet, wages and other running costs, for the profit and loss report.</DialogDescription>
+                </DialogHeader>
+            <form onSubmit={add} noValidate className="space-y-4" aria-label="Record an expense">
               <FormProblem message={problem} />
               <RequiredNote />
               <div className="grid min-w-0 gap-4 sm:grid-cols-2">
@@ -377,10 +388,12 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
                 </Button>
               </div>
             </form>
+              </DialogContent>
+            </Dialog>
           </>
         )}
       </CardContent>
-      <Dialog open={Boolean(viewing)} onOpenChange={(open) => !open && setViewing(null)}>
+      <Dialog page open={Boolean(viewing)} onOpenChange={(open) => !open && setViewing(null)}>
         <DialogContent className="min-w-0 sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Expense details</DialogTitle>
