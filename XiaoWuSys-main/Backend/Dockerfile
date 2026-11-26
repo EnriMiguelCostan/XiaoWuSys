@@ -19,7 +19,6 @@ ENV NODE_ENV=production \
     LOCAL_DB_PATH=/data/local_cache.db \
     PORT=5000 \
     HOST=0.0.0.0
-VOLUME ["/data"]
 USER node
 
 EXPOSE 5000
