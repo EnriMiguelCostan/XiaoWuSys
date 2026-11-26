@@ -801,7 +801,7 @@ export function OrderDetailSheet({
             )}
             {order?.production_status === 'Printing' && (detail?.progress?.lines.length ?? 0) > 0 && (
               <fieldset className="min-w-0 space-y-2">
-                <legend className="text-sm font-medium">Pieces already printed (recorded as waste)</legend>
+                <legend className="text-sm font-medium">Pieces already printed (recorded as waste; at least what is recorded)</legend>
                 {detail?.progress?.lines.map((l) => (
                   <div key={l.line_item_id} className="flex items-center justify-between gap-3 text-sm">
                     <Label htmlFor={`printed-${l.line_item_id}`} className="min-w-0 font-normal wrap-anywhere">
@@ -810,7 +810,7 @@ export function OrderDetailSheet({
                     <Input
                       id={`printed-${l.line_item_id}`}
                       type="number"
-                      min={0}
+                      min={l.printed}
                       max={l.quantity}
                       step={1}
                       inputMode="numeric"

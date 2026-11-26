@@ -364,7 +364,7 @@ describe('Migration 015 on real PostgreSQL: the inventory system', { skip }, () 
 
   it('refunds only what may be refunded, after a price cut or a cancellation', async () => {
     const refund = (order, amount, token = owner, extra = {}) => call('POST', `/api/orders/${order}/refunds`, token,
-      { amount, refund_reason: 'Late delivery (price cut)', payment_type: 'Cash', ...extra });
+      { amount, refund_reason: 'Late delivery (price cut)', payment_type: 'Cash', payer_name: 'Mrs. Lopez', ...extra });
     assert.deepEqual((await refund(ids.order, 100)).body.error, 'REFUND_NOT_ALLOWED', 'fully paid, nothing above the bill');
     assert.equal((await refund(ids.order, 100, staff)).status, 403, 'money back is for the Owner or an Admin');
     const cut = await call('POST', `/api/orders/${ids.order}/price-adjustment`, owner, { adjustment_amount: 1000, adjustment_reason: 'Delivered 2 days late' });

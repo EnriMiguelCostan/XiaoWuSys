@@ -81,7 +81,7 @@ export function ProductionSection({ detail, actions, onResult }: { detail: Order
         </div>
       </div>
       <p className="text-xs text-muted-foreground">
-        A piece is ready once it is printed{progress.needs_pressing ? ', and pressed for the items marked “Pressed”' : ''}. Only ready pieces can be handed over.
+        Counts only go up: a spoiled piece is recorded as waste, not taken off. A piece is pressed only after it is printed. A piece is ready once it is printed{progress.needs_pressing ? ', and pressed for the items marked “Pressed”' : ''}. Only ready pieces can be handed over.
         {progress.needs_pressing
           ? ' The order goes to Pressing once everything is printed, and to Ready once everything is pressed.'
           : ' The order goes to Ready once everything is printed.'}
@@ -116,7 +116,7 @@ export function ProductionSection({ detail, actions, onResult }: { detail: Order
                       <Input
                         aria-label={`${l.product_type}: printed`}
                         type="number"
-                        min={0}
+                        min={l.printed}
                         max={l.quantity}
                         step={1}
                         inputMode="numeric"
@@ -135,11 +135,12 @@ export function ProductionSection({ detail, actions, onResult }: { detail: Order
                       <Input
                         aria-label={`${l.product_type}: pressed`}
                         type="number"
-                        min={0}
-                        max={l.quantity}
+                        min={l.pressed}
+                        max={Number(counts[l.line_item_id]?.printed ?? l.printed)}
                         step={1}
                         inputMode="numeric"
                         className="ml-auto h-8 w-24 text-right"
+                        disabled={Number(counts[l.line_item_id]?.printed ?? l.printed) === 0}
                         value={counts[l.line_item_id]?.pressed ?? ''}
                         onChange={(e) => set(l.line_item_id, 'pressed', e.target.value)}
                       />

@@ -54,6 +54,7 @@ function MethodFields({
   errors,
   idPrefix,
   forceOptional = false,
+  requireNames = false,
 }: {
   method: PaymentMethodForm | undefined;
   values: Record<string, string>;
@@ -61,22 +62,29 @@ function MethodFields({
   errors: Record<string, string>;
   idPrefix: string;
   forceOptional?: boolean;
+  /** a refund: nothing forced except who received the money back */
+  requireNames?: boolean;
 }) {
   if (!method || method.fields.length === 0) return null;
   return (
     <div className="grid gap-3 sm:grid-cols-2">
-      {method.fields.map((f) => (
-        <Field key={f.name} id={`${idPrefix}-${f.name}`} label={`${f.label}${f.required && !forceOptional ? ' *' : ''}`} error={errors[f.name]} hint={f.hint ?? undefined}>
+      {method.fields.map((f) => {
+        const needed = (Boolean(f.required) && !forceOptional) || (requireNames && f.name === 'payer_name');
+        const label = requireNames && f.name === 'payer_name' ? 'Received by (name)' : f.label;
+        return (
+        <Field key={f.name} id={`${idPrefix}-${f.name}`} label={`${label}${needed ? ' *' : ''}`} error={errors[f.name]} hint={requireNames && f.name === 'payer_name' ? 'Who the money was given back to.' : (f.hint ?? undefined)}>
           <Input
             id={`${idPrefix}-${f.name}`}
             type={f.type === 'date' ? 'date' : 'text'}
             maxLength={f.max ?? undefined}
-            required={Boolean(f.required) && !forceOptional}
+            placeholder={f.placeholder ?? undefined}
+            required={needed}
             value={values[f.name] ?? ''}
             onChange={(e) => onChange(f.name, e.target.value)}
           />
         </Field>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -616,7 +624,7 @@ function RefundDialog({
               <Input id="rf-notes" maxLength={TEXT_MAX.reason} value={notes} onChange={(e) => setNotes(e.target.value)} />
             </Field>
           </div>
-          <MethodFields method={method} values={values} errors={errors} idPrefix="rf" forceOptional onChange={(name, value) => setValues((v) => ({ ...v, [name]: value }))} />
+          <MethodFields method={method} values={values} errors={errors} idPrefix="rf" forceOptional requireNames onChange={(name, value) => setValues((v) => ({ ...v, [name]: value }))} />
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
             <Button type="submit" variant="destructive" busy={busy} disabled={busy}>

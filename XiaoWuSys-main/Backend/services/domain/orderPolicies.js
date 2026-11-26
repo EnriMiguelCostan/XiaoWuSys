@@ -17,11 +17,12 @@
 //    An Admin may give a price cut up to the suggestion; only the Owner may give more.
 //
 // 3. ITEMS ADDED AFTER APPROVAL ("add-ons"):
-//      Pending / Delayed   anyone; the quote is simply calculated again
+//      Pending / Delayed   anyone; the quote (if there is one) is calculated again at once
 //      Approved / Printing an Owner or Admin. The new lines are priced on their own and added to
-//                          the bill. Close to the deadline (3 days or less) or when the add-on
-//                          is more than 25% of the pieces, the deadline must move later, or the
-//                          manager writes why the old deadline still holds
+//                          the bill.
+//      At any of these: close to the deadline (3 days or less) or when the add-on is more than
+//      25% of the pieces already ordered (by quantity), the deadline must move later, or someone
+//      writes why the current deadline still holds.
 //      Pressing and later  no: production is finished. It is a new order.
 //
 // 4. PRODUCTION PROGRESS (order_items.qty_printed / qty_pressed): a line is ready when it is
@@ -159,8 +160,7 @@ const ADD_ON_OPEN = ['Pending', 'Delayed'];
 const ADD_ON_MANAGED = ['Approved', 'Printing'];
 // -> null (allowed as is) | { status, body } (refused) | { addOn: true, deadlineReview: bool }
 const addOnCheck = ({ status, isManager, deadline, today, existingPieces, addPieces, newDeadline = null, keepReason = null }) => {
-  if (ADD_ON_OPEN.includes(status)) return { addOn: false, deadlineReview: false };
-  if (!ADD_ON_MANAGED.includes(status)) {
+  if (!ADD_ON_OPEN.includes(status) && !ADD_ON_MANAGED.includes(status)) {
     return {
       status: 409,
       body: {
@@ -169,7 +169,7 @@ const addOnCheck = ({ status, isManager, deadline, today, existingPieces, addPie
       }
     };
   }
-  if (!isManager) {
+  if (ADD_ON_MANAGED.includes(status) && !isManager) {
     return {
       status: 403,
       body: { error: 'ADD_ON_NEEDS_MANAGER', message: 'The job order is approved. Only the Owner or an Admin can add items to it now.' }
@@ -193,7 +193,7 @@ const addOnCheck = ({ status, isManager, deadline, today, existingPieces, addPie
       }
     };
   }
-  return { addOn: true, deadlineReview: review };
+  return { addOn: ADD_ON_MANAGED.includes(status), deadlineReview: review };
 };
 
 // ---------- Production progress ----------
@@ -262,6 +262,19 @@ const checkProgressUpdate = ({ lines: recorded, sent, delivered = 0, status = nu
       n[key] = s[key];
     }
     if (!line.requires_pressing) n.pressed = 0;
+    // What is recorded as printed or pressed stays: a printed piece cannot be "unprinted"
+    if (n.printed < Number(line.qty_printed || 0) || n.pressed < Number(line.qty_pressed || 0)) {
+      return {
+        problem: {
+          status: 422,
+          body: {
+            error: 'PROGRESS_CANNOT_DECREASE',
+            message: `${line.product_type}: ${line.qty_printed} printed${line.requires_pressing ? ` and ${line.qty_pressed} pressed` : ''} are already recorded. `
+              + 'The counts can only go up; a spoiled piece is recorded as waste.'
+          }
+        }
+      };
+    }
     if (n.printed > Number(line.quantity)) {
       return { problem: { status: 422, body: { error: 'PROGRESS_TOO_HIGH', message: `${line.product_type}: only ${line.quantity} ordered, so at most ${line.quantity} can be printed.` } } };
     }

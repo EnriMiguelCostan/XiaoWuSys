@@ -936,6 +936,12 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
           allowed: STATUS_TRANSITIONS[from] || []
         });
       }
+      if (shop_fault && APPROVABLE_STATUSES.includes(from)) {
+        throw new Rejected(422, {
+          error: 'SHOP_FAULT_NOT_APPLICABLE',
+          message: "The job order is not approved yet, so nothing is kept anyway: \"the shop's fault\" applies from approval on."
+        });
+      }
       if (status === 'Cancelled' && !can(req.user.role, capabilityForTransition(status, from))) {
         throw new Rejected(403, {
           error: 'CANCEL_NEEDS_MANAGER',
@@ -1021,6 +1027,12 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
           let made = 0;
           if (from === 'Pressing' || from === 'Ready') made = Number(l.quantity);
           else if (from === 'Printing') made = sentById.has(l.line_item_id) ? sentById.get(l.line_item_id) : Number(l.qty_printed || 0);
+          if (from === 'Printing' && made < Number(l.qty_printed || 0)) {
+            throw new Rejected(422, {
+              error: 'PROGRESS_CANNOT_DECREASE',
+              message: `${l.product_type}: ${l.qty_printed} are already recorded as printed, so at least ${l.qty_printed} are waste.`
+            });
+          }
           if (made > Number(l.quantity)) {
             throw new Rejected(422, { error: 'PROGRESS_TOO_HIGH', message: `${l.product_type}: only ${l.quantity} ordered, so at most ${l.quantity} can be printed.` });
           }
@@ -1273,7 +1285,15 @@ const checkAddOn = async (client, req, order_id, ord, newLines, fields) => {
   return { ...check, tierQuantity: existing.rows[0].quantity + addPieces };
 };
 const priceAddOn = async (client, req, order_id, ord, lineIds, check, fields) => {
-  if (!check.addOn) return { addOn: false, added_amount: 0, deadline: null };
+  if (!check.addOn) {
+    // Before approval: a later deadline is simply saved, and an existing quote is calculated again
+    const later = fields.new_deadline && String(fields.new_deadline).slice(0, 10) > String(ord.production_deadline).slice(0, 10);
+    if (later) {
+      await client.query('UPDATE order_profiles SET production_deadline = $2::timestamp WHERE order_id = $1', [order_id, fields.new_deadline]);
+    }
+    const requote = await requoteOpenOrder(client, req, order_id);
+    return { addOn: false, added_amount: 0, deadline: later ? fields.new_deadline : null, requote };
+  }
   const { rows: items } = await client.query(
     `SELECT oi.line_item_id, oi.product_type, oi.size, oi.quantity, oi.inventory_id, oi.print_areas,
             ii.item_name, ii.selling_price::text AS selling_price, ii.unit_cost::text AS unit_cost, ii.print_pricing
@@ -1306,6 +1326,43 @@ const priceAddOn = async (client, req, order_id, ord, lineIds, check, fields) =>
   });
   return { addOn: true, added_amount: toPesos(addedC), deadline: moved ? fields.new_deadline : null };
 };
+// An order that is not approved yet keeps its quote up to date: when items are added, the quote
+// (if one was calculated) is worked out again with the same labor, incidental charges and
+// discount. If it cannot be (a price is missing, the discount would now sell below cost), the old
+// quote stays and the message says to calculate it again. -> null | { total, stale, message }
+const requoteOpenOrder = async (client, req, order_id) => {
+  const locked = await client.query(`SELECT ${selectList('order_profiles', 'pg')} FROM order_profiles WHERE order_id = $1`, [order_id]);
+  const before = serialize('order_profiles', locked.rows[0]);
+  if (!['Pending', 'Delayed'].includes(before.production_status) || toCentavos(before.total_quote_amount) <= 0) return null;
+  const items = await client.query(
+    `SELECT oi.line_item_id, oi.product_type, oi.size, oi.quantity, oi.inventory_id, oi.print_areas,
+            ii.item_name, ii.selling_price::text AS selling_price, ii.unit_cost::text AS unit_cost, ii.print_pricing
+       FROM order_items oi LEFT JOIN inventory_items ii ON ii.inventory_id = oi.inventory_id
+      WHERE oi.order_id = $1 ORDER BY oi.line_item_id`, [order_id]);
+  const shown = quoteBreakdown(before);
+  const { problem, quote } = computeQuote({
+    items: items.rows,
+    existing: { amount: shown.discount_amount, reason: shown.discount_reason, labor: shown.labor_amount, incidental: shown.incidental_amount }
+  });
+  if (problem) {
+    return { stale: true, total: before.total_quote_amount, message: `The quote was not updated: ${problem.body.message} Calculate the quote again.` };
+  }
+  await client.query(
+    `UPDATE order_items oi SET price = v.price FROM unnest($1::text[], $2::numeric[]) AS v(line_item_id, price)
+      WHERE oi.line_item_id = v.line_item_id AND oi.order_id = $3`,
+    [quote.lines.map((l) => l.line_item_id), quote.lines.map((l) => l.unit_price), order_id]);
+  const updated = await client.query(
+    `UPDATE order_profiles SET subtotal_amount = $2, discount_amount = $3, total_quote_amount = $4, labor_amount = $5, incidental_amount = $6,
+            last_edited_by = $7, last_edited_role = $8
+      WHERE order_id = $1 RETURNING ${selectList('order_profiles', 'pg')}`,
+    [order_id, quote.subtotal_amount, quote.discount_amount, quote.total_quote_amount, quote.labor_amount, quote.incidental_amount, ...editorOf(req)]);
+  await writeAudit(client, {
+    entity: 'order_profiles', entity_id: order_id, action: 'quote_recalculated', actor: req.user,
+    details: { reason: 'items added', tier: quote.tier, before: quoteFieldsOf(before), after: quoteFieldsOf(serialize('order_profiles', updated.rows[0])) }
+  });
+  return { stale: false, total: quote.total_quote_amount, message: `The quote was updated: ${pesoText(quote.total_quote_amount)} (${quote.tier.label}).` };
+};
+
 const ADD_ON_NEEDS_CLOUD = new Rejected(503, {
   error: 'ADD_ON_REQUIRES_CLOUD',
   message: 'This job order is approved, so adding items changes its bill. That needs the cloud connection. Try again when online.'
@@ -1454,13 +1511,15 @@ router.post('/:order_id/items', requireRole(WRITE_ROLES), requireOrderEditAccess
         : 'Order item saved locally (Offline Mode).')
         + (result.addOn && result.addOn.addOn
           ? ` Added to the approved order: the bill went up by ${pesoText(result.addOn.added_amount)}${result.addOn.deadline ? ' and the deadline moved' : ''}.`
-          : ''),
+          : '')
+        + (result.addOn && !result.addOn.addOn && result.addOn.deadline ? ' The deadline moved.' : '')
+        + (result.addOn && result.addOn.requote ? ` ${result.addOn.requote.message}` : ''),
       source: result.source,
       item: result.record,
       stock_reserved: result.reserved,
       add_on: result.addOn || null
     });
-    if (result.addOn && result.addOn.addOn) {
+    if (result.addOn && (result.addOn.addOn || result.addOn.requote || result.addOn.deadline)) {
       const { record: fresh } = await getRecord(req, 'order_profiles', order_id).catch(() => ({ record: null }));
       if (fresh) pushOrderChange(req, fresh);
     }
@@ -1621,11 +1680,18 @@ router.post('/:order_id/items/bulk', requireRole(WRITE_ROLES), requireOrderEditA
     res.status(201).json({
       message: result.source === 'cloud'
         ? `${rows.length} item${rows.length === 1 ? '' : 's'} added.${result.reserved ? ' Their stock was reserved.' : ''}`
+          + (result.addOn && result.addOn.addOn ? ` The bill went up by ${pesoText(result.addOn.added_amount)}.` : '')
+          + (result.addOn && result.addOn.requote ? ` ${result.addOn.requote.message}` : '')
         : `${rows.length} item${rows.length === 1 ? '' : 's'} saved on this computer (offline). They will sync when the connection is back.`,
       source: result.source,
       items: result.items,
-      stock_reserved: result.reserved
+      stock_reserved: result.reserved,
+      add_on: result.addOn || null
     });
+    if (result.addOn && (result.addOn.addOn || result.addOn.requote || result.addOn.deadline)) {
+      const { record: fresh } = await getRecord(req, 'order_profiles', order_id).catch(() => ({ record: null }));
+      if (fresh) pushOrderChange(req, fresh);
+    }
   } catch (err) {
     if (err instanceof Rejected) return res.status(err.status).json(err.body);
     sendDbError(res, err, 'importing order items');

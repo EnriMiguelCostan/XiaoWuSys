@@ -154,7 +154,7 @@ describe('Migration 015 on the offline server', () => {
     assert.deepEqual([line.status, line.body.source], [201, 'local']);
     const cloudOnly = [
       ['POST', `/api/orders/${id}/deliveries`, { quantity: 1 }, 'DELIVERY_REQUIRES_CLOUD'],
-      ['POST', `/api/orders/${id}/refunds`, { amount: 1, refund_reason: 'Order cancelled', payment_type: 'Cash' }, null],
+      ['POST', `/api/orders/${id}/refunds`, { amount: 1, refund_reason: 'Order cancelled', payment_type: 'Cash', payer_name: 'Juan Dela Cruz' }, null],
       ['POST', '/api/suppliers', { supplier_name: 'Offline Supply' }, 'SUPPLIER_REQUIRES_CLOUD'],
       ['PATCH', `/api/orders/${id}/print-details/${line.body.print_detail.print_detail_id}`, { quantity: 1 }, 'PRINT_DETAIL_REQUIRES_CLOUD']
     ];

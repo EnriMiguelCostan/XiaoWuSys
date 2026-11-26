@@ -924,6 +924,10 @@ router.post('/:order_id/refunds', requireRole(rolesWith('refund_payment')), requ
   // (a cash refund has no reference), but what is given is checked
   const checked = payment_type ? checkPaymentDetails(payment_type, body, { allOptional: true }) : { errors: [], details: {} };
   v.errors.push(...checked.errors);
+  // who received the money back, like the payer on a payment
+  if (payment_type && !checked.details.payer_name && !checked.errors.some((e) => e.field === 'payer_name')) {
+    v.errors.push({ field: 'payer_name', message: 'Write who received the money back.' });
+  }
   if (v.failed()) return v.send(res);
   const { details } = checked;
   const payment_id = crypto.randomUUID();
