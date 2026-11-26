@@ -36,6 +36,7 @@ import { downloadFile, errorMessage } from '@/lib/api';
 import { canEditInventory, canPurgeInventory, type InventoryItem } from '@/lib/inventory';
 import { STOCK_STATUS, TONE_CLASSES, type Tone } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
+import { useSubPath } from '@/lib/sub-route';
 import { TEXT_MAX } from '@/lib/input-limits';
 
 const LIST_PAGE = 50;
@@ -45,12 +46,34 @@ const ALL = 'all';
 // spilling out of its card), a size that steps down on narrow cards, tight line height.
 const SUMMARY_NUMBER =
   'w-full text-xl leading-tight font-semibold tabular-nums wrap-anywhere sm:text-2xl lg:text-xl xl:text-2xl';
+// Sub pages have their own address under /catalog (lib/sub-route.ts):
+//   /catalog/new              add an item          /catalog/<id>        edit an item
+//   /catalog/<id>/usage       its consumable rates /catalog/loss[/<id>] record a loss
+//   /catalog/import           import a file        /catalog/recycle-bin the Recycle Bin
+const BASE = '/catalog';
+const RESERVED = new Set(['new', 'loss', 'import', 'recycle-bin']);
 type DialogState =
   | { kind: 'item'; item: InventoryItem | null }
   | { kind: 'loss'; itemId: string | null }
   | { kind: 'import' }
   | { kind: 'rates'; item: InventoryItem }
+  | { kind: 'bin' }
+  | { kind: 'waiting' }
   | null;
+
+/** What the address asks for, once the items it names are loaded */
+function dialogFor(sub: string[] | null, items: InventoryItem[], loaded: boolean): DialogState {
+  if (!sub) return null;
+  const [first, second] = sub;
+  if (first === 'new') return { kind: 'item', item: null };
+  if (first === 'import') return { kind: 'import' };
+  if (first === 'recycle-bin') return { kind: 'bin' };
+  if (first === 'loss') return { kind: 'loss', itemId: second ?? null };
+  if (RESERVED.has(first)) return null;
+  const item = items.find((i) => i.inventory_id === first);
+  if (!item) return loaded ? null : { kind: 'waiting' };
+  return second === 'usage' ? { kind: 'rates', item } : { kind: 'item', item };
+}
 
 const LIVE = {
   live: { dot: 'bg-success', text: 'Live' },
@@ -71,16 +94,18 @@ export function CatalogScreen() {
   const [sort, setSort] = useState<SortState>({ key: 'name', dir: 1 });
   const [paging, setPaging] = useState({ key: '', shown: LIST_PAGE });
 
-  const [dialog, setDialog] = useState<DialogState>(null);
   const [toDelete, setToDelete] = useState<InventoryItem | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [binOpen, setBinOpen] = useState(false);
   const [result, setResult] = useState<ResultMessage | null>(null);
 
   const items = useMemo(() => snapshot?.items ?? [], [snapshot]);
   const summary = snapshot?.summary;
   const categories = snapshot?.categories ?? [];
   const units = useMemo(() => items.map((item) => item.unit), [items]);
+
+  const [sub, go] = useSubPath(BASE);
+  const dialog = dialogFor(sub, items, Boolean(snapshot));
+  const closeDialog = () => go(null);
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -107,7 +132,7 @@ export function CatalogScreen() {
 
   // A finished dialog: show the outcome and reload (the socket usually beats us to it)
   const finish = (r: ResultMessage) => {
-    setDialog(null);
+    closeDialog();
     setResult(r);
     if (r.type !== 'error') refresh();
   };
@@ -169,30 +194,30 @@ export function CatalogScreen() {
         <div className="flex flex-wrap gap-2">
           {canEdit && (
             <>
-              <Button onClick={() => setDialog({ kind: 'item', item: null })}>
+              <Button onClick={() => go(['new'])}>
                 <PackagePlus aria-hidden /> Add Item
               </Button>
               {can(user, 'receive_stock') && (
                 <Button variant="outline" asChild>
-                  <Link href="/inventory/stock-in?new=1">
+                  <Link href="/inventory/stock-in/new">
                     <ArrowDownToLine aria-hidden /> Stock in
                   </Link>
                 </Button>
               )}
               {can(user, 'issue_stock') && (
                 <Button variant="outline" asChild>
-                  <Link href="/inventory/stock-out?new=1">
+                  <Link href="/inventory/stock-out/new">
                     <ArrowUpFromLine aria-hidden /> Stock out
                   </Link>
                 </Button>
               )}
-              <Button variant="outline" onClick={() => setDialog({ kind: 'loss', itemId: null })} disabled={items.length === 0}>
+              <Button variant="outline" onClick={() => go(['loss'])} disabled={items.length === 0}>
                 <Minus aria-hidden /> Record loss
               </Button>
-              <Button variant="outline" onClick={() => setDialog({ kind: 'import' })}>
+              <Button variant="outline" onClick={() => go(['import'])}>
                 <FileUp aria-hidden /> Import
               </Button>
-              <Button variant="outline" onClick={() => setBinOpen(true)} aria-label={`Recycle Bin, ${binCount} items`}>
+              <Button variant="outline" onClick={() => go(['recycle-bin'])} aria-label={`Recycle Bin, ${binCount} items`}>
                 <Trash2 aria-hidden /> Recycle Bin
                 {binCount > 0 && <Badge variant="secondary">{binCount}</Badge>}
               </Button>
@@ -343,12 +368,12 @@ export function CatalogScreen() {
               onSort={(key: SortKey) => setSort((prev) => nextSort(prev, key))}
               canEdit={canEdit}
               recentlyChanged={recentlyChanged}
-              onEdit={(item) => setDialog({ kind: 'item', item })}
-              onLoss={(item) => setDialog({ kind: 'loss', itemId: item.inventory_id })}
+              onEdit={(item) => go([item.inventory_id])}
+              onLoss={(item) => go(['loss', item.inventory_id])}
               canReceive={can(user, 'receive_stock')}
               canIssue={can(user, 'issue_stock')}
               onDelete={setToDelete}
-              onRates={(item) => setDialog({ kind: 'rates', item })}
+              onRates={(item) => go([item.inventory_id, 'usage'])}
             />
             <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
               <span>
@@ -366,13 +391,13 @@ export function CatalogScreen() {
 
       {/* Dialogs (mounted only while open, so each one starts with a fresh form) */}
       {canEdit && dialog?.kind === 'item' && (
-        <ItemFormDialog item={dialog.item} categories={categories} units={units} onClose={() => setDialog(null)} onDone={finish} />
+        <ItemFormDialog item={dialog.item} categories={categories} units={units} onClose={closeDialog} onDone={finish} />
       )}
       {canEdit && dialog?.kind === 'loss' && (
-        <LossDialog items={items} initialItemId={dialog.itemId} onClose={() => setDialog(null)} onDone={finish} />
+        <LossDialog items={items} initialItemId={dialog.itemId} onClose={closeDialog} onDone={finish} />
       )}
-      {canEdit && dialog?.kind === 'import' && <ImportDialog onClose={() => setDialog(null)} onDone={finish} />}
-      {canEdit && dialog?.kind === 'rates' && <ConsumableRatesDialog item={dialog.item} onClose={() => setDialog(null)} onDone={finish} />}
+      {canEdit && dialog?.kind === 'import' && <ImportDialog onClose={closeDialog} onDone={finish} />}
+      {canEdit && dialog?.kind === 'rates' && <ConsumableRatesDialog item={dialog.item} onClose={closeDialog} onDone={finish} />}
 
       <ConfirmDialog
         open={Boolean(toDelete)}
@@ -391,8 +416,8 @@ export function CatalogScreen() {
 
       {canEdit && (
         <RecycleBinSheet
-          open={binOpen}
-          onOpenChange={setBinOpen}
+          open={dialog?.kind === 'bin'}
+          onOpenChange={(open) => !open && closeDialog()}
           canPurge={canPurge}
           refreshKey={`${binCount}:${snapshot?.fetched_at ?? ''}`}
           onResult={(r) => {

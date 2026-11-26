@@ -551,7 +551,7 @@ export function CreateOrderScreen() {
           </p>
           {created.order_id && (
             <Button size="sm" asChild>
-              <Link href={`/orders?order=${encodeURIComponent(created.order_id)}`}>Open order</Link>
+              <Link href={`/orders/${encodeURIComponent(created.order_id)}`}>Open order</Link>
             </Button>
           )}
           <Button

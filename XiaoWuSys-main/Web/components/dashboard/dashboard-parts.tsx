@@ -21,8 +21,8 @@ import { cn } from '@/lib/utils';
 /** Materials named in the low-stock warning before "and N more" (same as the MVP) */
 const PIN_NAMES = 4;
 
-/** The M3 orders screen opens its detail sheet from ?order=<order_id> */
-const orderHref =(orderId: string) => `/orders?order=${encodeURIComponent(orderId)}`;
+/** An order opens as its own page at /orders/<order_id> */
+const orderHref =(orderId: string) => `/orders/${encodeURIComponent(orderId)}`;
 
 /** Truncating table-cell content; full value stays available on hover. */
 export function Cell({ value, className }: { value: string; className?: string }) {

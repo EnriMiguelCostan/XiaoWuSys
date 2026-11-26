@@ -51,6 +51,7 @@ import { errorMessage } from '@/lib/api';
 import { TEXT_MAX } from '@/lib/input-limits';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
+import { useSubPath } from '@/lib/sub-route';
 
 interface Account {
   user_id: string;
@@ -102,7 +103,9 @@ export function AccountsScreen() {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ResultMessage | null>(null);
-  const [creating, setCreating] = useState(false);
+  // New account is its own page at /accounts/new (lib/sub-route.ts)
+  const [sub, go] = useSubPath('/accounts');
+  const creating = sub?.[0] === 'new';
   const [resetFor, setResetFor] = useState<Account | null>(null);
   const [confirm, setConfirm] = useState<{ account: Account; is_active: boolean } | null>(null);
   const [view, setView] = useState<AccountView>('active');
@@ -188,7 +191,7 @@ export function AccountsScreen() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => setCreating(true)} disabled={offline || !list}>
+          <Button onClick={() => go(['new'])} disabled={offline || !list}>
             <UserPlus aria-hidden /> New account
           </Button>
           <Button variant="outline" onClick={reload} disabled={loading}>
@@ -353,13 +356,14 @@ export function AccountsScreen() {
         )
       )}
 
-      {creating && (
+      {/* list: a direct visit to /accounts/new waits for the roles this account may give */}
+      {creating && list && !offline && (
         <CreateAccountDialog
           roles={assignable}
-          onClose={() => setCreating(false)}
+          onClose={() => go(null)}
           onResult={setResult}
           onDone={(r) => {
-            setCreating(false);
+            go(null);
             setResult(r);
             reload();
           }}

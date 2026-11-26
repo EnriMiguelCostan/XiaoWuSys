@@ -4,7 +4,7 @@
 //
 // The gate is cosmetic (steering §2.3): no token -> /login. Every real check is Express's
 // 401/403, and a 401 on any request wipes the session (lib/api.ts), which lands here too.
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { LogoSpinner } from '@/components/brand/brand-logo';
 import { ConnectionBar } from '@/components/connection/connection-bar';
@@ -13,6 +13,7 @@ import { AppHeader } from '@/components/layout/app-header';
 import { SideNav } from '@/components/layout/side-nav';
 import { OrderLocksProvider } from '@/components/providers/order-locks-provider';
 import { SocketProvider } from '@/components/providers/socket-provider';
+import { SubPageSlotContext } from '@/components/ui/sub-page';
 import { useSession } from '@/hooks/use-session';
 
 function FullPageWait({ text }: { text: string }) {
@@ -47,6 +48,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { status } = useSession();
   const shellRef = useShellOffset();
   const router = useRouter();
+  const [subPageSlot, setSubPageSlot] = useState<HTMLDivElement | null>(null);
 
   // Every login lands on the Dashboard (HOME_PATH), so no ?next= is carried to /login
   useEffect(() => {
@@ -74,7 +76,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               min-w-0: wide content (tables) scrolls inside its own box, never widens the page */}
           <div className="flex min-h-0 flex-1">
             <SideNav />
-            <main className="mx-auto w-full max-w-7xl min-w-0 flex-1 px-4 py-6">{children}</main>
+            {/* data-sub-page-slot: where a sub page renders. While it holds one, the page is hidden and
+                the sub page takes its place (components/ui/sub-page.tsx, globals.css "Sub pages") */}
+            <main data-page-area className="mx-auto w-full max-w-7xl min-w-0 flex-1 px-4 py-6">
+              <SubPageSlotContext.Provider value={subPageSlot}>
+                <div data-page-main>{children}</div>
+              </SubPageSlotContext.Provider>
+              <div ref={setSubPageSlot} data-sub-page-slot />
+            </main>
           </div>
         </div>
         </OrderLocksProvider>

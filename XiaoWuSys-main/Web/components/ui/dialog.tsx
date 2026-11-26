@@ -7,7 +7,7 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 import { Button } from "@/components/ui/button"
 import { isToastTarget } from "@/lib/toast"
 import { XIcon } from "lucide-react"
-import { SUB_PAGE_FRAME, SubPageBody, SubPageContext } from "@/components/ui/sub-page"
+import { SUB_PAGE_FRAME, SubPageBody, SubPageContext, SubPageSlotContext } from "@/components/ui/sub-page"
 
 /** page: open as a full sub page (components/ui/sub-page.tsx) instead of a pop-up */
 function Dialog({
@@ -76,9 +76,12 @@ function DialogContent({
   dismissible?: boolean
 }) {
   const page = React.useContext(SubPageContext)
+  const slot = React.useContext(SubPageSlotContext)
   if (page) {
+    // Rendered into AppShell's page slot, so it takes the page's place (components/ui/sub-page.tsx)
+    if (!slot) return null
     return (
-      <DialogPortal>
+      <DialogPortal container={slot}>
         <DialogPrimitive.Content
           data-slot="dialog-content"
           data-page=""

@@ -32,6 +32,7 @@ import { printPnlReport } from '@/lib/print';
 import { monthLabel, type OverheadExpense, type OverheadList, type ProfitAndLoss, type WasteSummary } from '@/lib/reports';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
+import { useSubPath } from '@/lib/sub-route';
 
 type OnResult = (result: ResultMessage) => void;
 
@@ -157,10 +158,10 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
   const [tick, setTick] = useState(0);
   const [loaded, setLoaded] = useState<OverheadsLoaded | null>(null);
   const [removing, setRemoving] = useState<OverheadExpense | null>(null);
-  const [viewing, setViewing] = useState<OverheadExpense | null>(null);
   const [busy, setBusy] = useState(false);
-  // New expense form (opens as its own sub page)
-  const [recording, setRecording] = useState(false);
+  // Own pages (lib/sub-route.ts): /finance/expenses/new records one, /finance/expenses/<id> shows one
+  const [sub, go] = useSubPath('/finance/expenses');
+  const recording = sub?.[0] === 'new';
   const [day, setDay] = useState('');
   const [category, setCategory] = useState('');
   const [description, setDescription] = useState('');
@@ -192,6 +193,9 @@ export function OverheadsCard({ onResult }: { onResult: OnResult }) {
   }, [api, query, requestKey]);
 
   const data = loaded?.data ?? null;
+  const viewing = sub && sub[0] !== 'new' ? (data?.expenses.find((x) => x.expense_id === sub[0]) ?? null) : null;
+  const setViewing = (x: OverheadExpense | null) => go(x ? [x.expense_id] : null);
+  const setRecording = (open: boolean) => go(open ? ['new'] : null);
   const error = loaded && loaded.key === requestKey ? loaded.error : '';
 
   const add = async (e: React.FormEvent<HTMLFormElement>) => {

@@ -223,14 +223,14 @@ export function InventoryTable({
                         </DropdownMenuItem>
                         {canReceive && (
                           <DropdownMenuItem asChild>
-                            <Link href={`/inventory/stock-in?new=1&item=${encodeURIComponent(item.inventory_id)}`}>
+                            <Link href={`/inventory/stock-in/new?item=${encodeURIComponent(item.inventory_id)}`}>
                               <ArrowDownToLine aria-hidden /> Stock in
                             </Link>
                           </DropdownMenuItem>
                         )}
                         {canIssue && (
                           <DropdownMenuItem asChild>
-                            <Link href={`/inventory/stock-out?new=1&item=${encodeURIComponent(item.inventory_id)}`}>
+                            <Link href={`/inventory/stock-out/new?item=${encodeURIComponent(item.inventory_id)}`}>
                               <ArrowUpFromLine aria-hidden /> Stock out
                             </Link>
                           </DropdownMenuItem>

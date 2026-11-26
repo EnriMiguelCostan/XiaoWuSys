@@ -40,6 +40,7 @@ import { LOSS_REASONS, type Payment } from '@/lib/orders';
 import { monthLabel } from '@/lib/reports';
 import { TONE_CLASSES } from '@/lib/ui-tokens';
 import { cn } from '@/lib/utils';
+import { useSubPath } from '@/lib/sub-route';
 
 // ---------------------------------------------------------------------------------------------
 // Payments received per month
@@ -80,7 +81,10 @@ export function PaymentsReportScreen() {
   const [until, setUntil] = useState(''); // '' = the server's current month
   const [report, setReport] = useState<PaymentsReport | null>(null);
   const [problem, setProblem] = useState('');
-  const [openMonth, setOpenMonth] = useState<string | null>(null);
+  // A month's payments are their own page at /finance/payments/<YYYY-MM> (lib/sub-route.ts)
+  const [sub, go] = useSubPath('/finance/payments');
+  const openMonth = sub?.[0] ?? null;
+  const setOpenMonth = (m: string | null) => go(m ? [m] : null);
 
   useEffect(() => {
     let cancelled = false;
@@ -267,7 +271,7 @@ function PaymentsMonthDialog({ month, onClose }: { month: string | null; onClose
                       <TableRow key={p.payment_id}>
                         <TableCell className="whitespace-nowrap">{formatDateTime(p.payment_date, { utc: true })}</TableCell>
                         <TableCell>
-                          <Link className="font-mono text-sm text-primary underline-offset-4 hover:underline" href={`/orders?order=${encodeURIComponent(p.order_id)}`}>
+                          <Link className="font-mono text-sm text-primary underline-offset-4 hover:underline" href={`/orders/${encodeURIComponent(p.order_id)}`}>
                             {p.order_label}
                           </Link>
                         </TableCell>
@@ -516,7 +520,10 @@ export function WasteScreen() {
   const [report, setReport] = useState<WasteReport | null>(null);
   const [problem, setProblem] = useState('');
   const [tick, setTick] = useState(0);
-  const [recording, setRecording] = useState(false);
+  // Recording waste is its own page at /finance/waste/new (lib/sub-route.ts)
+  const [sub, go] = useSubPath('/finance/waste');
+  const recording = sub?.[0] === 'new';
+  const setRecording = (open: boolean) => go(open ? ['new'] : null);
   const [result, setResult] = useState<ResultMessage | null>(null);
 
   useEffect(() => {
@@ -636,7 +643,7 @@ export function WasteScreen() {
                       </TableCell>
                       <TableCell className="hidden md:table-cell">
                         {l.order_id ? (
-                          <Link className="font-mono text-xs text-primary hover:underline" href={`/orders?order=${encodeURIComponent(l.order_id)}`}>
+                          <Link className="font-mono text-xs text-primary hover:underline" href={`/orders/${encodeURIComponent(l.order_id)}`}>
                             {l.order_label}
                           </Link>
                         ) : '—'}

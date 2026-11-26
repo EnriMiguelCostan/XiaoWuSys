@@ -12,6 +12,7 @@
 // pending (waiting for approval), current and past orders, each with the branch it was for.
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { useSubPath } from '@/lib/sub-route';
 import { Archive, ArchiveRestore, ArrowLeft, BookUser, Building2, Mail, MapPin, MessageCircle, Pencil, Phone, Plus, PlusCircle, Search, UserRound } from 'lucide-react';
 import { formatDateTime, formatMobile, peso } from '@xiaowu/client-core/format';
 import { orderNumber } from '@xiaowu/client-core/orders';
@@ -73,8 +74,9 @@ export function ClientsScreen() {
   const [search, setSearch] = useState('');
   const [showArchived, setShowArchived] = useState(false);
   const [tick, setTick] = useState(0);
-  const [openId, setOpenId] = useState<string | null>(null);
-  const [editing, setEditing] = useState<Customer | 'new' | null>(null);
+  // Own pages (lib/sub-route.ts): /clients/new, /clients/<id>, /clients/<id>/edit
+  const [sub, go] = useSubPath('/clients');
+  const [editTarget, setEditTarget] = useState<Customer | null>(null);
   const [types, setTypes] = useState<string[]>(['Individual']);
   const [result, setResult] = useState<ResultMessage | null>(null);
   const reload = useCallback(() => setTick((t) => t + 1), []);
@@ -106,6 +108,14 @@ export function ClientsScreen() {
     );
   }, [customers, search]);
 
+  const openId = sub && sub[0] !== 'new' ? sub[0] : null;
+  const setOpenId = (id: string | null) => go(id ? [id] : null);
+  const editId = sub?.[1] === 'edit' ? sub[0] : null;
+  const editingCustomer =
+    editId === null ? null : editTarget?.customer_id === editId ? editTarget : (customers?.find((c) => c.customer_id === editId) ?? null);
+  const editing: Customer | 'new' | null = sub?.[0] === 'new' ? 'new' : editingCustomer;
+  const closeEditing = () => go(null);
+
   return (
     <div className="space-y-5">
       <PageHeader
@@ -114,7 +124,7 @@ export function ClientsScreen() {
         description="Each client’s contacts, their orders, and what they still owe."
         actions={
           can(user, 'create_order') && (
-            <Button onClick={() => setEditing('new')}>
+            <Button onClick={() => go(['new'])}>
               <Plus aria-hidden /> Add client
             </Button>
           )
@@ -182,7 +192,10 @@ export function ClientsScreen() {
         customerId={openId}
         tick={tick}
         onClose={() => setOpenId(null)}
-        onEdit={(c) => setEditing(c)}
+        onEdit={(c) => {
+          setEditTarget(c);
+          go([c.customer_id, 'edit']);
+        }}
         onChanged={(r) => {
           setResult(r);
           reload();
@@ -192,9 +205,9 @@ export function ClientsScreen() {
         <ClientFormDialog
           customer={editing === 'new' ? null : editing}
           types={types}
-          onClose={() => setEditing(null)}
+          onClose={closeEditing}
           onSaved={(message) => {
-            setEditing(null);
+            closeEditing();
             setResult({ type: 'success', title: 'Client saved', message });
             reload();
           }}
@@ -408,7 +421,7 @@ function ClientProfileSheet({
                           {rows.map((o) => (
                             <TableRow key={o.order_id}>
                               <TableCell>
-                                <Link className="font-mono text-sm text-primary underline-offset-4 hover:underline" href={`/orders?order=${encodeURIComponent(o.order_id)}`}>
+                                <Link className="font-mono text-sm text-primary underline-offset-4 hover:underline" href={`/orders/${encodeURIComponent(o.order_id)}`}>
                                   {orderNumber(o)}
                                 </Link>
                                 {o.order_description && (
