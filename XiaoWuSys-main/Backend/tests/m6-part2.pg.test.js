@@ -336,7 +336,7 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
 
     // More pieces: the 15% tier, and the discount amount is kept
     const added = await server.request('POST', '/api/orders/o-quote/items/bulk', {
-      token: production, body: { items: [{ product_type: 'Jersey', quantity: 40, inventory_id: 'i-shirt-s', size: 'S' }] }
+      token: production, body: { items: [{ product_type: 'Jersey', quantity: 40, inventory_id: 'i-shirt-s', size: 'S' }], keep_deadline_reason: 'Same design, enough time' }
     });
     assert.equal(added.status, 201, added.text);
     // migration 017 follow-up: a Pending order's quote is calculated again as soon as items are added
@@ -394,7 +394,7 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
     const reservedBefore = (await stockOf('i-shirt-l')).r;
     const pushesBefore = server.pushes.length;
     const roster = ['REYES', 'SANTOS', 'CRUZ'].map((name, i) => ({ product_type: 'Jersey Blank L', quantity: 1, size: 'L', custom_name: name, custom_number: String(i + 1), inventory_id: 'i-shirt-l' }));
-    const r = await server.request('POST', `/api/orders/${id}/items/bulk`, { token: production, body: { items: roster } });
+    const r = await server.request('POST', `/api/orders/${id}/items/bulk`, { token: production, body: { items: roster, keep_deadline_reason: 'Roster names only' } });
     assert.equal(r.status, 201, r.text);
     assert.deepEqual([r.body.source, r.body.stock_reserved, r.body.items.map((i) => i.custom_name)], ['cloud', true, ['REYES', 'SANTOS', 'CRUZ']]);
     assert.equal((await stockOf('i-shirt-l')).r, reservedBefore + 3);
@@ -402,7 +402,7 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
 
     const free = (await stockOf('i-shirt-l')).a - (await stockOf('i-shirt-l')).r;
     const short = await server.request('POST', `/api/orders/${id}/items/bulk`, {
-      token: production, body: { items: [{ product_type: 'Jersey Blank L', quantity: 1, inventory_id: 'i-shirt-l' }, { product_type: 'Jersey Blank L', quantity: free, inventory_id: 'i-shirt-l' }] }
+      token: production, body: { items: [{ product_type: 'Jersey Blank L', quantity: 1, inventory_id: 'i-shirt-l' }, { product_type: 'Jersey Blank L', quantity: free, inventory_id: 'i-shirt-l' }], keep_deadline_reason: 'Roster names only' }
     });
     assert.deepEqual([short.status, short.body.error, short.body.shortages[0].shortfall], [409, 'INSUFFICIENT_INVENTORY', 1]);
     assert.equal((await pool.query('SELECT COUNT(*)::int AS n FROM order_items WHERE order_id = $1', [id])).rows[0].n, 4, 'nothing added');
