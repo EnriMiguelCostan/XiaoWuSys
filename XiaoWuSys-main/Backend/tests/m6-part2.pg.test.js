@@ -339,13 +339,16 @@ describe('M6 part 2 on real PostgreSQL: consumables, quotes, discounts, roster i
       token: production, body: { items: [{ product_type: 'Jersey', quantity: 40, inventory_id: 'i-shirt-s', size: 'S' }] }
     });
     assert.equal(added.status, 201, added.text);
+    // migration 017 follow-up: a Pending order's quote is calculated again as soon as items are added
+    assert.match(added.body.message, /The quote was updated: ₱16,376\.00/);
+    assert.equal((await pool.query("SELECT total_quote_amount::text AS t FROM order_profiles WHERE order_id = 'o-quote'")).rows[0].t, '16376.00');
     const repriced = await quote('o-quote', {});
     assert.deepEqual([repriced.body.calculation.tier.percent_off, repriced.body.calculation.subtotal_amount, repriced.body.quote.discount_amount,
       repriced.body.quote.total_quote_amount], [15, 30 * 170 + 30 * 187 + 40 * 170, 1134, 17510 - 1134]);
     const removed = await quote('o-quote', { discount_amount: 0 });
     assert.deepEqual([removed.body.quote.discount_amount, removed.body.quote.discount_reason, removed.body.quote.total_quote_amount], [0, null, 17510]);
     trail = await audits('o-quote');
-    assert.deepEqual(trail.map((a) => a.action), ['discount_applied', 'discount_applied', 'quote_generated']);
+    assert.deepEqual(trail.map((a) => a.action), ['discount_applied', 'quote_recalculated', 'discount_applied', 'quote_generated']);
 
     const stale = await quote('o-quote', { expected_version: '2000-01-01T00:00:00.000000' });
     assert.deepEqual([stale.status, stale.body.error, stale.body.can_override], [409, 'EDIT_CONFLICT', false]);

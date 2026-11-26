@@ -246,6 +246,26 @@ const PAYMENT_METHOD_RULES = {
 const PAYMENT_DETAIL_NAMES = Object.keys(PAYMENT_DETAIL_FIELDS);
 
 // The form each method shows -> [{ value, verify, fields: [{ name, label, required, type, max, hint }] }]
+// An example of what each field looks like, per method (shown as the field's placeholder)
+const PLACEHOLDERS = {
+  payer_name: 'e.g. Juan Dela Cruz',
+  reference_no: 'e.g. REF-20261125-0001',
+  bank_name: 'e.g. BDO, BPI, Landbank',
+  account_name: 'e.g. Maria Santos',
+  cheque_no: 'e.g. 0001234567',
+  cheque_date: 'YYYY-MM-DD',
+  payment_notes: 'e.g. Paid by the class treasurer'
+};
+const METHOD_PLACEHOLDERS = {
+  GCash: { reference_no: 'e.g. 1012345678901 (13 digits)', account_name: 'e.g. Maria Santos or 0917 123 4567' },
+  Maya: { reference_no: 'e.g. 1A2B3C4D5E6F', account_name: 'e.g. Maria Santos or 0917 123 4567' },
+  PayPal: { reference_no: 'e.g. 8AB12345CD678901E', account_name: 'e.g. maria@example.com' },
+  'Bank Transfer': { reference_no: 'e.g. FT-20261125-0001', account_name: 'e.g. Maria Santos' },
+  'Credit/Debit Card': { reference_no: 'e.g. 123456', account_name: 'e.g. MARIA SANTOS' },
+  Other: { payment_notes: 'e.g. Paid through ShopeePay', reference_no: 'e.g. SP-123456' }
+};
+const placeholderFor = (method, name) => (METHOD_PLACEHOLDERS[method] && METHOD_PLACEHOLDERS[method][name]) || PLACEHOLDERS[name] || null;
+
 const paymentMethodForms = (types) => types.map((value) => {
   const rule = PAYMENT_METHOD_RULES[value] || PAYMENT_METHOD_RULES.Other;
   return {
@@ -257,7 +277,8 @@ const paymentMethodForms = (types) => types.map((value) => {
       required: rule.required.includes(name),
       type: PAYMENT_DETAIL_FIELDS[name].type || 'text',
       max: PAYMENT_DETAIL_FIELDS[name].max || null,
-      hint: PAYMENT_DETAIL_FIELDS[name].hint || null
+      hint: PAYMENT_DETAIL_FIELDS[name].hint || null,
+      placeholder: placeholderFor(value, name)
     }))
   };
 });

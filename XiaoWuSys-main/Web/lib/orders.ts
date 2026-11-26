@@ -189,7 +189,7 @@ export interface Completion {
 export interface PaymentMethodForm {
   value: string;
   verify: boolean;
-  fields: { name: string; label: string; required: boolean; type: 'text' | 'date' | string; max: number | null; hint: string | null }[];
+  fields: { name: string; label: string; required: boolean; type: 'text' | 'date' | string; max: number | null; hint: string | null; placeholder?: string | null }[];
 }
 export interface OrderOptions {
   payment_methods: PaymentMethodForm[];

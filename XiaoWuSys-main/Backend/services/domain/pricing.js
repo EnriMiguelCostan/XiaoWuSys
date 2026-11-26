@@ -22,8 +22,9 @@
 //                  work, never a discount on the allowance for reprints and changes.
 //     incidental   an allowance for what cannot be seen yet (reprints, small design changes, rush
 //                  handling): an amount or a % of (materials + labor), at most INCIDENTAL_PERCENT_MAX.
-//   warnings (never block, the Owner decides): a discount above DISCOUNT_GUIDE_PERCENT, or a total
-//   below what the blanks cost the shop.
+//   A discount that takes the total below what the blanks cost the shop is refused
+//   (DISCOUNT_BELOW_COST). Warnings (never block): a discount above DISCOUNT_GUIDE_PERCENT, or
+//   catalog prices that are already below cost without any discount.
 // ==========================================
 const { toCentavos, toPesos, pesoText } = require('./payments');
 
@@ -246,6 +247,22 @@ const computeQuote = ({ items, requested = {}, existing = { amount: 0, reason: n
   if (discount.problem) return { problem: discount.problem };
   const grossC = workC + charges.incidentalC;
   const totalC = Math.max(0, workC - discount.discountC + charges.incidentalC);
+  // A discount may never take the bill below what the blanks cost the shop (selling at a loss)
+  if (discount.discountC > 0 && priced.costC > 0 && totalC < priced.costC) {
+    const maxC = Math.max(0, workC + charges.incidentalC - priced.costC);
+    return {
+      problem: {
+        status: 422,
+        body: {
+          error: 'DISCOUNT_BELOW_COST',
+          message: `With this discount the total (${pesoText(toPesos(totalC))}) is less than what the blanks cost the shop (${pesoText(toPesos(priced.costC))}). `
+            + `The discount can be at most ${pesoText(toPesos(maxC))}.`,
+          max_discount: toPesos(maxC),
+          cost_amount: toPesos(priced.costC)
+        }
+      }
+    };
+  }
   const warnings = [];
   if (workC > 0 && discount.discountC * 100 > workC * DISCOUNT_GUIDE_PERCENT) {
     warnings.push({

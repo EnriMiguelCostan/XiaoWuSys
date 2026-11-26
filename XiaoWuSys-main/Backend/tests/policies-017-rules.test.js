@@ -61,6 +61,8 @@ describe('Items added after approval', () => {
 
   it('is free before approval, for managers while Approved / Printing, and refused after', () => {
     assert.deepEqual(addOnCheck({ ...base, status: 'Pending', isManager: false }), { addOn: false, deadlineReview: false });
+    assert.equal(addOnCheck({ ...base, status: 'Pending', isManager: false, deadline: '2026-11-27' }).body.error, 'ADD_ON_NEEDS_DEADLINE',
+      'the deadline rule holds before approval too');
     assert.equal(addOnCheck({ ...base, status: 'Approved', isManager: false }).body.error, 'ADD_ON_NEEDS_MANAGER');
     assert.deepEqual(addOnCheck({ ...base, status: 'Printing' }), { addOn: true, deadlineReview: false });
     assert.equal(addOnCheck({ ...base, status: 'Pressing' }).body.error, 'ADD_ON_CLOSED');
@@ -90,8 +92,11 @@ describe('Production progress per item', () => {
 
   it('never presses more than was printed, never prints more than ordered, keeps handed-over pieces ready', () => {
     assert.equal(checkProgressUpdate({ lines, sent: [{ line_item_id: 'shirt', printed: 11 }] }).problem.body.error, 'PROGRESS_TOO_HIGH');
-    assert.equal(checkProgressUpdate({ lines, sent: [{ line_item_id: 'shirt', printed: 3 }] }).problem.body.error, 'PROGRESS_TOO_HIGH', '4 pressed but 3 printed');
-    assert.equal(checkProgressUpdate({ lines, sent: [{ line_item_id: 'shirt', pressed: 1 }], delivered: 8 }).problem.body.error, 'PROGRESS_BELOW_DELIVERED');
+    assert.equal(checkProgressUpdate({ lines, sent: [{ line_item_id: 'shirt', pressed: 11 }] }).problem.body.error, 'PROGRESS_TOO_HIGH', '11 pressed but 10 printed');
+    const fresh = [{ line_item_id: 'cap', product_type: 'Cap', quantity: 5, qty_printed: 0, qty_pressed: 0, requires_pressing: true }];
+    assert.equal(checkProgressUpdate({ lines: fresh, sent: [{ line_item_id: 'cap', pressed: 1 }] }).problem.body.error, 'PROGRESS_TOO_HIGH', 'nothing printed yet: nothing to press');
+    assert.equal(checkProgressUpdate({ lines, sent: [{ line_item_id: 'shirt', pressed: 1 }] }).problem.body.error, 'PROGRESS_CANNOT_DECREASE');
+    assert.equal(checkProgressUpdate({ lines, sent: [{ line_item_id: 'mug', printed: 4 }] }).problem.body.error, 'PROGRESS_CANNOT_DECREASE');
     const ok = checkProgressUpdate({ lines, sent: [{ line_item_id: 'shirt', pressed: 10 }, { line_item_id: 'mug', pressed: 5 }] });
     assert.deepEqual(ok.updates.find((u) => u.line_item_id === 'mug'), { line_item_id: 'mug', printed: 5, pressed: 0 }, 'a mug is never pressed');
     assert.equal(ok.after.all_ready, true);
@@ -172,9 +177,13 @@ describe('Print-based quotes', () => {
     assert.equal(big.problem.body.error, 'INCIDENTAL_TOO_LARGE', 'more than 20% of ₱1,600');
   });
 
-  it('warns about a big discount or a price below cost, without blocking', () => {
-    const q = computeQuote({ items: [shirt(10, [])], requested: { percent: 50, reason: 'Sponsor' } }).quote;
-    assert.deepEqual(q.warnings.map((w) => w.code), ['DISCOUNT_ABOVE_GUIDE', 'BELOW_COST']);
+  it('warns about a big discount, and refuses one that sells below cost', () => {
+    const q = computeQuote({ items: [shirt(10, [])], requested: { percent: 35, reason: 'Sponsor' } }).quote;
+    assert.deepEqual(q.warnings.map((w) => w.code), ['DISCOUNT_ABOVE_GUIDE'], '₱1,040 is still above the ₱950 the blanks cost');
+    const below = computeQuote({ items: [shirt(10, [])], requested: { percent: 50, reason: 'Sponsor' } });
+    assert.deepEqual([below.problem.body.error, below.problem.body.max_discount], ['DISCOUNT_BELOW_COST', 650]);
+    const cheap = computeQuote({ items: [{ ...shirt(10, []), selling_price: 90 }] }).quote;
+    assert.deepEqual(cheap.warnings.map((w) => w.code), ['BELOW_COST'], 'a catalog price below cost only warns');
   });
 
   it('checks the print areas', () => {
