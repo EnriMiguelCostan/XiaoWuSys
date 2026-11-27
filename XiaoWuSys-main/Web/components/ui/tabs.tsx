@@ -15,7 +15,8 @@ function TabsList({ className, ...props }: React.ComponentProps<typeof TabsPrimi
     <TabsPrimitive.List
       data-slot="tabs-list"
       className={cn(
-        "flex max-w-full min-w-0 items-center gap-1 overflow-x-auto border-b [scrollbar-width:thin]",
+        // Wraps onto a second line when narrow instead of scrolling (no scrollbar beside the names)
+        "flex max-w-full min-w-0 flex-wrap items-center gap-x-1 border-b",
         className
       )}
       {...props}

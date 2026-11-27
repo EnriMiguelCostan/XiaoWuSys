@@ -236,7 +236,9 @@ const generateHistory = ({ users = [], now = new Date(), start = START_DAY, seed
     const document_no = nextDocNo({ stock_in: 'SI', stock_out: 'SO', stock_count: 'SC' }[type], at);
     let totalC = 0;
     lines.forEach((l, i) => {
-      totalC += type === 'stock_in' ? l.quantity * l.unit_costC : 0;
+      // The document's value, as routes/stock.js saves it: stock in and out at the line's cost, a count
+      // by how far it was off (stockDocuments.countResult's value_difference)
+      totalC += type === 'stock_count' ? Math.abs(l.quantity - l.system_quantity) * l.unit_costC : l.quantity * l.unit_costC;
       T.stock_document_lines.push({
         line_id: rnd.uuid(), document_id, line_no: i + 1, inventory_id: l.item.inventory_id, item_name: l.item.item_name, unit: l.item.unit,
         quantity: l.quantity, system_quantity: l.system_quantity === undefined ? null : l.system_quantity, unit_cost: pesos(l.unit_costC)

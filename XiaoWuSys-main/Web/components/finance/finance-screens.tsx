@@ -64,31 +64,56 @@ interface PaymentsReport {
     collected_on_those: number;
     progress_percent: number | null;
     orders_created: number;
+    received_breakdown?: { for_this_months_orders: number; for_cancelled_orders: number; for_earlier_orders: number };
   };
 }
 
 const KIND_TONE: Record<string, keyof typeof TONE_CLASSES> = { Payment: 'success', Refund: 'warning', Void: 'danger' };
 
-// 'YYYY-MM' moved by n months (calendar arithmetic only)
-const shiftMonth = (ym: string, n: number) => {
-  const d = new Date(`${ym}-01T00:00:00Z`);
-  d.setUTCMonth(d.getUTCMonth() + n);
-  return d.toISOString().slice(0, 7);
-};
+
+// The Payments page: the months of one year as cards (or the years, as cards), the totals for the
+// whole set or for the card picked, and two bar charts under the cards (money in, orders made).
+// Every figure, bar height included, comes from GET /reports/payments/overview; the page draws.
+interface OverviewRow {
+  received: number;
+  refunded: number;
+  voided: number;
+  net: number;
+  payments: number;
+  orders: number;
+  billed: number;
+  net_bar?: number;
+  orders_bar?: number;
+}
+interface PaymentsOverview {
+  source: string;
+  current_month: string;
+  current_year: string;
+  year: string;
+  months: (OverviewRow & { month: string })[];
+  year_totals: OverviewRow & { year: string };
+  years: (OverviewRow & { year: string })[];
+  all_totals: OverviewRow;
+}
+type PeriodCard = OverviewRow & { key: string; name: string; future: boolean; current: boolean };
+
+const monthName = (ym: string) => new Date(`${ym}-01T00:00:00`).toLocaleDateString('en-PH', { month: 'long' });
+const compactPeso = (n: number) => new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', notation: 'compact', maximumFractionDigits: 1 }).format(n);
 
 export function PaymentsReportScreen() {
   const api = useApi();
-  const [until, setUntil] = useState(''); // '' = the server's current month
-  const [report, setReport] = useState<PaymentsReport | null>(null);
+  const [view, setView] = useState<'months' | 'years'>('months');
+  const [year, setYear] = useState(''); // '' = the server's current year
+  const [picked, setPicked] = useState<string | null>(null);
+  const [report, setReport] = useState<PaymentsOverview | null>(null);
   const [problem, setProblem] = useState('');
   // A month's payments are their own page at /finance/payments/<YYYY-MM> (lib/sub-route.ts)
   const [sub, go] = useSubPath('/finance/payments');
   const openMonth = sub?.[0] ?? null;
-  const setOpenMonth = (m: string | null) => go(m ? [m] : null);
 
   useEffect(() => {
     let cancelled = false;
-    api<PaymentsReport>('GET', `/reports/payments${until ? `?until=${until}&month=${until}` : ''}`).then(({ ok, data }) => {
+    api<PaymentsOverview>('GET', `/reports/payments/overview${year ? `?year=${year}` : ''}`).then(({ ok, data }) => {
       if (cancelled) return;
       if (ok) {
         setReport(data);
@@ -98,87 +123,236 @@ export function PaymentsReportScreen() {
     return () => {
       cancelled = true;
     };
-  }, [api, until]);
+  }, [api, year]);
 
-  const current = report?.current_month ?? '';
-  const end = report?.until ?? report?.months.at(-1)?.month ?? '';
-  const atCurrent = !end || end >= current;
-  const biggest = useMemo(() => Math.max(1, ...(report?.months ?? []).map((m) => m.received)), [report]); // the longest bar
-  const thisMonth = report?.months.find((m) => m.month === current);
-  const later = end ? shiftMonth(end, 12) : '';
+  const shownYear = report?.year ?? '';
+  const currentYear = report?.current_year ?? '';
+  const cards: PeriodCard[] = !report
+    ? []
+    : view === 'months'
+      ? report.months.map((m) => ({ ...m, key: m.month, name: monthName(m.month), future: m.month > report.current_month, current: m.month === report.current_month }))
+      : report.years.map((y) => ({ ...y, key: y.year, name: y.year, future: false, current: y.year === report.current_year }));
+  const pickedCard = cards.find((c) => c.key === picked) ?? null;
+  const totals: OverviewRow | null = pickedCard ?? (report ? (view === 'months' ? report.year_totals : report.all_totals) : null);
+  const allYears = report && view === 'years' ? report.years : [];
+  const totalsLabel = pickedCard
+    ? view === 'months'
+      ? monthLabel(pickedCard.key)
+      : pickedCard.key
+    : view === 'months'
+      ? `All of ${shownYear}`
+      : allYears.length
+        ? `${allYears[0].year} – ${allYears[allYears.length - 1].year}`
+        : '';
+
+  const changeView = (next: string) => {
+    if (next !== 'months' && next !== 'years') return;
+    setView(next);
+    setPicked(null);
+  };
+  const changeYear = (next: string) => {
+    setYear(next === currentYear ? '' : next);
+    setPicked(null);
+  };
+  const pick = (key: string) => setPicked((p) => (p === key ? null : key));
+
   return (
     <div className="space-y-5">
-      <PageHeader icon={Wallet} title="Payments" description="Money received per month. Click a month to see every payment, refund and void in it." />
+      <PageHeader
+        icon={Wallet}
+        title="Payments"
+        description="Money received, refunded and voided. Pick a month (or a year) to see its totals; open a month to see every payment in it."
+      />
       <LoadProblem message={problem} />
       {!report ? (
-        <Skeleton className="h-64 w-full" />
+        <Skeleton className="h-96 w-full" />
       ) : (
         <>
-          {thisMonth && (
-            <dl className="grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
-              <Tile label={`Received · ${monthLabel(thisMonth.month)}`} value={peso(thisMonth.received)} />
-              <Tile label="Refunded" value={peso(thisMonth.refunded)} />
-              <Tile label="Voided" value={peso(thisMonth.voided)} />
-              <Tile label="Net this month" value={peso(thisMonth.net)} strong />
-            </dl>
-          )}
-          <Card>
-            <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0">
-                <CardTitle>
-                  {report.months.length ? `${monthLabel(report.months[0].month)} – ${monthLabel(report.months[report.months.length - 1].month)}` : 'Months'}
-                </CardTitle>
-                <CardDescription>Received (before refunds), newest first. Click a month to open its details.</CardDescription>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <ToggleGroup type="single" variant="outline" value={view} onValueChange={changeView} aria-label="Show by">
+              <ToggleGroupItem value="months" className="px-3">
+                Months
+              </ToggleGroupItem>
+              <ToggleGroupItem value="years" className="px-3">
+                Years
+              </ToggleGroupItem>
+            </ToggleGroup>
+            {view === 'months' && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button size="sm" variant="outline" onClick={() => changeYear(String(Number(shownYear) - 1))} disabled={shownYear <= '2018'}>
+                  <ChevronLeft aria-hidden /> {String(Number(shownYear) - 1)}
+                </Button>
+                <span className="min-w-16 text-center text-lg font-semibold tabular-nums">{shownYear}</span>
+                <Button size="sm" variant="outline" onClick={() => changeYear(String(Number(shownYear) + 1))} disabled={shownYear >= currentYear}>
+                  {String(Number(shownYear) + 1)} <ChevronRight aria-hidden />
+                </Button>
+                {shownYear !== currentYear && (
+                  <Button size="sm" variant="ghost" onClick={() => changeYear(currentYear)}>
+                    This year
+                  </Button>
+                )}
               </div>
-              <div className="flex flex-wrap gap-2">
-                <Button size="sm" variant="outline" onClick={() => setUntil(shiftMonth(end, -12))} disabled={!end}>
-                  <ChevronLeft aria-hidden /> Earlier
-                </Button>
-                <Button size="sm" variant="outline" onClick={() => setUntil(later >= current ? '' : later)} disabled={atCurrent}>
-                  Later <ChevronRight aria-hidden />
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => setUntil('')} disabled={atCurrent}>
-                  This month
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <ol className="grid gap-1">
-                {[...report.months].reverse().map((m) => {
-                  const isCurrent = m.month === current;
-                  return (
-                    <li key={m.month}>
-                      <button
-                        type="button"
-                        onClick={() => setOpenMonth(m.month)}
-                        className={cn(
-                          'grid w-full grid-cols-[6rem_minmax(0,1fr)_auto] items-center gap-3 rounded-md px-2 py-2 text-left text-sm hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none sm:grid-cols-[7rem_minmax(0,1fr)_auto_auto]',
-                          isCurrent && 'bg-muted/60 font-semibold'
-                        )}
+            )}
+          </div>
+
+          {/* The totals: of the card picked, otherwise of the whole year (or of every year) */}
+          {totals && (
+            <section aria-live="polite" className="space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold">{totalsLabel}</h2>
+                {pickedCard && (
+                  <div className="flex flex-wrap gap-2">
+                    {view === 'months' ? (
+                      <Button size="sm" onClick={() => go([pickedCard.key])}>
+                        See every payment in {pickedCard.name} <ChevronRight aria-hidden />
+                      </Button>
+                    ) : (
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          setView('months');
+                          changeYear(pickedCard.key);
+                        }}
                       >
-                        <span>{monthLabel(m.month)}</span>
-                        {/* The browser draws each bar from two server figures; nothing is computed here */}
-                        <progress
-                          value={m.received}
-                          max={biggest}
-                          aria-hidden
-                          className="h-2.5 w-full overflow-hidden rounded-full [&::-moz-progress-bar]:bg-primary [&::-webkit-progress-bar]:bg-muted [&::-webkit-progress-value]:rounded-full [&::-webkit-progress-value]:bg-primary"
-                        />
-                        <span className="text-right tabular-nums">
-                          {peso(m.received)} <span className="text-xs text-muted-foreground">({m.count})</span>
-                        </span>
-                        <ChevronRight className="hidden size-4 text-muted-foreground sm:block" aria-hidden />
-                      </button>
-                    </li>
-                  );
-                })}
-              </ol>
-            </CardContent>
-          </Card>
+                        Show {pickedCard.key} by month <ChevronRight aria-hidden />
+                      </Button>
+                    )}
+                    <Button size="sm" variant="ghost" onClick={() => setPicked(null)}>
+                      {view === 'months' ? `Back to all of ${shownYear}` : 'Back to every year'}
+                    </Button>
+                  </div>
+                )}
+              </div>
+              <dl className="grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
+                <Tile label="Received" value={peso(totals.received)} />
+                <Tile label="Refunded" value={peso(totals.refunded)} />
+                <Tile label="Voided" value={peso(totals.voided)} />
+                <Tile label="Net" value={peso(totals.net)} strong />
+              </dl>
+              <p className="text-xs text-muted-foreground">
+                {totals.payments} payment(s) received · {totals.orders} order(s) made, billed {peso(totals.billed)}. Received counts money paid in
+                this period for any order, including orders made earlier; billed counts only the orders made in it, so the two differ.
+              </p>
+            </section>
+          )}
+
+          <section aria-label={view === 'months' ? `The months of ${shownYear}` : 'The years'}>
+            <ul className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
+              {cards.map((c) => (
+                <li key={c.key}>
+                  <button
+                    type="button"
+                    onClick={() => pick(c.key)}
+                    disabled={c.future}
+                    aria-pressed={picked === c.key}
+                    className={cn(
+                      'flex h-full min-h-20 w-full flex-col justify-between gap-1 rounded-lg border bg-card p-3 text-left transition-colors hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-card',
+                      picked === c.key && 'border-primary bg-primary/5 ring-1 ring-primary'
+                    )}
+                  >
+                    <span className="text-base font-semibold">{c.name}</span>
+                    {c.current && <span className="text-xs text-muted-foreground">{view === 'months' ? 'This month' : 'This year'}</span>}
+                    {c.future && <span className="text-xs text-muted-foreground">Not yet</span>}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <div className="grid min-w-0 gap-4 lg:grid-cols-2">
+            <BarChart
+              title="Money received (net)"
+              description="After refunds and voids"
+              cards={cards}
+              picked={picked}
+              onPick={pick}
+              bar={(c) => c.net_bar ?? 0}
+              value={(c) => peso(c.net)}
+              short={(c) => compactPeso(c.net)}
+              shortLabel={view === 'months'}
+            />
+            <BarChart
+              title="Orders made"
+              description="Orders created, not counting cancelled ones"
+              cards={cards}
+              picked={picked}
+              onPick={pick}
+              bar={(c) => c.orders_bar ?? 0}
+              value={(c) => `${c.orders} order(s)`}
+              short={(c) => String(c.orders)}
+              shortLabel={view === 'months'}
+            />
+          </div>
         </>
       )}
-      <PaymentsMonthDialog month={openMonth} onClose={() => setOpenMonth(null)} />
+      <PaymentsMonthDialog month={openMonth} onClose={() => go(null)} />
     </div>
+  );
+}
+
+// A vertical bar per card. The heights are the server's (0-100); a bar can be clicked to pick it.
+function BarChart({
+  title,
+  description,
+  cards,
+  picked,
+  onPick,
+  bar,
+  value,
+  short,
+  shortLabel,
+}: {
+  title: string;
+  description: string;
+  cards: PeriodCard[];
+  picked: string | null;
+  onPick: (key: string) => void;
+  bar: (c: PeriodCard) => number;
+  value: (c: PeriodCard) => string;
+  short: (c: PeriodCard) => string;
+  /** Months: the bar is labelled with the month's first three letters */
+  shortLabel: boolean;
+}) {
+  return (
+    <Card className="min-w-0">
+      <CardHeader>
+        <CardTitle className="text-base">{title}</CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ul className="flex h-56 items-stretch gap-1 border-b" aria-label={title}>
+          {cards.map((c) => (
+            <li key={c.key} className="flex min-w-0 flex-1 flex-col">
+              <button
+                type="button"
+                onClick={() => onPick(c.key)}
+                disabled={c.future}
+                aria-label={`${c.name}: ${value(c)}`}
+                title={`${c.name}: ${value(c)}`}
+                className="group flex h-full w-full flex-col items-center justify-end gap-1 rounded-t-sm focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-default"
+              >
+                {!c.future && <span className="max-w-full truncate text-[10px] text-muted-foreground tabular-nums">{short(c)}</span>}
+                <span
+                  aria-hidden
+                  className={cn(
+                    'w-full max-w-10 rounded-t-sm bg-primary transition-[height,opacity] group-hover:opacity-80',
+                    picked !== null && picked !== c.key && 'opacity-35'
+                  )}
+                  style={{ height: `${bar(c)}%` }}
+                />
+              </button>
+            </li>
+          ))}
+        </ul>
+        <ul aria-hidden className="mt-1 flex gap-1">
+          {cards.map((c) => (
+            <li key={c.key} className={cn('min-w-0 flex-1 truncate text-center text-[11px] text-muted-foreground', picked === c.key && 'font-semibold text-foreground')}>
+              {shortLabel ? c.name.slice(0, 3) : c.name}
+            </li>
+          ))}
+        </ul>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -225,6 +399,13 @@ function PaymentsMonthDialog({ month, onClose }: { month: string | null; onClose
               <p className="text-xs text-muted-foreground">
                 Orders created in {monthLabel(d.month)} ({d.orders_created}): billed {peso(d.billed)}, paid so far {peso(d.collected_on_those)}.
               </p>
+              {d.received_breakdown && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  The {peso(d.received)} received was for: orders made this month {peso(d.received_breakdown.for_this_months_orders)}, orders made
+                  this month and later cancelled {peso(d.received_breakdown.for_cancelled_orders)}, and orders made in earlier months{' '}
+                  {peso(d.received_breakdown.for_earlier_orders)}.
+                </p>
+              )}
               {d.progress_percent === null ? (
                 <p className="mt-2 text-sm text-muted-foreground">No orders with a price were created this month.</p>
               ) : (
@@ -259,10 +440,15 @@ function PaymentsMonthDialog({ month, onClose }: { month: string | null; onClose
                       <TableHead>Date paid</TableHead>
                       <TableHead>Order</TableHead>
                       <TableHead className="hidden md:table-cell">Client</TableHead>
+                      <TableHead className="hidden xl:table-cell" title="The name written on the payment: who paid (for a refund, who received it back)">
+                        Paid by
+                      </TableHead>
                       <TableHead>Method</TableHead>
                       <TableHead className="hidden lg:table-cell">Reference</TableHead>
                       <TableHead className="hidden sm:table-cell">Receipt</TableHead>
-                      <TableHead className="hidden lg:table-cell">Received by</TableHead>
+                      <TableHead className="hidden lg:table-cell" title="The shop account that was signed in when the payment was recorded">
+                        Received by
+                      </TableHead>
                       <TableHead className="text-right">Amount</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -276,6 +462,7 @@ function PaymentsMonthDialog({ month, onClose }: { month: string | null; onClose
                           </Link>
                         </TableCell>
                         <TableCell className="hidden max-w-40 whitespace-normal wrap-anywhere md:table-cell">{p.customer_name}</TableCell>
+                        <TableCell className="hidden max-w-40 whitespace-normal wrap-anywhere xl:table-cell">{p.payer_name || '—'}</TableCell>
                         <TableCell className="whitespace-normal">
                           {p.payment_type}
                           {p.kind !== 'Payment' && (

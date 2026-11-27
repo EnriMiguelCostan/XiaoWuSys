@@ -135,8 +135,10 @@ function SheetContent({
  *  - will-change scroll-position: asks for that GPU scrolling up front
  *  - contain content: layout and paint inside never spill out to the page behind
  *  - overscroll-contain: reaching the end does not try to scroll the (locked) page behind
+ *  - scroll-body: a plain marker (not a style) so a sub page can turn the box back into normal
+ *    page content (globals.css, "Sub pages")
  */
-const SHEET_SCROLL_BODY = "bg-popover overscroll-contain [will-change:scroll-position] [contain:content]"
+const SHEET_SCROLL_BODY = "scroll-body bg-popover overscroll-contain [will-change:scroll-position] [contain:content]"
 
 function SheetHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (

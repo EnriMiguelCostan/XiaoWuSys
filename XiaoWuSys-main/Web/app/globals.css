@@ -229,3 +229,17 @@
 [data-sub-page-slot] > :not(:last-child) {
   display: none;
 }
+/* The bodies of pop-ups keep the wheel to themselves (overscroll-behavior: contain), which on a
+   sub page stopped the mouse wheel and touch scrolling from moving the page while the pointer was
+   over the card. On a sub page the whole page scrolls, so the wheel passes on to it. */
+[data-sub-page-slot] * {
+  overscroll-behavior: auto;
+}
+/* A pop-up's own scrolling box (SHEET_SCROLL_BODY in components/ui/sheet.tsx) is plain page
+   content on a sub page. Left as a box that could scroll by a pixel or two, it caught the wheel
+   and the page did not move. */
+[data-sub-page-slot] .scroll-body {
+  overflow: visible;
+  contain: none;
+  will-change: auto;
+}

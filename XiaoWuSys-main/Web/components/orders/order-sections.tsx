@@ -120,7 +120,7 @@ export function OrderInfo({ detail, customer }: { detail: OrderDetail; customer:
   const { order, totals } = detail;
   return (
     <div className="space-y-2">
-      <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2 2xl:grid-cols-4">
         <Info label="Customer" value={customer?.full_name || 'Unknown customer'} />
         {/* Migration 016: which branch of the client makes this order (the main branch = the client's address) */}
         <Info
@@ -195,11 +195,14 @@ export function DetailsEditor({
   actions,
   onResult,
   onEditing,
+  formClassName,
 }: {
   detail: OrderDetail;
   actions: OrderActions;
   onResult: OnResult;
   onEditing?: OnEditing;
+  /** Where the open form sits (e.g. on its own line under the order's action buttons) */
+  formClassName?: string;
 }) {
   const [form, setForm] = useState<{ deadline: string; quote: string; description: string } | null>(null);
   const { busy, problem, setProblem, send, confirm } = useOverridableSave(orderPath(detail, 'details'), 'The order details were not saved.', (data) => {
@@ -254,7 +257,7 @@ export function DetailsEditor({
 
   return (
     <>
-    <form onSubmit={save} className="space-y-4 rounded-md border bg-muted/30 p-3">
+    <form onSubmit={save} className={cn('space-y-4 rounded-md border bg-muted/30 p-3', formClassName)}>
       <FormProblem message={problem} />
       <div className="grid gap-4 sm:grid-cols-2">
         {actions.edit_deadline && (

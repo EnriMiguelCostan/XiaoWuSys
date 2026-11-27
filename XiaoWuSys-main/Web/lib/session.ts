@@ -52,6 +52,13 @@ const write = (key: string, value: string | null) => {
   }
 };
 
+/**
+ * A small display choice kept on this computer, such as the collapsed side menu (lib/sidebar.ts).
+ * Not part of the login: signing out leaves it, and it holds nothing private.
+ */
+export const readPreference = (name: string): string | null => read(`xiaomei_pref_${name}`);
+export const writePreference = (name: string, value: string) => write(`xiaomei_pref_${name}`, value);
+
 const text = (value: unknown): string => (typeof value === 'string' ? value : '');
 
 // Only keeps the fields the screens use, in the shapes they expect. Anything odd -> null.

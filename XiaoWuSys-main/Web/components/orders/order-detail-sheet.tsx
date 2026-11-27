@@ -138,7 +138,7 @@ export function OrderDetailSheet({
   const [openForms, setOpenForms] = useState<Record<string, boolean>>({});
   const [formsEpoch, setFormsEpoch] = useState(0);
   const reloadAfterEditing = useRef(false);
-  const [tab, setTab] = useState('details');
+  const [tab, setTab] = useState('materials');
   const [completing, setCompleting] = useState<{ unpaid: boolean } | null>(null);
   // migration 017: a step that first marks every piece printed / ready (the server asks for complete_counts)
   const [confirmCounts, setConfirmCounts] = useState<string | null>(null);
@@ -170,7 +170,7 @@ export function OrderDetailSheet({
   const [tabOrder, setTabOrder] = useState(orderId);
   if (tabOrder !== orderId) {
     setTabOrder(orderId);
-    setTab('details');
+    setTab('materials');
   }
   const closeForms = useCallback(() => {
     setFormsEpoch((n) => n + 1);
@@ -493,6 +493,17 @@ export function OrderDetailSheet({
                 <Button variant="outline" size="sm" onClick={printOrder}>
                   <Printer aria-hidden /> Print job order
                 </Button>
+                {/* The edit button sits with the order's other actions; its form opens on its own line below */}
+                {detail && (
+                  <DetailsEditor
+                    key={`details-${order.version}-${formsEpoch}`}
+                    detail={detail}
+                    actions={actions}
+                    onResult={sectionResult}
+                    onEditing={reportDetails}
+                    formClassName="order-last w-full basis-full"
+                  />
+                )}
                 {actions.archive_order && (
                   <Button variant="outline" size="sm" onClick={() => setConfirmArchive('archive')} disabled={busy}>
                     <Archive aria-hidden /> Archive
@@ -516,9 +527,11 @@ export function OrderDetailSheet({
             {!detail && !loadError && <LogoSpinner label="Loading the order…" className="min-h-64" />}
 
             {detail && order && (
-              <div className="mx-auto grid max-w-[110rem] gap-5 p-4 lg:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)]">
-                {/* Left: who, when, money, and what is still needed */}
-                <aside className="min-w-0 space-y-4 lg:sticky lg:top-0 lg:self-start">
+              <div className="mx-auto max-w-[110rem] space-y-5 p-4">
+                {/* The order's details first (who, when, money, design files), then a divider and its parts
+                    in tabs. What is still needed before approval or completion sits beside the details. */}
+                <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(18rem,24rem)]">
+                <div className="min-w-0 space-y-4">
                   {otherLock && (
                     <p role="status" className={cn('flex items-start gap-2 rounded-md border p-3 text-sm', TONE_CLASSES.warning.banner)}>
                       <Lock className="mt-0.5 size-4 shrink-0" aria-hidden />
@@ -534,22 +547,35 @@ export function OrderDetailSheet({
                     </p>
                   )}
                   <OrderInfo detail={detail} customer={customer} />
+                  {!order.order_description && actions.edit_description && (
+                    <p className="text-sm text-muted-foreground">No description yet. Use “Edit” at the top to write what the customer wants (design, colours, placement).</p>
+                  )}
                   {order.production_status === 'Cancelled' && order.cancellation_reason && (
                     <p className={cn('rounded-md border p-3 text-sm wrap-anywhere', TONE_CLASSES.danger.banner)}>
                       <strong>Reason for cancelling:</strong> {order.cancellation_reason}
                     </p>
                   )}
-                  {awaitingApproval && <ApprovalPanel detail={detail} canApprove={actions.approve} />}
-                  {!closed && completion && !awaitingApproval && <CompletionChecklist detail={detail} />}
+                  <div className="flex flex-col gap-3">
+                    <DesignLink key={`design-${order.version}-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportDesign} />
+                    <DesignFilesSection detail={detail} actions={actions} onResult={sectionResult} />
+                  </div>
                   {order.sync_status !== 'synced' && (
                     <p className="text-sm text-muted-foreground">This order was saved offline. Status changes are available once it syncs.</p>
                   )}
-                </aside>
+                </div>
+                {(awaitingApproval || (!closed && completion)) && (
+                  <aside className="min-w-0 space-y-4">
+                    {awaitingApproval && <ApprovalPanel detail={detail} canApprove={actions.approve} />}
+                    {!closed && completion && !awaitingApproval && <CompletionChecklist detail={detail} />}
+                  </aside>
+                )}
+                </div>
 
-                {/* Right: the order's parts, one tab at a time (no long scroll) */}
+                <Separator />
+
+                {/* The order's parts, one tab at a time */}
                 <Tabs value={tab} onValueChange={setTab} className="min-w-0">
                   <TabsList aria-label="Parts of this order">
-                    <TabsTrigger value="details">Details</TabsTrigger>
                     <TabsTrigger value="materials">
                       Materials &amp; print
                       {(detail.print_details?.length ?? 0) > 0 && <CountBadge n={detail.print_details?.length ?? 0} />}
@@ -571,17 +597,6 @@ export function OrderDetailSheet({
                     </TabsTrigger>
                     <TabsTrigger value="history">History</TabsTrigger>
                   </TabsList>
-
-                  <TabsContent value="details">
-                    <div className="flex flex-col gap-3">
-                      <DetailsEditor key={`details-${order.version}-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportDetails} />
-                      <DesignLink key={`design-${order.version}-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportDesign} />
-                      <DesignFilesSection detail={detail} actions={actions} onResult={sectionResult} />
-                    </div>
-                    {!order.order_description && actions.edit_description && (
-                      <p className="text-sm text-muted-foreground">No description yet. Use “Edit” to write what the customer wants (design, colours, placement).</p>
-                    )}
-                  </TabsContent>
 
                   <TabsContent value="materials">
                     <MaterialsSection key={`materials-${formsEpoch}`} detail={detail} actions={actions} onResult={sectionResult} onEditing={reportMaterials} />
