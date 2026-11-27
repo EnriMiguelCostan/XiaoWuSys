@@ -1,6 +1,6 @@
 // How the browser talks to Express (N2/N3). There is no Next.js API in between.
 //
-// Same contract as the Vite MVP (createApi in @xiaowu/client-core):
+// Same contract as createApi in @xiaowu/client-core:
 //   - never throws: resolves to { ok, status, data }
 //   - status 0 means the shop server could not be reached
 //   - every request carries the current login token as "Authorization: Bearer <token>"
@@ -190,7 +190,7 @@ export async function requestLogin(username: string, password: string): Promise<
 
   if (!ok || !data.token) return { ok: false, message: errorText(data, 'Login failed. Please try again.') };
 
-  // Same shape the Vite MVP stores. role is for display only; capabilities decide what shows.
+  // The stored account. role is for display only; capabilities decide what shows.
   const user: SessionUser = {
     user_id: data.user?.user_id ?? '',
     username: data.user?.username ?? name,

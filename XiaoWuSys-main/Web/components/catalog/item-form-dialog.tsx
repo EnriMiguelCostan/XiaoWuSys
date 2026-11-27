@@ -3,7 +3,7 @@
 // Add a new catalog item (POST /api/inventory) or edit an item's details
 // (PATCH /api/inventory/:id). Ported from InventoryCatalog.jsx.
 //
-// Rule split (steering §3.1): this form only checks that numbers are numbers. Duplicate names
+// Rule split (the server decides, the screen shows): this form only checks that numbers are numbers. Duplicate names
 // (case/space-insensitive), whole-number and 2-decimal limits and the edit-conflict check are
 // the server's; its 400/409 message is shown in the form. Quantities are never edited here:
 // stock changes go through Stock in / Stock out / Stock count so every movement has a record.

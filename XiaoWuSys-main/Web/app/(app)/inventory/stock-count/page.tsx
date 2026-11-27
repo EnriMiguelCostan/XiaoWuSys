@@ -1,3 +1,5 @@
+// /inventory/stock-count: shelf counts that correct the system quantity.
+
 import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import { StockDocumentsScreen } from '@/components/inventory/stock-documents-screen';

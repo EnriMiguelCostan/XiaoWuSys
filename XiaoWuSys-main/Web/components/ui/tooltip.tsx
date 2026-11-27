@@ -1,5 +1,7 @@
 "use client"
 
+// shadcn/ui Tooltip (Radix): a short hint shown on hover or focus.
+
 import * as React from "react"
 import { cn } from "cn"
 import { Tooltip as TooltipPrimitive } from "radix-ui"

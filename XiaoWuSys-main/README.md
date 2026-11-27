@@ -98,10 +98,6 @@ Both programs listen on every network address of the shop computer, so tablets a
 3. On the tablet, open `http://192.168.1.20:3000`. The screens find the API at port 5000 of the same address by themselves.
 4. If Windows asks, allow Node.js through the firewall on **private** networks.
 
-### The old screens (`Frontend/`)
-
-`Frontend/` is the earlier Vite + React version of the screens (MVP/Beta). It is **frozen** (bug fixes only) and kept for **one release** as a fallback, then removed. If you need it: `cd Frontend && npm ci && npm run dev`, then open http://localhost:5173 (the API allows that address by default). New features are built only in `Web/`.
-
 ## Tests
 
 ```bash
@@ -117,7 +113,7 @@ There are 175 automated tests in `Backend/tests/`, including `tests/load-stress.
 TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/xiaowusys_test npm test
 ```
 
-**CI:** every push runs the backend tests (with a PostgreSQL 16 service for the migration tests), the `Web/` checks (shared client code tests, the rules guard, lint, type check and build) and the frozen `Frontend/` lint and build on GitHub Actions (`.github/workflows/ci.yml`).
+**CI:** every push runs the backend tests (with a PostgreSQL 16 service for the migration tests), the `Web/` checks (shared client code tests, the rules guard, lint, type check and build) on GitHub Actions (`.github/workflows/ci.yml`).
 
 The same checks for the screens, by hand:
 
@@ -209,11 +205,9 @@ Web/       Next.js + TypeScript + Tailwind CSS + shadcn/ui: the screens (port 30
   app/             one route per section: /login, /dashboard, /catalog, /orders, /orders/new, /accounts
   scripts/         check-rules.mjs: the CI guard that keeps business rules out of the screens
 shared/client-core/  plain-JS helpers with no React (API client, formatting, permissions, receipts),
-           used by Web/, Frontend/ and the future mobile app
+           used by Web/ and the future mobile app
 scripts/   start-shop.ps1 / start-shop.cmd (Windows) and start-shop.sh (macOS / Linux)
-Frontend/  React 19 + Vite (inline styles): the MVP/Beta screens, frozen and kept one release as a
-           fallback (docs/nextjs-migration-steering.md)
-docs/      sprint, audit and migration notes (docs/migration/)
+docs/      the SIA 2 background, user manual, technical manual and the HCI design audit
 ```
 
 - **Source of truth:** Neon PostgreSQL. Writes go to the cloud first. If the cloud is unreachable they are saved to SQLite and synced later, pushing only the changed fields, with conflict detection.

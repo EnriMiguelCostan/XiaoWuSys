@@ -1,3 +1,7 @@
+// Starts the API: connects Neon PostgreSQL (the cloud) and the SQLite offline copy, applies the
+// migrations, opens Socket.io for live updates and edit locks, starts the sync engine and the
+// cloud health watcher, then listens on PORT (5000). The HTTP routes themselves are in app.js.
+
 require('dotenv').config();
 const http = require('http');
 const { Server } = require('socket.io');

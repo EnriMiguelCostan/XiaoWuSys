@@ -1,3 +1,5 @@
+// /inventory/stock-out: stock that leaves without an order (shop use, samples, returns).
+
 import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import { StockDocumentsScreen } from '@/components/inventory/stock-documents-screen';

@@ -1,3 +1,5 @@
+// shadcn/ui Skeleton: a grey placeholder shown while something loads.
+
 import { cn } from "cn"
 
 function Skeleton({ className, ...props }: React.ComponentProps<"div">) {

@@ -3,7 +3,7 @@
 // PB 3 / PB 4: connection state and the "changes waiting" queue, shared by the ConnectionBar
 // and any screen that needs it (useConnection()).
 //
-// GET /api/sync/status is fetched on the same triggers as the Vite MVP:
+// GET /api/sync/status is fetched:
 //   - when the session starts
 //   - when the socket drops (dropping does not prove the server is down: re-check)
 //   - when the browser says the network changed (navigator.onLine is a hint only)

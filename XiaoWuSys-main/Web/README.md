@@ -2,7 +2,7 @@
 
 The screens staff use: Next.js (App Router) + TypeScript + Tailwind CSS + shadcn/ui, on port **3000** of the shop computer, next to the Express API (`../Backend`, port **5000**).
 
-**UI only.** No API routes, Server Actions, middleware, database or secrets. The browser calls Express directly (Bearer token, one Socket.io connection per tab). Every rule (permissions, money, stock, statuses) is decided by the API; the screens show what it returns. See `../docs/nextjs-migration-steering.md`.
+**UI only.** No API routes, Server Actions, middleware, database or secrets. The browser calls Express directly (Bearer token, one Socket.io connection per tab). Every rule (permissions, money, stock, statuses) is decided by the API; the screens show what it returns.
 
 ## Run it
 

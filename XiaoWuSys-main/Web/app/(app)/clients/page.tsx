@@ -1,3 +1,5 @@
+// /clients: clients, each with its own page (/clients/<id>).
+
 import type { Metadata } from 'next';
 import { ClientsScreen } from '@/components/clients/clients-screen';
 import { RequireCapability } from '@/components/layout/require-capability';

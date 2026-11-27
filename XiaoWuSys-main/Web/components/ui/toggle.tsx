@@ -1,5 +1,7 @@
 "use client"
 
+// shadcn/ui Toggle (Radix): a button that stays on or off.
+
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "cn"

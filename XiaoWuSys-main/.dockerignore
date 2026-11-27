@@ -10,8 +10,6 @@
 **/tsconfig.tsbuildinfo
 .git
 Backend
-Frontend
-dashboard-sandbox
 docs
 scripts
 shared/client-core/test

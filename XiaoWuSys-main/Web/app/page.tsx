@@ -1,3 +1,5 @@
+// /: sends the visitor on to the first section.
+
 import { redirect } from 'next/navigation';
 import { HOME_PATH } from '@/components/layout/nav-items';
 

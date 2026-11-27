@@ -1,5 +1,7 @@
 "use client"
 
+// shadcn/ui AlertDialog (Radix): a yes / no question that must be answered before going on.
+
 import * as React from "react"
 import { cn } from "cn"
 import { AlertDialog as AlertDialogPrimitive } from "radix-ui"

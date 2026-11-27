@@ -1,3 +1,5 @@
+// /orders/new: the create-order form.
+
 import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import { RequireCapability } from '@/components/layout/require-capability';

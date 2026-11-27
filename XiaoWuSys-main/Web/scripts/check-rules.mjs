@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// XiaoWuSys rules guard for Web/ and shared/client-core (Batch M0, steering §6).
+// XiaoWuSys rules guard for Web/ and shared/client-core.
 //
 // A tripwire, not a proof: it catches the common ways a UI starts "helping" with business rules,
 // reaches for the database or the backend's secrets, or sneaks server code into Next.js.
-// Reviewers and the per-screen audits (steering §3.4) remain the real check.
+// Code review remains the real check.
 //
 //   node scripts/check-rules.mjs            scan Web/ and ../shared/client-core
 //   node scripts/check-rules.mjs --list     print the rules
@@ -107,7 +107,7 @@ export const RULES = [
   },
   {
     id: 'polling-only-in-fallback-hook',
-    why: 'Polling runs only while the socket is disconnected (master context §3). Use useFallbackPolling().',
+    why: 'Polling runs only while the socket is disconnected. Use useFallbackPolling().',
     scope: (p) => isWeb(p) && !/^Web\/hooks\/use-?fallback-?polling\.tsx?$/i.test(p),
     pattern: /\bsetInterval\s*\(/
   },

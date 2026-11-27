@@ -81,7 +81,7 @@ export function RequiredNote({ className }: { className?: string }) {
   );
 }
 
-/** The server's plain-language reason, shown next to the form (steering §3.1). */
+/** The server's plain-language reason, shown next to the form (the server decides, the screen shows). */
 export function FormProblem({ message, tone = 'danger' }: { message: string; tone?: 'danger' | 'warning' }) {
   if (!message) return null;
   return (

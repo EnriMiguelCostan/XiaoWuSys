@@ -32,9 +32,6 @@ export function subPathOf(pathname: string, base: string): string[] | null {
   return parts.length ? parts : null;
 }
 
-/** A link to a sub page from another screen, e.g. subHref('/orders', id) */
-export const subHref = (base: string, ...path: string[]) => `${base}/${path.map(encodeURIComponent).join('/')}`;
-
 /**
  * [sub, go]: sub is the open sub page's path under `base` as segments (['new'], ['<id>'],
  * ['<id>', 'edit']…) or null. go(['<id>', 'edit']) opens base/<id>/edit (each segment encoded);

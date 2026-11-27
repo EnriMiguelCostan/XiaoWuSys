@@ -1,3 +1,5 @@
+// /accounts and /accounts/new: user accounts (Owner and Admin).
+
 import type { Metadata } from 'next';
 import { AccountsScreen } from '@/components/accounts/accounts-screen';
 import { RequireCapability } from '@/components/layout/require-capability';

@@ -8,7 +8,7 @@ import { can, orderActions, NO_ORDER_ACTIONS, roleHelp } from '../permissions.js
 import { receiptHtml } from '../receipt.js';
 
 describe('package surface', () => {
-  it('exports everything the Vite MVP imported from src/api.js and src/lib/*', () => {
+  it('exports everything the screens import', () => {
     for (const name of [
       'createApi', 'errorText', 'parseCsv', 'todayInManila', 'MOBILE_PATTERN', 'peso', 'formatDateTime', 'formatMobile',
       'can', 'orderActions', 'NO_ORDER_ACTIONS', 'orderNumber', 'hasOrderNumber', 'normalizeOrderNumber',

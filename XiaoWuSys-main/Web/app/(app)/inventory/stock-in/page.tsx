@@ -1,3 +1,5 @@
+// /inventory/stock-in: deliveries received from suppliers.
+
 import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import { StockDocumentsScreen } from '@/components/inventory/stock-documents-screen';

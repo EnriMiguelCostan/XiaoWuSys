@@ -1,3 +1,5 @@
+// /finance/waste: wasted and lost materials by cause, item and order.
+
 import type { Metadata } from 'next';
 import { WasteScreen } from '@/components/finance/finance-screens';
 import { RequireCapability } from '@/components/layout/require-capability';

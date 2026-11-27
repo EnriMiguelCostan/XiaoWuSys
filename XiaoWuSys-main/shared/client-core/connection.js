@@ -10,8 +10,6 @@
 // The browser online status is only a hint: the shop server is often on this same computer, so a
 // browser that thinks it is offline can still reach it.
 
-export const CONNECTION_STATES = ['online', 'offline_local', 'server_down', 'checking'];
-
 export const deriveConnectionState = ({ serverReachable, cloud }) => {
   if (serverReachable === false) return 'server_down';
   if (serverReachable === null || serverReachable === undefined) return 'checking';

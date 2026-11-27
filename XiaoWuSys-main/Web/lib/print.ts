@@ -1,4 +1,4 @@
-// Printing and copying for orders (steering: lib/print.ts). Browser-only: call from handlers.
+// Printing and copying for orders. Browser-only: call from handlers.
 // Wording and the receipt layout come from @xiaowu/client-core; every number shown is a value
 // the server returned (totals, payments), never computed here.
 import { formatDateTime, formatMobile, peso, todayInManila } from '@xiaowu/client-core/format';

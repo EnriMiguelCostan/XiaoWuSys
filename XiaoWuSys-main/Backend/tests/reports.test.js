@@ -69,7 +69,7 @@ describe('Dashboard and exports', () => {
 
 describe('API safety', () => {
   let t;
-  before(async () => { t = await startTestServer({ corsOrigins: ['http://localhost:5173'] }); });
+  before(async () => { t = await startTestServer({ corsOrigins: ['http://192.168.1.20:3000'] }); });
   after(async () => { await t.close(); });
 
   it('sends security headers and hides the framework', async () => {
@@ -81,8 +81,8 @@ describe('API safety', () => {
   });
 
   it('only allows the configured frontend address (CORS)', async () => {
-    const good = await t.request('GET', '/api/status', { headers: { Origin: 'http://localhost:5173' } });
-    assert.equal(good.headers.get('access-control-allow-origin'), 'http://localhost:5173');
+    const good = await t.request('GET', '/api/status', { headers: { Origin: 'http://192.168.1.20:3000' } });
+    assert.equal(good.headers.get('access-control-allow-origin'), 'http://192.168.1.20:3000');
     const bad = await t.request('GET', '/api/status', { headers: { Origin: 'https://evil.example' } });
     assert.equal(bad.headers.get('access-control-allow-origin'), null);
   });

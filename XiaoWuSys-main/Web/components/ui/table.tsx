@@ -1,5 +1,7 @@
 "use client"
 
+// shadcn/ui Table: the lists' tables (spacing set for the shop's tablets).
+
 import * as React from "react"
 import { cn } from "cn"
 

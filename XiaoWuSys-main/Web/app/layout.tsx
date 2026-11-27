@@ -1,3 +1,5 @@
+// The root of every page: fonts, the session, the theme, tooltips and toasts.
+
 import type { Metadata, Viewport } from 'next';
 // Self-hosted (next/font/local inside the geist package): bundled at build time, no network.
 import { GeistMono } from 'geist/font/mono';

@@ -1,3 +1,5 @@
+// shadcn/ui Badge: a small label (status, count). State colours come from lib/ui-tokens.ts.
+
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "cn"

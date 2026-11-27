@@ -1,5 +1,7 @@
 "use client"
 
+// shadcn/ui ToggleGroup (Radix): a row of buttons where one (or several) can be on.
+
 import * as React from "react"
 import { type VariantProps } from "class-variance-authority"
 import { cn } from "cn"

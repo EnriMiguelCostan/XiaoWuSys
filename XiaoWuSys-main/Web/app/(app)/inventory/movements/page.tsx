@@ -1,3 +1,5 @@
+// /inventory/movements: an item's stock card (every change to its quantity).
+
 import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import { StockCardScreen } from '@/components/inventory/stock-card-screen';

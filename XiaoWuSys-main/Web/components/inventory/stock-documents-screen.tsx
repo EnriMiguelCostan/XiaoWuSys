@@ -37,6 +37,7 @@ import { MONEY_INPUT_MAX, WHOLE_NUMBER_MAX } from '@/lib/input-limits';
 import { printStockDocument } from '@/lib/print';
 import {
   nowForInput,
+  STOCK_PAGE,
   utcToInput,
   type StockDocument,
   type StockDocumentDetail,
@@ -74,12 +75,6 @@ const PAGE = {
   },
 } as const;
 
-const PAGE_PATH: Record<StockDocumentType, string> = {
-  stock_in: '/inventory/stock-in',
-  stock_out: '/inventory/stock-out',
-  stock_count: '/inventory/stock-count',
-};
-
 const STATUS_TONE: Record<string, keyof typeof TONE_CLASSES> = { Recorded: 'success', Corrected: 'info', Voided: 'danger' };
 const NO_SUPPLIER = '__none__';
 
@@ -105,7 +100,7 @@ export function StockDocumentsScreen({ type }: { type: StockDocumentType }) {
   const [limit, setLimit] = useState(50);
   const [tick, setTick] = useState(0);
   // Own pages (lib/sub-route.ts): <base>/new, <base>/<record id>, <base>/<record id>/edit
-  const [sub, go] = useSubPath(PAGE_PATH[type]);
+  const [sub, go] = useSubPath(STOCK_PAGE[type]);
   const [editTarget, setEditTarget] = useState<StockDocumentDetail | null>(null);
   const [result, setResult] = useState<ResultMessage | null>(null);
   const reload = useCallback(() => setTick((t) => t + 1), []);

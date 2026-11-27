@@ -1,3 +1,6 @@
+// Login checks for every protected API route: verifyToken reads the Bearer token (and refuses
+// revoked ones), requireRole lets only the listed roles through.
+
 const jwt = require('jsonwebtoken');
 const { isTokenRevoked } = require('../services/sessions');
 
