@@ -2,7 +2,7 @@
 
 // Everything behind login: auth gate, the tab's socket, the connection bar and the header.
 //
-// The gate is cosmetic (steering §2.3): no token -> /login. Every real check is Express's
+// The gate is cosmetic: no token -> /login. Every real check is Express's
 // 401/403, and a 401 on any request wipes the session (lib/api.ts), which lands here too.
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';

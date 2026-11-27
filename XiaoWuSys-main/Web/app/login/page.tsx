@@ -1,3 +1,5 @@
+// /login: the sign-in screen.
+
 import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import { LoginForm } from '@/components/auth/login-form';

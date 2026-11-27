@@ -1,6 +1,4 @@
-// ONE place that maps server states to how they look (steering §3.2).
-// Replaces CONNECTION_STYLE[state], PAYMENT_STATUS_META and the per-file style objects of the
-// Vite MVP. Components never pick colours for states themselves: they look the state up here.
+// ONE place that maps server states to how they look. Components never pick colours for states themselves: they look the state up here.
 //
 // Wording stays in @xiaowu/client-core (connectionText, pendingText, …) so web and mobile say
 // the same thing. This file only adds tone and icon.

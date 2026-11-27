@@ -1,5 +1,7 @@
 "use client"
 
+// shadcn/ui Select (Radix): a drop-down list of fixed choices.
+
 import * as React from "react"
 import { cn } from "cn"
 import { Select as SelectPrimitive } from "radix-ui"

@@ -15,8 +15,8 @@ describe('CORS defaults include the Next.js screens', () => {
     assert.deepEqual(parseOrigins(''), DEFAULT_ORIGINS);
   });
 
-  it('still allows the frozen Vite screens', () => {
-    assert.ok(DEFAULT_ORIGINS.includes('http://localhost:5173'));
+  it('no longer allows the removed Vite screens (port 5173) by default', () => {
+    assert.ok(!DEFAULT_ORIGINS.includes('http://localhost:5173'));
   });
 });
 

@@ -1,5 +1,8 @@
 "use client"
 
+// shadcn/ui Dialog (Radix). <Dialog page> turns it into a sub page that takes the page's place
+// instead of popping up (components/ui/sub-page.tsx); without `page` it is a normal pop-up.
+
 import * as React from "react"
 import { cn } from "cn"
 import { Dialog as DialogPrimitive } from "radix-ui"

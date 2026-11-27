@@ -1,3 +1,5 @@
+// shadcn/ui Textarea: a multi-line text box.
+
 import * as React from "react"
 import { cn } from "cn"
 

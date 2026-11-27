@@ -11,7 +11,7 @@
 //
 // Exactly once: every (trigger, consumable) already in the order's log is skipped, so a retried
 // request or a repeated transition never takes the same consumable twice.
-// An estimate never blocks real work (steering §5): when the stock on hand is smaller than the
+// An estimate never blocks real work: when the stock on hand is smaller than the
 // estimate, only what is there is taken (stock stops at 0) and the rest is recorded as a shortfall.
 // ==========================================
 

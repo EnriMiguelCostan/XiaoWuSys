@@ -1,3 +1,11 @@
+// /api/orders: orders from creation to completion.
+//   GET / (list) · GET /:id (the whole order) · POST / (create) · archive / restore
+//   PATCH /:id/status (the lifecycle: approve, print, ready, complete, cancel)
+//   items: GET / POST /:id/items, POST /:id/items/bulk · payments: GET / POST /:id/payments, void
+//   PATCH /:id/design · PATCH /:id/details · POST /:id/quote · POST /:id/approve
+// More order routes (progress, deliveries, refunds, print details…) are in routes/orderExtras.js.
+// Each route has its own block comment below with its body and replies.
+
 const express = require('express');
 const crypto = require('crypto'); // Built-in Node module for generating UUIDs
 const router = express.Router();
@@ -847,7 +855,7 @@ router.post('/', requireRole(WRITE_ROLES), async (req, res) => {
 // PB 15: leaving Printing (for Pressing, or for Completed when Pressing is skipped) takes the
 // 'Pressing' usage rates of the order's blanks from stock; Completed also takes the 'Completed'
 // rates. Same transaction, each (order, step, consumable) at most once (order_consumables_log),
-// never below 0: a shortfall is recorded, never a reason to refuse the change (steering §5).
+// never below 0: a shortfall is recorded, never a reason to refuse the change.
 // The consumable ids join "inventory_updated", so the low-stock warning follows at once.
 // -> 200 { message, order, stock_changes, consumables_deducted: [{ log_id, trigger_status,
 //          consumable_inventory_id, item_name, unit, needed, quantity_deducted, shortfall }] }
@@ -1095,7 +1103,7 @@ router.patch('/:order_id/status', requireRole(WRITE_ROLES), requireOrderEditAcce
         if (missing.length) throw missingItemsRejection(missing, 'cloud');
         if (shortages.length) throw shortageRejection(shortages, 'cloud');
         for (const n of needs) {
-          // Guarded in SQL as well as checked above (steering §4.5): never over-commit stock
+          // Guarded in SQL as well as checked above: never over-commit stock
           const held = await client.query(
             `UPDATE inventory_items SET quantity_reserved = quantity_reserved + $1
               WHERE inventory_id = $2 AND quantity_available - quantity_reserved >= $1`,

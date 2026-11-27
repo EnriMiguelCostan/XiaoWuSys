@@ -1,7 +1,6 @@
 'use client';
 
-// The catalog as the server sees it (GET /api/inventory), kept current the same way as the
-// Vite MVP:
+// The catalog as the server sees it (GET /api/inventory), kept current:
 //   - loaded when the screen opens and after a "Sync now" that changed data
 //   - live: 'inventory_subscribe' on every (re)connect, then 'inventory_updated' pushes a full
 //     snapshot after any stock change on any device; changed rows are highlighted for 2.5 s

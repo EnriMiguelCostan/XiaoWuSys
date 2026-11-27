@@ -1,5 +1,7 @@
 "use client"
 
+// shadcn/ui Separator (Radix): a thin dividing line.
+
 import * as React from "react"
 import { cn } from "cn"
 import { Separator as SeparatorPrimitive } from "radix-ui"

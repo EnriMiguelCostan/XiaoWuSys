@@ -1,7 +1,6 @@
 'use client';
 
-// "Change my password" (any signed-in account). Ported from ChangePasswordDialog in
-// Frontend/src/UsersPage.jsx. The password rules live on the server: its 400 message is shown
+// "Change my password" (any signed-in account). The password rules live on the server: its 400 message is shown
 // as is. The only client check is that both new passwords match (input UX, not a rule).
 // On success the server returns a fresh token so this device stays signed in; other devices
 // are signed out by the server.

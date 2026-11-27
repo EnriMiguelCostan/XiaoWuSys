@@ -1,3 +1,11 @@
+// /api/inventory: the catalog (items, blanks and consumables).
+//   GET / · POST / · PATCH /:id · DELETE /:id (to the Recycle Bin)
+//   Recycle Bin: GET /recycle-bin · POST /:id/restore · DELETE /:id/permanent · POST /recycle-bin/empty
+//   Waste: POST /:id/loss (one item) · POST /losses (several at once)
+//   Usage rates: GET / PUT /:id/consumable-rates · stock check: POST /check-capacity
+//   POST /:id/adjust answers 410: stock changes go through Stock in / out / count (routes/stock.js)
+// Each route has its own block comment below with its body and replies.
+
 const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();

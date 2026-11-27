@@ -1,5 +1,7 @@
 "use client"
 
+// shadcn/ui Label (Radix): a form field's name, tied to its input.
+
 import * as React from "react"
 import { cn } from "cn"
 import { Label as LabelPrimitive } from "radix-ui"

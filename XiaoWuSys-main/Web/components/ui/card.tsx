@@ -1,3 +1,5 @@
+// shadcn/ui Card: a bordered box with header, content and footer parts.
+
 import * as React from "react"
 import { cn } from "cn"
 

@@ -1,4 +1,4 @@
-// Display formatting shared by every screen (moved from Frontend/src/api.js in Batch M0).
+// Display formatting shared by every screen.
 // Formatting only: these never decide anything. Money arithmetic stays on the server.
 
 // Today's date in the shop's time zone, 'YYYY-MM-DD' (for date pickers' minimum)

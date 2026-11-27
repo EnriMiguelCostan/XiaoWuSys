@@ -1,5 +1,5 @@
-// Small fetch wrapper shared by every screen (moved from Frontend/src/api.js in Batch M0).
-// Plain JS: no React, no DOM, so the Vite MVP, the Next.js app and the mobile app all use it.
+// Small fetch wrapper shared by every screen.
+// Plain JS: no React, no DOM, so the Next.js app and a future mobile app can both use it.
 // Never throws: resolves to { ok, status, data }. status 0 = server unreachable.
 export const createApi = ({ apiBase, token, onUnauthorized }) => async (method, path, body) => {
   try {

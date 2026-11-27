@@ -1,4 +1,4 @@
-// Minimal CSV reader for imports (moved from Frontend/src/api.js in Batch M0).
+// Minimal CSV reader for imports (catalog import).
 // Handles quotes, commas and line breaks inside quotes, and the BOM Excel adds.
 // -> array of rows (arrays of strings)
 export const parseCsv = (text) => {

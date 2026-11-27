@@ -1,3 +1,5 @@
+// /finance/expenses: running costs (rent, wages…) for the profit and loss report.
+
 import type { Metadata } from 'next';
 import { ExpensesScreen } from '@/components/finance/finance-screens';
 import { RequireCapability } from '@/components/layout/require-capability';

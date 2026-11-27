@@ -33,14 +33,6 @@ export const TEXT_MAX = {
 // sensible entry looks like in this shop (a jersey back name, a discount reason that fits the
 // printed quote). The server still enforces its own (wider) storage limits.
 
-/** "Add print details" line (order detail sheet) */
-export const PRINT_LINE_LIMITS = {
-  productType: 60, // "Jersey print", "Sublimated shorts"
-  name: 50, // name on the back of the jersey
-  numberDigits: 3, // jersey number 0-999 (leading zeros kept: "00", "07")
-  quantity: 9999, // pieces on ONE line
-} as const;
-
 /** Garment sizes offered in the print-details size dropdown, smallest first */
 export const GARMENT_SIZES = ['Kids S', 'Kids M', 'Kids L', 'Kids XL', 'XS', 'S', 'M', 'L', 'XL', '2XL', '3XL', 'Free size'] as const;
 

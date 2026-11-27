@@ -4,7 +4,7 @@
 // transfer paper, thread…) one piece uses, and at which step it is taken from stock.
 //   GET /api/inventory/:id/consumable-rates   -> { product, rates, consumable_options, triggers, can_edit }
 //   PUT /api/inventory/:id/consumable-rates   { rates: [{ consumable_inventory_id, quantity_per_piece, trigger_status }] }
-// Rule split (steering §3.1): this screen collects the list and checks that amounts are numbers.
+// Rule split (the server decides, the screen shows): this screen collects the list and checks that amounts are numbers.
 // The server checks everything else (above 0, 3 decimals, no duplicates, items still in the
 // catalog), does the deduction maths when an order moves on, and needs the cloud to save.
 import { useEffect, useState } from 'react';

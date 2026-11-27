@@ -13,15 +13,14 @@ const { createValidator } = require('./utils/validation');
 
 const { buildSyncStatus } = sync;
 
-// Vite MVP (5173 dev, 4173 preview) and the Next.js app in Web/ (3000, Batch M0).
+// The screens (Web/, Next.js) on this computer, port 3000.
 // Tablets on the shop Wi-Fi open the UI by the shop computer's LAN address, which can't be known
 // here: list those in CORS_ORIGINS (e.g. http://192.168.1.20:3000).
 const DEFAULT_ORIGINS = [
-  'http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:4173', 'http://127.0.0.1:4173',
   'http://localhost:3000', 'http://127.0.0.1:3000'
 ];
 
-// CORS_ORIGINS="https://shop.example.com,http://localhost:5173" (or "*" to allow any site)
+// CORS_ORIGINS="https://shop.example.com,http://localhost:3000" (or "*" to allow any site)
 const parseOrigins = (value) => {
   if (!value || !value.trim()) return DEFAULT_ORIGINS;
   return value.split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean);

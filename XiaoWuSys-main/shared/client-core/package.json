@@ -2,7 +2,7 @@
   "name": "@xiaowu/client-core",
   "version": "0.1.0",
   "private": true,
-  "description": "Plain-JS client code shared by the Vite MVP, the Next.js app (Web/) and the future mobile app. No React, no DOM, no business rules.",
+  "description": "Plain-JS client code shared by the Next.js app (Web/) and the future mobile app. No React, no DOM, no business rules.",
   "type": "module",
   "sideEffects": false,
   "main": "./index.js",

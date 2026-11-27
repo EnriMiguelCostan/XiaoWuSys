@@ -1,3 +1,5 @@
+// /orders: the orders list; an order opens as its own page at /orders/<id>.
+
 import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import { RequireCapability } from '@/components/layout/require-capability';

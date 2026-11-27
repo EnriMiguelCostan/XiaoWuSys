@@ -1,5 +1,8 @@
 "use client"
 
+// shadcn/ui Sheet (Radix Dialog sliding in from a side). <Sheet page> turns it into a sub page
+// (components/ui/sub-page.tsx), as Dialog does.
+
 import * as React from "react"
 import { cn } from "cn"
 import { Dialog as SheetPrimitive } from "radix-ui"

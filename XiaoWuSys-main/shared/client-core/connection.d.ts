@@ -1,8 +1,6 @@
 export type ConnectionState = 'online' | 'offline_local' | 'server_down' | 'checking';
 export type CloudState = 'unknown' | 'reachable' | 'unreachable' | 'disabled';
 
-export const CONNECTION_STATES: ConnectionState[];
-
 export function deriveConnectionState(input: { serverReachable: boolean | null | undefined; cloud?: CloudState | null }): ConnectionState;
 
 export function connectionText(state: ConnectionState, options?: { cloud?: CloudState | null; browserOnline?: boolean }): { label: string; detail: string };

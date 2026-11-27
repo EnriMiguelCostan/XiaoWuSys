@@ -116,10 +116,10 @@ XiaoWuSys is a web-based, mobile-responsive ERP for a custom printing and garmen
 | Database | Neon PostgreSQL (CI: postgres:16) | — | Source of truth |
 | Quality | `Web/scripts/check-rules.mjs` (+ 33 self-tests) | — | Keeps business rules, secrets and backend code out of `Web/` |
 | | `Web/scripts/check-contrast.mjs` | — | WCAG 2.1 AA contrast check of the colour tokens (`npm run check-contrast`) |
-| | GitHub Actions (`.github/workflows/ci.yml`) | — | Back-end, client-core and Web jobs on every push. The frozen `Frontend/` also has a lint-and-build job |
+| | GitHub Actions (`.github/workflows/ci.yml`) | — | Back-end, client-core and Web jobs on every push |
 | Deployment | Docker / Docker Compose | `node:22-bookworm-slim` | `Backend/Dockerfile`, `Web/Dockerfile`, `docker-compose.yml` |
 | | AWS Amplify Hosting | — | `amplify.yml` (repo root, `appRoot: XiaoWuSys-main/Web`) and `XiaoWuSys-main/amplify.yml` |
-| Legacy | `Frontend/` (React 19 + Vite) | frozen | The MVP screens, kept for one release as a fallback |
+| Legacy | `Frontend/` (React 19 + Vite) | removed | The MVP screens; removed in November 2026 after the Next.js screens replaced them (still in the git history) |
 
 ## 4. Development Environment Setup
 
@@ -300,9 +300,8 @@ XiaoWuSys/
     │   ├── lib/                       api, config, orders, inventory, reports, print, input-limits, ui-tokens
     │   └── scripts/                   check-rules.mjs · check-rules.test.mjs · check-contrast.mjs
     ├── shared/client-core/            api · config · connection · csv · format · orders · permissions · receipt (+ .d.ts, test/)
-    ├── Frontend/                      frozen Vite MVP (fallback)
     ├── scripts/                       start-shop.ps1 · start-shop.cmd · start-shop.sh
-    └── docs/                          steering docs, migration audits, hci-design-audit.md, manual/
+    └── docs/                          SIA 2 background, user manual, technical manual, hci-design-audit.md
 ```
 
 ## 6. Database Design
@@ -801,7 +800,7 @@ There is no `routes/users.js` or `routes/payments.js`. Accounts live in `routes/
   - writing the steering, audit and HCI documents, and these manuals.
 - **Review process:**
   - Every change was reviewed by a team member and merged through a pull request only after CI passed.
-  - The AI followed the written rules in `docs/master-context-steering.md` and `docs/nextjs-migration-steering.md`: business rules on the server only, no backend secrets in `Web/`, no new rules-guard exceptions, and the frozen `Frontend/` left untouched.
+  - The AI followed written rules (steering notes, kept in the repository's git history since November 2026): business rules on the server only, no backend secrets in `Web/`, no new rules-guard exceptions, and the old `Frontend/` left untouched until it was removed.
 - **Automated guardrails** keep AI-written code honest:
   - `check-rules.mjs` blocks rules, role checks, secrets and backend imports in the screens. Its 12 rules include `no-rule-math`, `no-role-checks`, `no-backend-env`, `no-api-routes` and `one-socket`.
   - `check-contrast.mjs` blocks colour changes that drop below WCAG 2.1 AA.

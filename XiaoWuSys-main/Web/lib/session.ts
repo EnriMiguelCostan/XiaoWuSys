@@ -1,8 +1,7 @@
 // The ONE place that reads and writes the login token (rules guard: token-storage-in-session-only).
 //
-// N4: the JWT stays in the browser's storage under the same keys as the Vite MVP
-// ('xiaomei_token', 'xiaomei_user'), not in a cookie, so offline login, device logout and the
-// socket handshake behave exactly as today.
+// N4: the JWT stays in the browser's storage ('xiaomei_token', 'xiaomei_user'), not in a
+// cookie, so offline login, device logout and the socket handshake all use the same token.
 //
 // The token is never opened in the browser (rules guard: no-token-decoding). Who the user is
 // and what they may do come from the server: POST /api/auth/login and GET /api/auth/me.

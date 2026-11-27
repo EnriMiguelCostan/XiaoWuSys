@@ -1,7 +1,7 @@
 // ==========================================
 // WHO MAY DO WHAT (pure rules: no HTTP, no SQL)
 // One table of capabilities, used by the routes (requireRole) and returned to the screens,
-// so a client (today's Vite app, the future Next.js / mobile apps) never keeps its own copy.
+// so a client (the Next.js screens in Web/, a future mobile app) never keeps its own copy.
 // The role always comes from the verified login token.
 // ==========================================
 

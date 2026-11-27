@@ -2,7 +2,7 @@
 
 // Pat's dashboard components (from the stress-tested mock), wired to live data.
 // Kept from the mock: the layout, Card structure, table-fixed tables, and truncation with the
-// full value on hover. Changed: colours come from lib/ui-tokens.ts (steering §3.2) instead of
+// full value on hover. Changed: colours come from lib/ui-tokens.ts (one place for state colours) instead of
 // hard-coded amber/emerald/yellow; money and dates use the shared client-core formatters.
 // Every number is a server figure; nothing here adds, subtracts or compares money or stock.
 import Link from 'next/link';

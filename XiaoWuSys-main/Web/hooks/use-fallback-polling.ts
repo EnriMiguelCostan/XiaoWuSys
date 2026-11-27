@@ -2,7 +2,7 @@
 
 // useFallbackPolling(refresh, 30_000)
 //
-// Polling rule (master context §3, steering §2.3): repeat `fn` ONLY while the live socket is
+// Polling rule: repeat `fn` ONLY while the live socket is
 // not connected, and only while this tab is visible. When pushes arrive again the timer stops.
 // This is the only file allowed to call setInterval (rules guard: polling-only-in-fallback-hook).
 import { useEffect, useEffectEvent } from 'react';

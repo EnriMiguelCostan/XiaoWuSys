@@ -1,4 +1,4 @@
-# Dependencies (install with npm install inside Backend/ and Frontend/)
+# Dependencies (install with npm install inside Backend/ and Web/)
 node_modules/
 
 # Secrets and local databases

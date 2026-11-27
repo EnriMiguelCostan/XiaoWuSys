@@ -1,3 +1,5 @@
+// shadcn/ui Input: a one-line text box.
+
 import * as React from "react"
 import { cn } from "cn"
 

@@ -1,5 +1,7 @@
 "use client"
 
+// shadcn/ui DropdownMenu (Radix): the menu behind a "more" button.
+
 import * as React from "react"
 import { cn } from "cn"
 import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui"
