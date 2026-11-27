@@ -3,8 +3,9 @@
 // The catalog as the server sees it (GET /api/inventory), kept current the same way as the
 // Vite MVP:
 //   - loaded when the screen opens and after a "Sync now" that changed data
-//   - live: 'inventory_subscribe' on every (re)connect, then 'inventory_updated' pushes a full
-//     snapshot after any stock change on any device; changed rows are highlighted for 2.5 s
+//   - live: 'inventory_subscribe' on every (re)connect, then 'inventory_updated' after any stock
+//     change on any device: a full snapshot, or only the changed items (merged into the one on
+//     screen); changed rows are highlighted for 2.5 s
 //   - polled every 30 s ONLY while the socket is down (useFallbackPolling)
 // Create Order (M3) will read the same hook.
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -13,7 +14,7 @@ import { useSocket } from '@/components/providers/socket-provider';
 import { useFallbackPolling } from '@/hooks/use-fallback-polling';
 import { useSocketEvent } from '@/hooks/use-socket-event';
 import { api, errorMessage } from '@/lib/api';
-import type { InventorySnapshot } from '@/lib/inventory';
+import { mergeInventoryDelta, type InventorySnapshot, type InventoryUpdatedEvent } from '@/lib/inventory';
 
 const INVENTORY_POLL_MS = 30_000;
 const CHANGE_HIGHLIGHT_MS = 2_500;
@@ -75,8 +76,20 @@ export function useInventorySnapshot() {
 
   useSocketEvent<{ listening?: boolean }>('inventory_live', (payload) => setCloudListening(Boolean(payload?.listening)));
 
-  useSocketEvent<{ changed_ids?: string[]; snapshot?: InventorySnapshot }>('inventory_updated', (payload) => {
-    apply(payload?.snapshot);
+  // Merges with the snapshot from the latest render (a ref, so the socket handler never goes stale)
+  const snapshotRef = useRef<InventorySnapshot | null>(null);
+  useEffect(() => {
+    snapshotRef.current = snapshot;
+  }, [snapshot]);
+
+  useSocketEvent<InventoryUpdatedEvent>('inventory_updated', (payload) => {
+    if (payload?.snapshot) {
+      apply(payload.snapshot);
+    } else if (payload?.delta) {
+      const merged = mergeInventoryDelta(snapshotRef.current, payload);
+      if (merged) apply(merged);
+      else load(); // nothing on screen yet to merge into
+    }
     const ids = payload?.changed_ids;
     if (Array.isArray(ids) && ids.length > 0) {
       setRecentlyChanged(ids);

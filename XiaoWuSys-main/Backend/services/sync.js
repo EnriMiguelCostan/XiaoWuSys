@@ -610,14 +610,25 @@ const settleOrderConflictByRank = async (pgPool, localDb, spec, row) => {
 };
 
 // ---------- Neon -> SQLite refresh of parent tables ----------
-// ids: optional list to refresh only those rows (used by the real-time NOTIFY handler)
-const refreshTable = async (pgPool, localDb, spec, ids = null) => {
+// ids:   optional list to refresh only those rows (used by the real-time NOTIFY handler)
+// since: optional version text; only rows changed at or after (since - REFRESH_OVERLAP) are read
+const refreshTable = async (pgPool, localDb, spec, ids = null, { since = null } = {}) => {
   const cols = spec.columns;
+  let where = '';
+  let params = [];
+  if (ids) {
+    where = ` WHERE ${spec.id} = ANY($1::text[])`;
+    params = [ids];
+  } else if (since) {
+    // The overlap re-reads rows from just before the watermark: last_modified is the time the
+    // writing transaction STARTED, so a slow transaction can commit after a later one.
+    where = ` WHERE last_modified >= ($1::timestamp - interval '${REFRESH_OVERLAP}')`;
+    params = [since];
+  }
   // ::text keeps timestamps/NUMERIC exact and avoids JS Date timezone shifts
   const { rows } = await pgPool.query(
-    `SELECT ${cols.map((c) => `${c}::text AS ${c}`).join(', ')}, ${versionExpr} AS version FROM ${spec.table}` +
-      (ids ? ` WHERE ${spec.id} = ANY($1::text[])` : ''),
-    ids ? [ids] : []
+    `SELECT ${cols.map((c) => `${c}::text AS ${c}`).join(', ')}, ${versionExpr} AS version FROM ${spec.table}${where}`,
+    params
   );
 
   const assignments = updatableColumns(spec).map((c) => `${c} = excluded.${c}`).join(', ');
@@ -634,15 +645,15 @@ const refreshTable = async (pgPool, localDb, spec, ids = null) => {
       [...cols.map((c) => row[c]), row.version]
     );
   }
-  return rows.length;
+  return { count: rows.length, maxVersion: rows.reduce((max, r) => (r.version && r.version > max ? r.version : max), '') };
 };
 
-// Same as above, but returns how many local rows actually changed (new or newer version)
-const refreshTableCounting = async (pgPool, localDb, spec) => {
+// Same as above, but also returns how many local rows actually changed (new or newer version)
+const refreshTableCounting = async (pgPool, localDb, spec, options) => {
   const before = await sqliteAll(localDb, `SELECT total_changes() AS n`);
-  const rows = await refreshTable(pgPool, localDb, spec);
+  const { count, maxVersion } = await refreshTable(pgPool, localDb, spec, null, options);
   const after = await sqliteAll(localDb, `SELECT total_changes() AS n`);
-  return { rows, changed: after[0].n - before[0].n };
+  return { rows: count, maxVersion, changed: after[0].n - before[0].n };
 };
 
 // Items permanently deleted in Neon (by any branch) are removed from this cache too, unless
@@ -672,17 +683,120 @@ const prunePulledTable = async (pgPool, localDb, spec) => {
   );
 };
 
+// ---------- Incremental refresh (egress fix, November 2026) ----------
+// Copying every row of every table on each 5-minute sync sent the whole database over the
+// network 288 times a day per server. Now each table keeps a watermark in the local cache:
+//   1. one small query reads the cloud row count and the newest last_modified
+//   2. nothing newer than the watermark  -> no rows are read at all
+//      something newer                   -> only rows changed since the watermark are read
+//   3. rows deleted in the cloud are noticed when (cloud rows - local rows) differs from the
+//      last time; only then is the table read in full (and pruned where the table allows it)
+//   4. every FULL_REFRESH_MS (default 24 h) each table is read in full anyway, as a backstop
+// The watermark belongs to one cloud database (cloud_key), so pointing DATABASE_URL at another
+// project starts again with a full read.
+const REFRESH_OVERLAP = '5 minutes';
+const FULL_REFRESH_MS = Math.max(60 * 1000, Number(process.env.FULL_REFRESH_MS) || 24 * 60 * 60 * 1000);
+
+const ensureWatermarkTable = (localDb) => sqliteRun(localDb,
+  `CREATE TABLE IF NOT EXISTS cache_watermarks (
+     table_name TEXT PRIMARY KEY,
+     cloud_key  TEXT,
+     version    TEXT,
+     row_diff   INTEGER,
+     full_at    INTEGER
+   )`);
+
+// Which cloud database this cache was filled from (host and database name; never the password)
+const cloudKeyOf = (pgPool) => {
+  const opts = (pgPool && pgPool.options) || {};
+  try {
+    if (opts.connectionString) {
+      const u = new URL(opts.connectionString);
+      return `${u.hostname}/${u.pathname.replace(/^\//, '')}`;
+    }
+  } catch { /* fall through */ }
+  return opts.host ? `${opts.host}/${opts.database || ''}` : '';
+};
+
+// -> { rows, version } or null when the cloud gave no answer we can use
+const readCloudStats = async (pgPool, spec) => {
+  const { rows } = await pgPool.query(
+    `SELECT COUNT(*)::int AS cloud_rows, to_char(MAX(last_modified), '${PG_VERSION_FORMAT}') AS max_version FROM ${spec.table}`
+  );
+  const r = rows && rows[0];
+  if (!r || r.cloud_rows === undefined || r.cloud_rows === null) return null;
+  return { rows: Number(r.cloud_rows), version: r.max_version || '' };
+};
+
+// Local rows the cloud should also have (rows created here and not sent yet are left out)
+const countLocalKnown = async (localDb, spec) => {
+  const [row] = await sqliteAll(localDb, `SELECT COUNT(*) AS n FROM ${spec.table} WHERE sync_status IS NOT 'pending_insert'`);
+  return Number(row.n);
+};
+
+const pruneTable = async (pgPool, localDb, spec) => {
+  let pruned = 0;
+  if (spec.prune) pruned += await prunePulledTable(pgPool, localDb, spec);
+  if (spec.table === 'inventory_items') pruned += await pruneDeletedInventory(pgPool, localDb);
+  return pruned;
+};
+
+// -> { mode: 'full' | 'changes' | 'unchanged', rows, changed, pruned }
+const refreshTableIncremental = async (pgPool, localDb, spec, { now = Date.now(), cloudKey = '' } = {}) => {
+  const stats = await readCloudStats(pgPool, spec);
+  const [mark] = await sqliteAll(localDb, 'SELECT * FROM cache_watermarks WHERE table_name = ?', [spec.table]);
+  const usable = stats && mark && mark.cloud_key === cloudKey && (now - Number(mark.full_at || 0)) < FULL_REFRESH_MS &&
+    (Boolean(mark.version) || !stats.version); // an empty table has no watermark: its first rows are read in full
+
+  const saveMark = async (version, fullAt) => {
+    if (!stats) return; // the cloud could not tell us its size: read in full next time too
+    const diff = stats.rows - (await countLocalKnown(localDb, spec));
+    await sqliteRun(localDb,
+      `INSERT INTO cache_watermarks (table_name, cloud_key, version, row_diff, full_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (table_name) DO UPDATE SET cloud_key = excluded.cloud_key, version = excluded.version,
+                                              row_diff = excluded.row_diff, full_at = excluded.full_at`,
+      [spec.table, cloudKey, version, diff, fullAt]);
+  };
+
+  const full = async () => {
+    const result = await refreshTableCounting(pgPool, localDb, spec);
+    const pruned = await pruneTable(pgPool, localDb, spec);
+    await saveMark(stats ? stats.version : result.maxVersion, now);
+    return { mode: 'full', rows: result.rows, changed: result.changed, pruned };
+  };
+
+  if (!usable) return full();
+
+  let rows = 0;
+  let changed = 0;
+  let version = mark.version;
+  if (stats.version && stats.version > mark.version) {
+    const result = await refreshTableCounting(pgPool, localDb, spec, { since: mark.version });
+    rows = result.rows;
+    changed = result.changed;
+    version = result.maxVersion > stats.version ? result.maxVersion : stats.version;
+  }
+  // A different gap between the cloud and this cache means rows were added or deleted that the
+  // change list cannot show (a delete leaves no last_modified behind): read the table in full.
+  const diff = stats.rows - (await countLocalKnown(localDb, spec));
+  if (diff !== Number(mark.row_diff)) return full();
+
+  await sqliteRun(localDb, 'UPDATE cache_watermarks SET version = ? WHERE table_name = ?', [version, spec.table]);
+  return { mode: rows > 0 ? 'changes' : 'unchanged', rows, changed, pruned: 0 };
+};
+
 const refreshLocalCache = async (pgPool, localDb, summary) => {
+  await ensureWatermarkTable(localDb);
+  const cloudKey = cloudKeyOf(pgPool);
+  const now = Date.now();
   for (const table of REFRESH_TABLES) {
     try {
       const spec = specFor(table);
-      const { rows: count, changed } = await refreshTableCounting(pgPool, localDb, spec);
-      if (spec.prune) await prunePulledTable(pgPool, localDb, spec);
-      if (table === 'inventory_items') {
-        const pruned = await pruneDeletedInventory(pgPool, localDb);
-        if (changed > 0 || pruned > 0) summary.inventory_changed = true;
+      const { mode, rows, changed, pruned } = await refreshTableIncremental(pgPool, localDb, spec, { now, cloudKey });
+      if (table === 'inventory_items' && (changed > 0 || pruned > 0)) summary.inventory_changed = true;
+      if (mode !== 'unchanged') {
+        console.log(`⬇️  ${mode === 'full' ? 'Refreshed all' : 'Refreshed'} ${rows} ${table} row(s) into local cache (${changed} changed)`);
       }
-      console.log(`⬇️  Refreshed ${count} ${table} row(s) into local cache (${changed} changed)`);
     } catch (err) {
       if (isConnectionError(err)) throw err;
       console.error(`❌ Failed to refresh ${table} from cloud:`, err.message);
@@ -974,10 +1088,12 @@ const resolveConflict = async (pgPool, localDb, { table, id, keep, actor }) => {
 
 // Real-time: copy just these cloud rows into the local cache, so offline mode starts from
 // current numbers instead of the last 5-minute refresh. Same guards as the full refresh.
-const refreshLocalRows = (pgPool, localDb, table, ids) =>
-  refreshTable(pgPool, localDb, specFor(table), ids);
+const refreshLocalRows = async (pgPool, localDb, table, ids) =>
+  (await refreshTable(pgPool, localDb, specFor(table), ids)).count;
 
 module.exports = {
   syncOfflineData, isSyncRunning, listConflicts, describeConflicts, resolveConflict, refreshLocalRows, countPending,
-  buildSyncStatus, getLastSync, SYNC_TABLES
+  buildSyncStatus, getLastSync, SYNC_TABLES,
+  // for tests
+  _internals: { refreshLocalCache, cloudKeyOf, FULL_REFRESH_MS }
 };
