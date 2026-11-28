@@ -268,13 +268,23 @@ const sqliteRun = (db, sql, params = []) =>
 // raw: optional SQL condition valid in both dialects (e.g. ACTIVE_ITEM_SQL), never user input
 // filters: [column, value] (equals) or [column, value, 'LIKE']. The column and operator are
 // always written in code; only the value comes from the request, and it is always a parameter.
-const FILTER_OPERATORS = new Set(['=', 'LIKE']);
+// 'IN' takes an array: [['inventory_id', ['a', 'b'], 'IN']]
+const FILTER_OPERATORS = new Set(['=', 'LIKE', 'IN']);
 const buildWhere = (filters, dialect, raw = null) => {
   const params = [];
   const clauses = filters
     .filter(([, value]) => value !== undefined && value !== null)
     .map(([col, value, op = '=']) => {
       if (!FILTER_OPERATORS.has(op)) throw new Error(`Unsupported filter operator: ${op}`);
+      if (op === 'IN') {
+        const list = (Array.isArray(value) ? value : [value]).map(String);
+        if (dialect === 'pg') {
+          params.push(list);
+          return `${col} = ANY($${params.length}::text[])`;
+        }
+        params.push(JSON.stringify(list));
+        return `${col} IN (SELECT value FROM json_each(?))`;
+      }
       params.push(value);
       return `${col} ${op} ${dialect === 'pg' ? `$${params.length}` : '?'}`;
     });

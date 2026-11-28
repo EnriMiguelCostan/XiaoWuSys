@@ -7,11 +7,16 @@
 //  2. notifyChanged() calls from this process. Covers offline writes (Neon down, so no
 //     NOTIFY) and makes the local UI instant even while the LISTEN link is reconnecting.
 //
-// Bursts are coalesced (DEBOUNCE_MS) into ONE 'inventory_updated' event carrying the full
-// catalog snapshot (same shape as GET /api/inventory) plus the IDs that changed.
+// Bursts are coalesced (DEBOUNCE_MS) into ONE 'inventory_updated' event. Egress fix (November
+// 2026): when the changed IDs are known, only those items are read from the cloud and sent as a
+// delta; the server keeps the last full snapshot to recompute the summary. A full snapshot
+// (same shape as GET /api/inventory) is sent on subscribe, after a LISTEN reconnect (resync), when
+// the IDs are unknown, for big bursts, and when the source switches between cloud and local.
 //
 // Server -> client events (room 'inventory', joined on 'inventory_subscribe'):
-//   inventory_updated { reason, changed_ids, snapshot }
+//   inventory_updated { reason, changed_ids, snapshot }                          full
+//   inventory_updated { reason, changed_ids, delta: { items, removed_ids },
+//                       summary, categories, source, fetched_at }                 changed items only
 //   inventory_live    { listening }   whether cross-branch NOTIFY is currently active
 //
 // The same LISTEN connection also hears 'orders_changed' (migration 010, PB 14) and hands each
@@ -23,15 +28,18 @@
 // direct; with a pooled DATABASE_URL, cross-branch push is disabled (local push still works).
 // ==========================================
 const { Client } = require('pg');
-const { buildInventorySnapshot } = require('./inventorySnapshot');
+const { buildInventorySnapshot, buildInventoryDelta, applyInventoryDelta, countRecycleBin } = require('./inventorySnapshot');
 const { refreshLocalRows } = require('./sync');
 
 const ROOM = 'inventory';
 const CHANNEL = 'inventory_changed';
 const ORDERS_CHANNEL = 'orders_changed';
 const DEBOUNCE_MS = 250;
+const MAX_DELTA_IDS = 50; // more changed items than this in one burst: send the full snapshot
 const RECONNECT_MIN_MS = 2000;
 const RECONNECT_MAX_MS = 60000;
+
+const pendingReasonsInclude = (joined, reason) => joined.split(',').includes(reason);
 
 const isPooledUrl = (url) => {
   try { return /-pooler\./i.test(new URL(url).hostname); } catch { return false; }
@@ -48,9 +56,18 @@ const createInventoryEvents = ({ io, pgPool, localDb, databaseUrl, listenUrl, on
   let client = null;
   let stopped = false;
   let retryMs = RECONNECT_MIN_MS;
+  let lastSnapshot = null; // last full catalog sent to the room, kept current with each delta
 
-  const flush = async () => {
+  // Flushes run one after another, so two bursts never update lastSnapshot at the same time
+  let flushQueue = Promise.resolve();
+  const flush = () => {
     timer = null;
+    flushQueue = flushQueue.then(runFlush).catch((err) => console.error('❌ Inventory push failed:', err.message));
+    return flushQueue;
+  };
+
+  const runFlush = async () => {
+    if (pendingReasons.size === 0) return; // an earlier flush already sent this burst
     const changed_ids = [...pendingIds];
     const cloudIds = [...pendingCloudIds];
     const reason = [...pendingReasons].join(',');
@@ -66,13 +83,30 @@ const createInventoryEvents = ({ io, pgPool, localDb, databaseUrl, listenUrl, on
         console.error('⚠️ Could not refresh changed inventory rows into local cache:', err.message);
       }
     }
-    if (io.sockets.adapter.rooms.get(ROOM)?.size > 0) {
-      try {
-        const snapshot = await buildInventorySnapshot(ctx);
-        io.to(ROOM).emit('inventory_updated', { reason, changed_ids, snapshot });
-      } catch (err) {
-        console.error('❌ Could not build inventory snapshot for push:', err.message);
+    if (!(io.sockets.adapter.rooms.get(ROOM)?.size > 0)) {
+      lastSnapshot = null; // nobody is watching: the next viewer subscribes and gets a fresh one
+      return;
+    }
+    try {
+      const needFull = !lastSnapshot || changed_ids.length === 0 || changed_ids.length > MAX_DELTA_IDS ||
+        pendingReasonsInclude(reason, 'resync');
+      if (!needFull) {
+        const delta = await buildInventoryDelta(ctx, changed_ids);
+        if (delta.source === lastSnapshot.source) {
+          let recycleBin = lastSnapshot.summary.recycle_bin;
+          try { recycleBin = await countRecycleBin(ctx); } catch { /* keep the last count */ }
+          lastSnapshot = applyInventoryDelta(lastSnapshot, delta, { recycleBin });
+          const { summary, categories, source, fetched_at } = lastSnapshot;
+          io.to(ROOM).emit('inventory_updated', {
+            reason, changed_ids, delta: { items: delta.items, removed_ids: delta.removed_ids }, summary, categories, source, fetched_at
+          });
+          return;
+        }
       }
+      lastSnapshot = await buildInventorySnapshot(ctx);
+      io.to(ROOM).emit('inventory_updated', { reason, changed_ids, snapshot: lastSnapshot });
+    } catch (err) {
+      console.error('❌ Could not build inventory snapshot for push:', err.message);
     }
   };
 
@@ -171,7 +205,9 @@ const createInventoryEvents = ({ io, pgPool, localDb, databaseUrl, listenUrl, on
       const reply = typeof ack === 'function' ? ack : () => {};
       socket.join(ROOM);
       try {
-        reply({ ok: true, listening, snapshot: await buildInventorySnapshot(ctx) });
+        const snapshot = await buildInventorySnapshot(ctx);
+        lastSnapshot = snapshot;
+        reply({ ok: true, listening, snapshot });
       } catch (err) {
         reply({ ok: false, listening, error: 'Could not load inventory.' });
       }

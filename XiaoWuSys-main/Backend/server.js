@@ -20,7 +20,8 @@ const { startRecycleBinJanitor } = require('./services/recycleBin');
 const { startRevocationRefresh, isTokenRevoked, onSessionRevoked } = require('./services/sessions');
 const { createCloudDisabledPool } = require('./services/cloudDisabledPool');
 const { isConnectionError } = require('./utils/dbErrors');
-const { syncOfflineData, listConflicts, buildSyncStatus, SYNC_TABLES } = require('./services/sync');
+const { syncOfflineData, listConflicts, buildSyncStatus, countPending, getLastSync, SYNC_TABLES } = require('./services/sync');
+const { SYNC_CHECK_MS, shouldRunScheduledSync } = require('./services/syncSchedule');
 const { createCloudHealth, watchPool } = require('./services/cloudHealth');
 
 // ================= START-UP CHECKS =================
@@ -272,8 +273,20 @@ createLocalSchema(localDb)
 // Recycle Bin: permanently removes items deleted more than RECYCLE_BIN_RETENTION_DAYS ago
 if (!cloudDisabled) startRecycleBinJanitor({ pgPool, localDb, inventoryEvents });
 
-// Sync every 5 minutes. H3: overlapping runs are impossible (a call joins the running one).
-setInterval(() => { syncAndNotify().catch(() => {}); }, 300000);
+// Background sync: checked every SYNC_CHECK_MS (5 minutes), but only run when something is
+// waiting to be sent, the real-time link is down, or the last sync is older than SYNC_IDLE_MS
+// (30 minutes). See services/syncSchedule.js. H3: a run never overlaps another (it joins it).
+const scheduledSync = async () => {
+  if (cloudDisabled) return;
+  const pending = await countPending(localDb).catch(() => ({}));
+  const decision = shouldRunScheduledSync({
+    pendingCount: Object.values(pending).reduce((sum, n) => sum + n, 0),
+    listening: inventoryEvents.isListening(),
+    lastSyncAt: getLastSync().at
+  });
+  if (decision.run) await syncAndNotify();
+};
+setInterval(() => { scheduledSync().catch(() => {}); }, SYNC_CHECK_MS);
 
 // IPv4 addresses of this computer on the shop network (Wi-Fi / LAN), for the start-up hints
 const lanAddresses = () => Object.values(os.networkInterfaces()).flat()

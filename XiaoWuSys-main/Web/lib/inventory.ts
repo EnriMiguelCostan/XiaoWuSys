@@ -55,6 +55,43 @@ export interface InventorySnapshot {
   items: InventoryItem[];
 }
 
+/**
+ * "inventory_updated" carries either a full `snapshot` or, when only a few items changed, a
+ * `delta` with just those items plus the server's new summary (egress fix, November 2026).
+ */
+export interface InventoryUpdatedEvent {
+  reason?: string;
+  changed_ids?: string[];
+  snapshot?: InventorySnapshot;
+  delta?: { items: InventoryItem[]; removed_ids: string[] };
+  summary?: InventorySummary;
+  categories?: string[];
+  source?: InventorySnapshot['source'];
+  fetched_at?: string | null;
+}
+
+/**
+ * Puts the changed items of a delta into the snapshot already on screen: changed items are
+ * replaced, removed ones dropped, new ones added in name order. Summary and categories are the
+ * server's. Returns null when there is no snapshot to merge into (load it in full instead).
+ */
+export function mergeInventoryDelta(current: InventorySnapshot | null, event: InventoryUpdatedEvent): InventorySnapshot | null {
+  if (!current || !event.delta || !event.summary) return null;
+  const changed = new Map(event.delta.items.map((item) => [item.inventory_id, item]));
+  const removed = new Set(event.delta.removed_ids);
+  const items = current.items
+    .filter((item) => !removed.has(item.inventory_id) && !changed.has(item.inventory_id))
+    .concat(event.delta.items)
+    .sort((a, b) => a.item_name.localeCompare(b.item_name) || a.inventory_id.localeCompare(b.inventory_id));
+  return {
+    source: event.source ?? current.source,
+    fetched_at: event.fetched_at ?? current.fetched_at,
+    summary: event.summary,
+    categories: event.categories ?? current.categories,
+    items
+  };
+}
+
 /** PB 15: GET /api/inventory/:id/consumable-rates (what one piece of a blank uses, and when) */
 export interface ConsumableRate {
   rate_id: string;

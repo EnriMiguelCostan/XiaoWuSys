@@ -37,6 +37,17 @@ const CONNECTION_MESSAGE_PATTERNS = [
   /cannot use a pool after calling end/i
 ];
 
+// Neon refuses every query once a Free-plan monthly limit is used up (data transfer or compute
+// time), until the next billing month. The database is not broken and nothing is lost, so the
+// shop is treated as offline: work is saved on this computer and synced after the reset.
+// The refusal arrives as an ordinary Postgres error (SQLSTATE XX000) or a NeonDbError with
+//   "Your project has exceeded the data transfer quota. Upgrade your plan to increase limits."
+//   "Your account or project has exceeded the compute time quota. Upgrade your plan ..."
+// The logical-size (storage) quota is NOT matched: reads still work there, only writes fail.
+const QUOTA_MESSAGE_PATTERN = /exceeded the (data transfer|compute time) quota/i;
+const isQuotaExceededError = (err) =>
+  Boolean(err) && typeof err.message === 'string' && QUOTA_MESSAGE_PATTERN.test(err.message);
+
 const isConnectionError = (err) => {
   if (!err) return false;
 
@@ -46,6 +57,8 @@ const isConnectionError = (err) => {
   const code = typeof err.code === 'string' ? err.code : '';
   if (NETWORK_ERROR_CODES.has(code)) return true;
   if (UNAVAILABLE_SQLSTATES.has(code) || code.startsWith('08')) return true;
+
+  if (isQuotaExceededError(err)) return true;
 
   const message = typeof err.message === 'string' ? err.message : '';
   return CONNECTION_MESSAGE_PATTERNS.some((pattern) => pattern.test(message));
@@ -95,4 +108,4 @@ const sendDbError = (res, err, context = 'database operation') => {
   return res.status(status).json(body);
 };
 
-module.exports = { isConnectionError, sendDbError };
+module.exports = { isConnectionError, isQuotaExceededError, sendDbError };
